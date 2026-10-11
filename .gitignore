@@ -8,3 +8,5 @@
 fxc.exe
 # Local AI-assistant scratch/memory; not part of the project.
 .workbuddy-ai/
+# Machine-local docker database credentials (see DATABASES.local.md); contains passwords.
+DATABASES.local.md

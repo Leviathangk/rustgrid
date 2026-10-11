@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
-    DatabaseEditorSpec, Driver, DriverCapabilities, DriverDescriptor, DriverDialect,
-    DriverIconStyle, DriverId, Error, Result,
+    AdvancedFields, Connection, ConnectionConfig, ConnectionFieldLabel, ConnectionFormSpec,
+    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, Driver,
+    DriverCapabilities, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -72,8 +72,23 @@ impl Driver for SqliteDriver {
             connection_form: ConnectionFormSpec {
                 home: ConnectionHomePage::File,
                 tabs: vec![ConnectionPage::Advanced],
-                labels: Vec::new(),
+                // SQLite's "connect timeout" is really the lock / busy timeout: relabel it so it
+                // does not read as a TCP handshake.
+                labels: vec![ConnectionFieldLabel {
+                    field: ConnectionStandardField::ConnectTimeout,
+                    label_key: "form.advanced.busy_timeout",
+                    hint_key: Some("form.advanced.busy_timeout_hint"),
+                    visible_when: None,
+                }],
                 options: Vec::new(),
+                // SQLite reads the connect timeout (as a busy timeout), the read-only flag and the
+                // init SQL; it has no query timeout or keep-alive.
+                advanced: AdvancedFields {
+                    connect_timeout: true,
+                    read_only: true,
+                    init_sql: true,
+                    ..AdvancedFields::NONE
+                },
             },
             order: 40,
         }
@@ -137,4 +152,31 @@ impl Driver for SqliteDriver {
 
 fn map_connect_error(error: sqlx::Error) -> Error {
     Error::Connection(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SQLite relabels the 高级 connect timeout as its lock / busy timeout and honors it (plus the
+    /// read-only flag and the init SQL); it must not offer the fields it cannot apply.
+    #[test]
+    fn connection_form_relabels_the_busy_timeout_and_gates_the_advanced_fields() {
+        let descriptor = SqliteDriver::new().descriptor();
+        let form = &descriptor.connection_form;
+
+        let label = form
+            .labels
+            .iter()
+            .find(|label| label.field == ConnectionStandardField::ConnectTimeout)
+            .expect("the connect timeout should be relabelled");
+        assert_eq!(label.label_key, "form.advanced.busy_timeout");
+        assert!(label.hint_key.is_some());
+
+        assert!(form.advanced.connect_timeout);
+        assert!(form.advanced.read_only);
+        assert!(form.advanced.init_sql);
+        assert!(!form.advanced.query_timeout);
+        assert!(!form.advanced.keepalive);
+    }
 }

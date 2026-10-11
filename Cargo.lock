@@ -7421,6 +7421,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "rustgrid-core",
+ "rustgrid-tunnel",
  "tiberius",
  "tokio",
  "tokio-util",

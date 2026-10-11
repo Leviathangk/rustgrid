@@ -31,11 +31,14 @@ RustGrid 的 Oracle 支持是一个**原生 Rust 引擎**（`crates/rustgrid-ora
 Oracle 的页面由驱动的 `ConnectionFormSpec` 声明(通用表单按声明组页,不匹配引擎 id):
 
 - **常规**:连接别名 / 网络地址 / 端口 / 用户名 / 密码,以及 **服务名 / SID**(即核心的
-  `database` 字段,标签按引擎改名为"服务名 / SID")与 **连接类型** 下拉。默认端口 **1521**。
+  `database` 字段,标签按引擎改名为"服务名 / SID")与 **连接类型** 下拉。引擎自己的字段渲染在
+  "记住密码"之前,所以 **连接类型** 紧跟在 **服务名 / SID** 下方。默认端口 **1521**。
   密码**不写入 profile**(加密存 `secrets.json`)。
-- **TLS/SSL**:TLS 模式 + 证书,外加 Oracle 的 **TCPS 钱包**(`oracle.wallet_location` /
-  `oracle.wallet_password`)。
-- **隧道/代理**、**高级**(超时 / 只读 / 初始 SQL,外加 `oracle.config_dir`)。
+- **隧道/代理**、**高级**(查询超时 / 初始 SQL,外加 TCPS 钱包与 `oracle.config_dir`)。
+
+**没有 TLS/SSL 页**。与 OCI / Navicat 一致:Oracle 的 TLS 就是 **TCPS + 钱包**,由连接描述符
+(TNS 别名 / 连接串)自带协议,或由"配置了钱包"隐含,所以不需要单独的 SSL 页(Navicat 的 Oracle
+连接也只有 常规 / 高级 / SSH)。
 
 常规页的 **连接类型**(`oracle.connect_type`)决定如何解析"服务名 / SID":
 
@@ -43,8 +46,8 @@ Oracle 的页面由驱动的 `ConnectionFormSpec` 声明(通用表单按声明�
 |---|---|
 | `service`(默认) | 填 service / PDB 名,Easy Connect 拼成 `host:port/service`(如 `FREEPDB1`) |
 | `sid` | 填 SID,驱动拼成 `(DESCRIPTION=…(CONNECT_DATA=(SID=<sid>)))` 描述符 |
-| `tns` | 使用 `oracle.tns_alias`(显示在同页) |
-| `connect_string` | 使用 `oracle.connect_string` / 完整描述符(显示在同页) |
+| `tns` | 使用 `oracle.tns_alias`(显示在同页;此时 **服务名 / SID 隐藏**) |
+| `connect_string` | 使用 `oracle.connect_string` / 完整描述符(显示在同页;此时 **服务名 / SID 隐藏**) |
 
 `ConnectionProfile::options`(`BTreeMap`)里可选的 Oracle 专用项,**无需迁移
 `connections.json`**。这些项由驱动的 `ConnectionFormSpec` 声明(每个 `ConnectionFieldSpec`
@@ -56,8 +59,8 @@ Oracle 的页面由驱动的 `ConnectionFormSpec` 声明(通用表单按声明�
 | `oracle.connect_type` | 常规 | service / sid / tns / connect_string(默认 service) |
 | `oracle.tns_alias` | 常规(`tns` 时显示) | `tnsnames.ora` 中的 TNS 别名 |
 | `oracle.connect_string` | 常规(`connect_string` 时显示) | 完整连接串或 connect descriptor(**优先级最高**) |
-| `oracle.wallet_location` | TLS/SSL | 钱包(`ewallet.pem`)目录,用于 TCPS |
-| `oracle.wallet_password` | TLS/SSL | 钱包口令(掩码输入) |
+| `oracle.wallet_location` | 高级 | 钱包(`ewallet.pem`)目录,用于 TCPS |
+| `oracle.wallet_password` | 高级 | 钱包口令(掩码输入) |
 | `oracle.config_dir` | 高级 | 查找 `tnsnames.ora` 的目录 |
 
 连接串的优先级与连接类型无关,保证旧 profile 继续可用:
@@ -65,10 +68,11 @@ Oracle 的页面由驱动的 `ConnectionFormSpec` 声明(通用表单按声明�
 `database`。未填时按 **Easy Connect** 语法拼装:
 
 - 明文：`host:port/service`
-- TLS：`tcps://host:port/service`
+- TCPS：`tcps://host:port/service`
 
-**TLS / 钱包**：core 的 `TlsMode` 与 Oracle 的 "TCPS + 钱包" 不是一一对应——`Disabled` 用明文，
-其余档位一律走 **TCPS**。证书 / 私钥路径不适用，身份校验由钱包承担。
+**TLS / 钱包**：没有 TLS 页,协议按"钱包是否配置"决定——配了 `oracle.wallet_location`(或旧
+profile 里 `TlsMode != Disabled`)就走 **TCPS**,否则明文;TNS 别名 / 连接串则用其自带的协议。
+证书 / 私钥路径不适用,身份校验由钱包承担。
 
 **隧道**：SSH / SOCKS5 / HTTP 隧道与其它网络引擎共用 `rustgrid-tunnel`，连接串会指向本地转发端口。
 
@@ -76,6 +80,8 @@ Oracle 的页面由驱动的 `ConnectionFormSpec` 声明(通用表单按声明�
 取到连接后、执行操作前运行（`oracledb` 的池没有"新建连接回调"，所以只能逐次执行）。
 `PoolConfig` **没有** TCP 连接超时入口，因此 `connect_timeout` 在 Oracle 上**不生效**；
 `read_only` 也没有会话级开关（Oracle 只有事务级 `SET TRANSACTION READ ONLY`），同样不接线。
+这两项(以及 keep-alive)因此通过 `ConnectionFormSpec::advanced` 声明为**不支持**,高级页不再显示;
+Oracle 的高级页只显示 **查询超时** 与 **连接初始化 SQL**。
 
 ## 已实现
 

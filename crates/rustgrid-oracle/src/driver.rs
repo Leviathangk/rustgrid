@@ -4,11 +4,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use oracledb::PoolConfig;
 use rustgrid_core::{
-    Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel,
-    ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
-    ConnectionStandardField, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
-    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TlsMode,
-    UserEditorSpec,
+    AdvancedFields, Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind,
+    ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
+    ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TlsMode, UserEditorSpec,
 };
 
 use crate::connection::OracleConnection;
@@ -113,18 +113,19 @@ impl Driver for OracleDriver {
             database_editor: self.database_editor(),
             connection_form: ConnectionFormSpec {
                 home: ConnectionHomePage::Network,
-                tabs: vec![
-                    ConnectionPage::Tls,
-                    ConnectionPage::Tunnel,
-                    ConnectionPage::Advanced,
-                ],
-                // The universal "default database" field is Oracle's service/SID target; 连接类型
-                // decides which. The wallet (TCPS credential) lives on TLS, the tnsnames.ora
-                // directory on 高级.
+                // Oracle's TLS is TCPS plus an optional wallet, both carried by the connect
+                // descriptor (TNS alias / connect string) or turned on by the wallet's presence —
+                // like OCI/Navicat, Oracle has no separate SSL tab. So the wallet lives on 高级
+                // next to the tnsnames.ora directory.
+                tabs: vec![ConnectionPage::Tunnel, ConnectionPage::Advanced],
+                // The universal "default database" field is Oracle's service/SID target, decided
+                // by 连接类型. It is meaningless (and ignored by `connect_string`) for the TNS
+                // alias / connect string types, so it hides for them.
                 labels: vec![ConnectionFieldLabel {
                     field: ConnectionStandardField::Database,
                     label_key: "form.oracle.database",
                     hint_key: Some("form.oracle.database_hint"),
+                    visible_when: Some(("oracle.connect_type", &["service", "sid"])),
                 }],
                 options: vec![
                     ConnectionFieldSpec {
@@ -173,7 +174,7 @@ impl Driver for OracleDriver {
                         label_key: "form.oracle.wallet_location",
                         hint_key: Some("form.oracle.wallet_location_hint"),
                         kind: ConnectionFieldKind::Folder,
-                        page: ConnectionPage::Tls,
+                        page: ConnectionPage::Advanced,
                         visible_when: None,
                     },
                     ConnectionFieldSpec {
@@ -181,7 +182,7 @@ impl Driver for OracleDriver {
                         label_key: "form.oracle.wallet_password",
                         hint_key: None,
                         kind: ConnectionFieldKind::Secret,
-                        page: ConnectionPage::Tls,
+                        page: ConnectionPage::Advanced,
                         visible_when: None,
                     },
                     ConnectionFieldSpec {
@@ -193,6 +194,13 @@ impl Driver for OracleDriver {
                         visible_when: None,
                     },
                 ],
+                // Oracle honors the query timeout and the session init SQL; it has no connect
+                // timeout, keep-alive or read-only session setting in this driver.
+                advanced: AdvancedFields {
+                    query_timeout: true,
+                    init_sql: true,
+                    ..AdvancedFields::NONE
+                },
             },
             order: 30,
         }
@@ -291,11 +299,12 @@ fn connect_string(config: &ConnectionConfig, host: &str, port: u16) -> String {
     if let Some(alias) = option(config, "oracle.tns_alias") {
         return alias;
     }
-    let protocol = if config.settings.tls.mode == TlsMode::Disabled {
-        "tcp"
-    } else {
-        "tcps"
-    };
+    // Oracle has no SSL tab: TCPS is implied by a legacy TLS profile or by a configured wallet
+    // (the wallet is only useful over TCPS), matching OCI. A TNS alias / connect string above
+    // carries its own protocol.
+    let tls_on = config.settings.tls.mode != TlsMode::Disabled
+        || option(config, "oracle.wallet_location").is_some();
+    let protocol = if tls_on { "tcps" } else { "tcp" };
     // 连接类型 = SID: Easy Connect only takes a service name, so build a connect descriptor.
     if option(config, "oracle.connect_type").as_deref() == Some("sid") {
         let sid = option(config, "oracle.sid").or_else(|| {
@@ -317,10 +326,10 @@ fn connect_string(config: &ConnectionConfig, host: &str, port: u16) -> String {
         .or_else(|| config.database.clone())
         .filter(|service| !service.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_SERVICE.to_string());
-    if config.settings.tls.mode == TlsMode::Disabled {
-        format!("{}:{}/{}", host.trim(), port, service.trim())
-    } else {
+    if tls_on {
         format!("tcps://{}:{}/{}", host.trim(), port, service.trim())
+    } else {
+        format!("{}:{}/{}", host.trim(), port, service.trim())
     }
 }
 
@@ -375,10 +384,21 @@ mod tests {
                 "oracle.config_dir",
             ]
         );
-        // 连接类型 on 常规, the TCPS wallet on TLS, the tnsnames.ora directory on 高级.
+        // 连接类型 on 常规; the TCPS wallet and the tnsnames.ora directory on 高级. Oracle has no
+        // SSL tab (TCPS is carried by the connect descriptor or implied by the wallet).
         assert_eq!(form.options[0].page, ConnectionPage::General);
-        assert_eq!(form.options[3].page, ConnectionPage::Tls);
+        assert_eq!(form.options[3].page, ConnectionPage::Advanced);
         assert_eq!(form.options[5].page, ConnectionPage::Advanced);
+        assert_eq!(
+            form.tabs,
+            vec![ConnectionPage::Tunnel, ConnectionPage::Advanced]
+        );
+        // 服务名/SID is only meaningful for the service/SID connection types; the field hides for
+        // TNS alias / connect string.
+        assert_eq!(
+            form.labels[0].visible_when,
+            Some(("oracle.connect_type", &["service", "sid"][..]))
+        );
         // The TNS alias / connect string are only shown for their connection type.
         assert_eq!(
             form.options[1].visible_when,
@@ -387,6 +407,50 @@ mod tests {
         assert_eq!(
             form.options[2].visible_when,
             Some(("oracle.connect_type", "connect_string"))
+        );
+        // Oracle honors only the query timeout and the session init SQL.
+        assert_eq!(
+            form.advanced,
+            AdvancedFields {
+                query_timeout: true,
+                init_sql: true,
+                ..AdvancedFields::NONE
+            }
+        );
+    }
+
+    #[test]
+    fn a_wallet_turns_easy_connect_into_tcps() {
+        let mut config = ConnectionConfig {
+            driver: DriverId::new("oracle"),
+            host: "db.example.com".to_string(),
+            port: 1521,
+            username: "scott".to_string(),
+            password: None,
+            database: Some("FREEPDB1".to_string()),
+            options: std::collections::BTreeMap::new(),
+            settings: rustgrid_core::ConnectionOptions::default(),
+        };
+        assert_eq!(
+            connect_string(&config, "db.example.com", 1521),
+            "db.example.com:1521/FREEPDB1"
+        );
+
+        // A configured wallet means TCPS, without any TLS tab.
+        config
+            .options
+            .insert("oracle.wallet_location".to_string(), "/wallet".to_string());
+        assert_eq!(
+            connect_string(&config, "db.example.com", 1521),
+            "tcps://db.example.com:1521/FREEPDB1"
+        );
+
+        // A legacy profile with TLS enabled also keeps working.
+        config.options.remove("oracle.wallet_location");
+        config.settings.tls.mode = TlsMode::Required;
+        assert_eq!(
+            connect_string(&config, "db.example.com", 1521),
+            "tcps://db.example.com:1521/FREEPDB1"
         );
     }
 

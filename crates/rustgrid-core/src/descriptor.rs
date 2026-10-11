@@ -83,6 +83,16 @@ pub enum ConnectionStandardField {
     Database,
     /// The file-based engine's database file.
     File,
+    /// The 高级 page's connect timeout (SQLite renames it to its lock/busy timeout).
+    ConnectTimeout,
+    /// The 高级 page's query timeout.
+    QueryTimeout,
+    /// The 高级 page's keep-alive interval.
+    Keepalive,
+    /// The 高级 page's read-only toggle.
+    ReadOnly,
+    /// The 高级 page's session-init SQL.
+    InitSql,
 }
 
 /// A per-engine rename/hint of one standard field. Fields a driver does not list keep the app's
@@ -94,6 +104,11 @@ pub struct ConnectionFieldLabel {
     pub label_key: &'static str,
     /// i18n key of the field's label-row hint, if any.
     pub hint_key: Option<&'static str>,
+    /// Show the standard field only while `options[0]` is one of the listed values (`None` →
+    /// always shown). Oracle uses it to hide 服务名/SID for the connection types that ignore it
+    /// (`tns` / `connect_string`); an unset option counts as the controlling `Select`'s first
+    /// choice.
+    pub visible_when: Option<(&'static str, &'static [&'static str])>,
 }
 
 /// One choice of a [`ConnectionFieldKind::Select`] field.
@@ -141,6 +156,49 @@ pub struct ConnectionFieldSpec {
     pub visible_when: Option<(&'static str, &'static str)>,
 }
 
+/// Which of the standard 高级 fields an engine actually honors. The form hides the ones an engine
+/// leaves off, so a driver never shows a dead knob (e.g. Oracle has no keep-alive or connect
+/// timeout, ODBC reads none of them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvancedFields {
+    /// 连接超时 / connect timeout.
+    pub connect_timeout: bool,
+    /// 查询超时 / per-statement query timeout.
+    pub query_timeout: bool,
+    /// 保持连接 / TCP keep-alive.
+    pub keepalive: bool,
+    /// 只读安全模式 / read-only session.
+    pub read_only: bool,
+    /// 连接初始化 SQL / session init SQL.
+    pub init_sql: bool,
+}
+
+impl AdvancedFields {
+    /// Every standard 高级 field (MySQL, MariaDB, PostgreSQL, SQL Server).
+    pub const ALL: Self = Self {
+        connect_timeout: true,
+        query_timeout: true,
+        keepalive: true,
+        read_only: true,
+        init_sql: true,
+    };
+
+    /// None of them (the generic ODBC driver reads no advanced settings).
+    pub const NONE: Self = Self {
+        connect_timeout: false,
+        query_timeout: false,
+        keepalive: false,
+        read_only: false,
+        init_sql: false,
+    };
+}
+
+impl Default for AdvancedFields {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// Which pages the connection form shows for an engine, how its 常规 page is shaped, how it renames
 /// the standard fields, and where its own option fields go. The form stays engine-agnostic by
 /// reading this instead of matching on the engine id.
@@ -154,6 +212,8 @@ pub struct ConnectionFormSpec {
     pub labels: Vec<ConnectionFieldLabel>,
     /// Engine-specific option fields, each placed on a page.
     pub options: Vec<ConnectionFieldSpec>,
+    /// Which standard 高级 fields the engine honors; the rest are hidden.
+    pub advanced: AdvancedFields,
 }
 
 impl Default for ConnectionFormSpec {
@@ -169,6 +229,7 @@ impl Default for ConnectionFormSpec {
             ],
             labels: Vec::new(),
             options: Vec::new(),
+            advanced: AdvancedFields::ALL,
         }
     }
 }

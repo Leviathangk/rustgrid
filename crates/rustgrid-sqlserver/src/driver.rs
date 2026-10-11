@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel,
-    ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
-    ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab, Driver, DriverCapabilities,
-    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
-    TlsMode, UserEditorSpec,
+    AdvancedFields, Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind,
+    ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
+    ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab, Driver,
+    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Error, Result, TlsMode, UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -134,10 +134,11 @@ impl Driver for SqlServerDriver {
                 .with(DriverCapability::Schemas),
             database_editor: self.database_editor(),
             connection_form: ConnectionFormSpec {
-                // 常规 + TLS + 隧道 + 高级. SQL Server's own fields: 验证 on 常规, and the named
-                // instance / application name on 高级. All three option keys are honored by
-                // `connect` below. Navicat's Active Directory modes need an MSAL/OAuth flow
-                // tiberius does not provide.
+                // 常规 + TLS + 隧道 + 高级. SQL Server's own field is 验证 on 常规 plus the
+                // application name on 高级; both option keys are honored by `connect` below. There
+                // is no 命名实例 field: SQL Browser resolution is not compiled in, so a named
+                // instance is reached through its real TCP port (the 端口 field). Navicat's Active
+                // Directory modes need an MSAL/OAuth flow tiberius does not provide.
                 home: ConnectionHomePage::Network,
                 tabs: vec![
                     ConnectionPage::Tls,
@@ -148,6 +149,7 @@ impl Driver for SqlServerDriver {
                     field: ConnectionStandardField::Database,
                     label_key: "form.sqlserver.database",
                     hint_key: None,
+                    visible_when: None,
                 }],
                 options: vec![
                     ConnectionFieldSpec {
@@ -159,14 +161,6 @@ impl Driver for SqlServerDriver {
                         visible_when: None,
                     },
                     ConnectionFieldSpec {
-                        key: "sqlserver.instance_name",
-                        label_key: "form.sqlserver.instance_name",
-                        hint_key: Some("form.sqlserver.instance_name_hint"),
-                        kind: ConnectionFieldKind::Text,
-                        page: ConnectionPage::Advanced,
-                        visible_when: None,
-                    },
-                    ConnectionFieldSpec {
                         key: "sqlserver.application_name",
                         label_key: "form.sqlserver.application_name",
                         hint_key: Some("form.sqlserver.application_name_hint"),
@@ -175,6 +169,8 @@ impl Driver for SqlServerDriver {
                         visible_when: None,
                     },
                 ],
+                // SQL Server honors every standard 高级 field.
+                advanced: AdvancedFields::ALL,
             },
             order: 50,
         }
@@ -186,16 +182,33 @@ impl Driver for SqlServerDriver {
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
         let settings = &config.settings;
-        let (host, instance) = split_host(&config.host);
+
+        // Route through the tunnel (if any): the pool then points at the local forwarder, which is
+        // kept alive alongside the pool.
+        let (host, port, tunnel) = if settings.tunnel.is_empty() {
+            (config.host.clone(), config.port, None)
+        } else {
+            let tunnel = rustgrid_tunnel::Tunnel::start(
+                settings.tunnel.clone(),
+                config.host.clone(),
+                config.port,
+            )
+            .await
+            .map_err(Error::Connection)?;
+            ("127.0.0.1".to_string(), tunnel.local_port(), Some(tunnel))
+        };
+
+        let (host, instance) = split_host(&host);
 
         let mut server = Config::new();
         server.host(host);
-        server.port(config.port.max(1));
+        server.port(port.max(1));
         server.application_name(
             option(config, "sqlserver.application_name").unwrap_or_else(|| "RustGrid".to_string()),
         );
-        // An explicit instance name wins over the `host\instance` form.
-        if let Some(instance) = option(config, "sqlserver.instance_name").or(instance) {
+        // `host\instance` names the instance for the prelogin handshake. SQL Browser resolution
+        // is not compiled in, so a named instance must still be reached through its real TCP port.
+        if let Some(instance) = instance {
             server.instance_name(instance);
         }
         if let Some(database) = config.database.as_deref().filter(|value| !value.is_empty()) {
@@ -255,7 +268,7 @@ impl Driver for SqlServerDriver {
         }
 
         let pool = builder.build(manager).await.map_err(map_connect_error)?;
-        Ok(Box::new(SqlServerConnection::new(pool)))
+        Ok(Box::new(SqlServerConnection::new(pool, tunnel)))
     }
 }
 
@@ -350,11 +363,7 @@ mod tests {
         let keys: Vec<_> = form.options.iter().map(|field| field.key).collect();
         assert_eq!(
             keys,
-            vec![
-                "sqlserver.authentication",
-                "sqlserver.instance_name",
-                "sqlserver.application_name",
-            ]
+            vec!["sqlserver.authentication", "sqlserver.application_name",]
         );
 
         let ConnectionFieldKind::Select(choices) = &form.options[0].kind else {
@@ -369,10 +378,9 @@ mod tests {
             choices.iter().any(|choice| choice.value == "windows"),
             cfg!(windows)
         );
-        // 验证 is on 常规; the two text fields are on 高级.
+        // 验证 is on 常规; the application name is on 高级.
         assert_eq!(form.options[0].page, ConnectionPage::General);
         assert_eq!(form.options[1].page, ConnectionPage::Advanced);
-        assert_eq!(form.options[2].page, ConnectionPage::Advanced);
         assert_eq!(
             form.labels.first().map(|label| label.field),
             Some(ConnectionStandardField::Database)

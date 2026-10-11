@@ -132,7 +132,7 @@ fn builtin_registry() -> DriverRegistry {
 #[cfg(test)]
 mod tests {
     use super::builtin_registry;
-    use rustgrid_core::{ConnectionFieldKind, ConnectionHomePage, ConnectionPage};
+    use rustgrid_core::{AdvancedFields, ConnectionFieldKind, ConnectionHomePage, ConnectionPage};
 
     /// Every built-in driver's connection-form spec must be internally consistent: each declared
     /// option sits on a page the engine actually shows, keys are unique, and every `visible_when`
@@ -220,7 +220,8 @@ mod tests {
                 }
             }
 
-            // A standard field is renamed at most once.
+            // A standard field is renamed at most once, and any `visible_when` control must be a
+            // declared option whose choices actually include the allowed values.
             let mut renamed = Vec::new();
             for entry in &spec.labels {
                 assert!(!entry.label_key.is_empty(), "{label}: empty label key");
@@ -229,6 +230,37 @@ mod tests {
                     "{label}: standard field renamed twice"
                 );
                 renamed.push(entry.field);
+                if let Some((control, allowed)) = entry.visible_when {
+                    assert!(!allowed.is_empty(), "{label}: empty visible_when list");
+                    let Some(control_field) =
+                        spec.options.iter().find(|field| field.key == control)
+                    else {
+                        panic!("{label}: standard field gated on undeclared option {control}");
+                    };
+                    if let ConnectionFieldKind::Select(choices) = &control_field.kind {
+                        for value in allowed {
+                            assert!(
+                                choices.iter().any(|choice| choice.value == *value),
+                                "{label}: standard field gated on {control}={value}, not one of \
+                                 its choices"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // 高级 must never be an empty page: it needs either a supported standard field or an
+            // engine option placed on it (this is why ODBC declares no 高级 tab at all).
+            if pages.contains(&ConnectionPage::Advanced) {
+                let has_standard = spec.advanced != AdvancedFields::NONE;
+                let has_option = spec
+                    .options
+                    .iter()
+                    .any(|option| option.page == ConnectionPage::Advanced);
+                assert!(
+                    has_standard || has_option,
+                    "{label}: 高级 page has nothing to show"
+                );
             }
 
             // The engines that actually declare engine-specific fields must be covered here, so

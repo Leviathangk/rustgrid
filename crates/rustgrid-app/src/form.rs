@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustgrid_core::{
-    ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
-    ConnectionOptions, ConnectionPage, ConnectionProfile, ConnectionStandardField, DriverId,
+    AdvancedFields, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
+    ConnectionFormSpec, ConnectionHomePage, ConnectionOptions, ConnectionPage, ConnectionProfile,
+    ConnectionStandardField, DriverId,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FormField {
     Name,
     Host,
@@ -74,6 +75,8 @@ pub struct ConnectionForm {
     pub labels: Vec<ConnectionFieldLabel>,
     /// The engine's option fields (each with its page), resolved from the driver's spec.
     pub option_fields: Vec<ConnectionFieldSpec>,
+    /// Which standard 高级 fields the engine honors; the rest are hidden.
+    pub advanced: AdvancedFields,
 }
 
 impl Default for ConnectionForm {
@@ -112,6 +115,7 @@ impl Default for ConnectionForm {
             page: ConnectionPage::General,
             labels: Vec::new(),
             option_fields: Vec::new(),
+            advanced: AdvancedFields::ALL,
         }
     }
 }
@@ -188,6 +192,7 @@ impl ConnectionForm {
             page: ConnectionPage::General,
             labels: Vec::new(),
             option_fields: Vec::new(),
+            advanced: AdvancedFields::ALL,
         }
     }
 
@@ -199,6 +204,7 @@ impl ConnectionForm {
         self.odbc = spec.home == ConnectionHomePage::Odbc;
         self.labels = spec.labels.clone();
         self.option_fields = spec.options.clone();
+        self.advanced = spec.advanced;
         self.pages = std::iter::once(ConnectionPage::General)
             .chain(spec.tabs.iter().copied())
             .collect();
@@ -232,6 +238,35 @@ impl ConnectionForm {
                 self.option_value(key) == value || !self.option_value(field.key).is_empty()
             }
         }
+    }
+
+    /// Whether a standard field is currently shown. A field with a `visible_when` list is shown
+    /// only while its controlling option is one of the listed values; an unset option counts as
+    /// the controlling `Select`'s first choice (its implicit default). Used to hide 服务名/SID for
+    /// Oracle's TNS alias / connect string connection types, which ignore it.
+    pub fn standard_field_visible(&self, field: ConnectionStandardField) -> bool {
+        let Some((key, allowed)) = self
+            .label_override(field)
+            .and_then(|label| label.visible_when)
+        else {
+            return true;
+        };
+        let current = self.option_value(key);
+        // The select's implicit default is its first choice, so an unset option matches it.
+        let default_choice = self
+            .option_fields
+            .iter()
+            .find(|spec| spec.key == key)
+            .and_then(|spec| match &spec.kind {
+                ConnectionFieldKind::Select(choices) => choices.first().map(|choice| choice.value),
+                _ => None,
+            });
+        let effective = if current.is_empty() {
+            default_choice.unwrap_or("")
+        } else {
+            current
+        };
+        allowed.contains(&effective)
     }
 
     pub fn set_value(&mut self, field: FormField, value: String) {
@@ -288,12 +323,15 @@ impl ConnectionForm {
                 missing.push(FormField::Database);
             }
         } else if self.odbc {
-            // An ODBC connection needs a driver name, a DSN or a raw connection string.
-            if self.odbc_driver.trim().is_empty()
-                && self.odbc_dsn.trim().is_empty()
-                && self.odbc_connection_string.trim().is_empty()
-            {
-                missing.push(FormField::OdbcDriver);
+            // An ODBC connection needs a DSN or a raw connection string, or a driver plus a server.
+            let has_dsn = !self.odbc_dsn.trim().is_empty();
+            let has_connection_string = !self.odbc_connection_string.trim().is_empty();
+            if !has_dsn && !has_connection_string {
+                if self.odbc_driver.trim().is_empty() {
+                    missing.push(FormField::OdbcDriver);
+                } else if self.host.trim().is_empty() {
+                    missing.push(FormField::Host);
+                }
             }
         } else {
             if self.host.trim().is_empty() {
@@ -445,11 +483,40 @@ mod tests {
         );
     }
 
+    /// An ODBC connection is valid with a DSN or a connection string; the driver-name path needs a
+    /// server, since the driver builds `Driver={..};Server=..` from it.
+    #[test]
+    fn odbc_requires_a_dsn_or_a_driver_with_a_server() {
+        let mut form = ConnectionForm {
+            name: "test".to_string(),
+            odbc: true,
+            host: String::new(),
+            ..ConnectionForm::default()
+        };
+
+        assert_eq!(form.missing_required(), vec![FormField::OdbcDriver]);
+
+        // A driver name alone is not enough — a Server is required.
+        form.odbc_driver = "ODBC Driver 18 for SQL Server".to_string();
+        assert_eq!(form.missing_required(), vec![FormField::Host]);
+
+        form.host = "db.example.com".to_string();
+        assert!(form.missing_required().is_empty());
+
+        // A DSN or a connection string bypasses the driver + server requirement.
+        form.host.clear();
+        form.odbc_dsn = "my_dsn".to_string();
+        assert!(form.missing_required().is_empty());
+        form.odbc_dsn.clear();
+        form.odbc_connection_string = "Driver={X};Server=y;".to_string();
+        assert!(form.missing_required().is_empty());
+    }
+
     /// The driver's spec is applied to the form: the page list, the 常规 shape, the standard-field
     /// renames, the option placement and the `visible_when` gating.
     #[test]
     fn apply_spec_resolves_pages_labels_and_option_visibility() {
-        use rustgrid_core::{ConnectionFieldKind, ConnectionFieldSpec};
+        use rustgrid_core::{ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec};
 
         let spec = ConnectionFormSpec {
             home: ConnectionHomePage::Odbc,
@@ -458,13 +525,17 @@ mod tests {
                 field: ConnectionStandardField::Database,
                 label_key: "test.database",
                 hint_key: Some("test.database_hint"),
+                visible_when: Some(("test.mode", &["on"])),
             }],
             options: vec![
                 ConnectionFieldSpec {
                     key: "test.mode",
                     label_key: "test.mode",
                     hint_key: None,
-                    kind: ConnectionFieldKind::Select(Vec::new()),
+                    kind: ConnectionFieldKind::Select(vec![ConnectionFieldChoice {
+                        value: "on",
+                        label_key: "test.on",
+                    }]),
                     page: ConnectionPage::General,
                     visible_when: None,
                 },
@@ -477,6 +548,7 @@ mod tests {
                     visible_when: Some(("test.mode", "on")),
                 },
             ],
+            advanced: AdvancedFields::NONE,
         };
 
         let mut form = ConnectionForm::default();
@@ -495,6 +567,8 @@ mod tests {
         assert!(form.odbc);
         assert!(!form.file_based);
         assert_eq!(form.page, ConnectionPage::General);
+        // The advanced gating is carried through.
+        assert_eq!(form.advanced, AdvancedFields::NONE);
 
         // Label overrides are found by standard field; unlisted fields keep the app default.
         assert_eq!(
@@ -503,6 +577,16 @@ mod tests {
             Some("test.database")
         );
         assert!(form.label_override(ConnectionStandardField::Host).is_none());
+
+        // A `visible_when` standard field is shown while its control is one of the allowed values;
+        // an unset option counts as the select's default (its first choice, here "on"), and a
+        // field with no condition is always shown.
+        assert!(form.standard_field_visible(ConnectionStandardField::Database));
+        assert!(form.standard_field_visible(ConnectionStandardField::Host));
+        form.set_option("test.mode", "off".to_string());
+        assert!(!form.standard_field_visible(ConnectionStandardField::Database));
+        // Reset the control so the option-visibility assertions below start from the unset state.
+        form.set_option("test.mode", String::new());
 
         // Options belong to their page.
         let general: Vec<_> = form

@@ -27,11 +27,19 @@ const DEFAULT_SCHEMA: &str = "dbo";
 /// A connected SQL Server session pool, implementing the engine-agnostic [`Connection`].
 pub struct SqlServerConnection {
     pub(crate) pool: bb8::Pool<ConnectionManager>,
+    /// The tunnel forwarding this connection, kept alive for as long as the connection is.
+    _tunnel: Option<rustgrid_tunnel::Tunnel>,
 }
 
 impl SqlServerConnection {
-    pub(crate) fn new(pool: bb8::Pool<ConnectionManager>) -> Self {
-        Self { pool }
+    pub(crate) fn new(
+        pool: bb8::Pool<ConnectionManager>,
+        tunnel: Option<rustgrid_tunnel::Tunnel>,
+    ) -> Self {
+        Self {
+            pool,
+            _tunnel: tunnel,
+        }
     }
 
     /// Check out a pooled client for the duration of one operation.

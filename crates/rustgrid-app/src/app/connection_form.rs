@@ -467,29 +467,8 @@ impl AppView {
 
     fn render_general_page(&self, form: &ConnectionForm, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let driver_name = self
-            .registry
-            .get(&form.driver)
-            .map(|driver| driver.display_name())
-            .unwrap_or_else(|| form.driver.to_string());
-        // A read-only box showing the engine, used on both the network and file layouts.
-        let engine_box = |name: String| -> AnyElement {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .w_full()
-                .h(px(32.0))
-                .px_3()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(rgb(theme.border))
-                .bg(rgb(theme.input_bg))
-                .text_size(px(13.0))
-                .text_color(rgb(theme.text_muted))
-                .child(name)
-                .into_any_element()
-        };
+        // The engine is already named in the window title (`编辑连接 · Oracle`) and is chosen from
+        // the New Connection menu, so 常规 does not repeat it as a read-only field.
         let input = |field: FormField| -> AnyElement {
             match self
                 .form_inputs
@@ -537,13 +516,6 @@ impl AppView {
             ConnectionHomePage::File => {
                 page = page
                     .child(form_field(
-                        t!("form.engine").to_string(),
-                        false,
-                        None,
-                        engine_box(driver_name),
-                        theme,
-                    ))
-                    .child(form_field(
                         label(ConnectionStandardField::Name, "form.alias"),
                         true,
                         error_hint(FormField::Name),
@@ -572,13 +544,6 @@ impl AppView {
             ConnectionHomePage::Odbc => {
                 page = page
                     .child(form_field(
-                        t!("form.engine").to_string(),
-                        false,
-                        None,
-                        engine_box(driver_name),
-                        theme,
-                    ))
-                    .child(form_field(
                         label(ConnectionStandardField::Name, "form.alias"),
                         true,
                         error_hint(FormField::Name),
@@ -593,6 +558,53 @@ impl AppView {
                             Some(combo) => div().w_full().child(combo).into_any_element(),
                             None => div().into_any_element(),
                         },
+                        theme,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_3()
+                            .child(div().flex_1().min_w(px(0.0)).child(form_field(
+                                label(ConnectionStandardField::Host, "form.network"),
+                                false,
+                                error_hint(FormField::Host),
+                                input(FormField::Host),
+                                theme,
+                            )))
+                            .child(div().w(px(150.0)).flex_none().child(form_field(
+                                label(ConnectionStandardField::Port, "form.port"),
+                                false,
+                                None,
+                                input(FormField::Port),
+                                theme,
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_4()
+                            .child(form_field(
+                                label(ConnectionStandardField::Username, "form.username"),
+                                false,
+                                None,
+                                input(FormField::Username),
+                                theme,
+                            ))
+                            .child(form_field(
+                                label(ConnectionStandardField::Password, "form.password"),
+                                false,
+                                None,
+                                input(FormField::Password),
+                                theme,
+                            )),
+                    )
+                    .child(form_field(
+                        label(ConnectionStandardField::Database, "form.database_optional"),
+                        false,
+                        None,
+                        input(FormField::Database),
                         theme,
                     ))
                     .child(form_field(
@@ -615,19 +627,11 @@ impl AppView {
                         None,
                         input(FormField::OdbcEngine),
                         theme,
-                    ))
-                    .child(self.save_password_row(form, theme, cx));
+                    ));
             }
             // A network engine: alias + address/port + credentials + default database.
             ConnectionHomePage::Network => {
                 page = page
-                    .child(form_field(
-                        t!("form.engine").to_string(),
-                        false,
-                        None,
-                        engine_box(driver_name),
-                        theme,
-                    ))
                     .child(form_field(
                         label(ConnectionStandardField::Name, "form.alias"),
                         true,
@@ -693,21 +697,32 @@ impl AppView {
                                 theme,
                             )),
                     )
-                    .child(form_field(
-                        label(ConnectionStandardField::Database, "form.database_optional"),
-                        false,
-                        error_hint(FormField::Database)
-                            .or_else(|| label_hint(ConnectionStandardField::Database)),
-                        input(FormField::Database),
-                        theme,
-                    ))
-                    .child(self.save_password_row(form, theme, cx));
+                    .when(
+                        form.standard_field_visible(ConnectionStandardField::Database),
+                        |page| {
+                            page.child(form_field(
+                                label(ConnectionStandardField::Database, "form.database_optional"),
+                                false,
+                                error_hint(FormField::Database)
+                                    .or_else(|| label_hint(ConnectionStandardField::Database)),
+                                input(FormField::Database),
+                                theme,
+                            ))
+                        },
+                    );
             }
         }
 
-        // The engine's own fields for this page, in declaration order.
+        // The engine's own fields for this page, in declaration order. They render before 记住密码
+        // so a controlling field (Oracle's 连接类型) sits directly under the field it controls
+        // (服务名/SID) instead of at the bottom of the page.
         for option in self.page_option_elements(form, ConnectionPage::General, cx) {
             page = page.child(option);
+        }
+
+        // 记住密码: the network and ODBC layouts both carry credentials; a file engine does not.
+        if form.home != ConnectionHomePage::File {
+            page = page.child(self.save_password_row(form, theme, cx));
         }
 
         page.into_any_element()
@@ -1702,41 +1717,84 @@ impl AppView {
             }
         };
 
-        let mut page = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
+        let advanced = form.advanced;
+        // Per-engine renames of the standard 高级 fields (SQLite's connect timeout is really its
+        // lock / busy timeout, not a TCP handshake).
+        let adv_label = |field: ConnectionStandardField, default_key: &str| -> String {
+            form.label_override(field)
+                .map(|label| t!(label.label_key).to_string())
+                .unwrap_or_else(|| t!(default_key).to_string())
+        };
+        let adv_hint = |field: ConnectionStandardField, default_key: &str| -> String {
+            form.label_override(field)
+                .and_then(|label| label.hint_key)
+                .map(|key| t!(key).to_string())
+                .unwrap_or_else(|| t!(default_key).to_string())
+        };
+        let mut page = div().flex().flex_col().gap_3();
+
+        // 超时与重试: only the timeout / keep-alive controls this engine actually honors.
+        if advanced.connect_timeout || advanced.query_timeout || advanced.keepalive {
+            page = page.child(
                 div()
                     .text_size(px(12.0))
                     .text_color(rgb(theme.text_muted))
                     .child(t!("form.advanced.section_timeout").to_string()),
-            )
-            .child(
+            );
+        }
+        if advanced.connect_timeout || advanced.query_timeout {
+            page = page.child(
                 div()
                     .flex()
                     .flex_row()
                     .gap_3()
-                    .child(advanced_card(
-                        t!("form.advanced.connect_timeout").to_string(),
-                        t!("form.advanced.connect_hint").to_string(),
-                        seconds_input(extra(FormExtra::ConnectTimeout), theme),
-                        theme,
-                    ))
-                    .child(advanced_card(
-                        t!("form.advanced.query_timeout").to_string(),
-                        t!("form.advanced.query_hint").to_string(),
-                        seconds_input(extra(FormExtra::QueryTimeout), theme),
-                        theme,
-                    )),
-            )
-            .child(advanced_card(
-                t!("form.advanced.keepalive").to_string(),
-                t!("form.advanced.keepalive_hint").to_string(),
+                    .when(advanced.connect_timeout, |row| {
+                        row.child(advanced_card(
+                            adv_label(
+                                ConnectionStandardField::ConnectTimeout,
+                                "form.advanced.connect_timeout",
+                            ),
+                            adv_hint(
+                                ConnectionStandardField::ConnectTimeout,
+                                "form.advanced.connect_hint",
+                            ),
+                            seconds_input(extra(FormExtra::ConnectTimeout), theme),
+                            theme,
+                        ))
+                    })
+                    .when(advanced.query_timeout, |row| {
+                        row.child(advanced_card(
+                            adv_label(
+                                ConnectionStandardField::QueryTimeout,
+                                "form.advanced.query_timeout",
+                            ),
+                            adv_hint(
+                                ConnectionStandardField::QueryTimeout,
+                                "form.advanced.query_hint",
+                            ),
+                            seconds_input(extra(FormExtra::QueryTimeout), theme),
+                            theme,
+                        ))
+                    }),
+            );
+        }
+        if advanced.keepalive {
+            page = page.child(advanced_card(
+                adv_label(
+                    ConnectionStandardField::Keepalive,
+                    "form.advanced.keepalive",
+                ),
+                adv_hint(
+                    ConnectionStandardField::Keepalive,
+                    "form.advanced.keepalive_hint",
+                ),
                 seconds_input(extra(FormExtra::KeepaliveInterval), theme),
                 theme,
-            ))
-            .child(
+            ));
+        }
+        // 只读安全模式 — engines that map it onto a read-only session.
+        if advanced.read_only {
+            page = page.child(
                 div()
                     .id("form-read-only")
                     .flex()
@@ -1773,7 +1831,10 @@ impl AppView {
                                         div()
                                             .text_size(px(13.0))
                                             .font_weight(FontWeight::MEDIUM)
-                                            .child(t!("form.advanced.read_only").to_string()),
+                                            .child(adv_label(
+                                                ConnectionStandardField::ReadOnly,
+                                                "form.advanced.read_only",
+                                            )),
                                     )
                                     .child(small_pill(
                                         t!("form.advanced.guard").to_string(),
@@ -1784,18 +1845,27 @@ impl AppView {
                                 div()
                                     .text_size(px(11.5))
                                     .text_color(rgb(theme.text_muted))
-                                    .child(t!("form.advanced.read_only_hint").to_string()),
+                                    .child(adv_hint(
+                                        ConnectionStandardField::ReadOnly,
+                                        "form.advanced.read_only_hint",
+                                    )),
                             ),
                     ),
-            )
-            .child(form_field(
-                t!("form.advanced.init_sql").to_string(),
+            );
+        }
+        // 连接初始化 SQL — engines that run a session-init script on connect.
+        if advanced.init_sql {
+            page = page.child(form_field(
+                adv_label(ConnectionStandardField::InitSql, "form.advanced.init_sql"),
                 false,
                 Some(
                     div()
                         .text_size(px(11.5))
                         .text_color(rgb(theme.text_muted))
-                        .child(t!("form.advanced.init_sql_hint").to_string())
+                        .child(adv_hint(
+                            ConnectionStandardField::InitSql,
+                            "form.advanced.init_sql_hint",
+                        ))
                         .into_any_element(),
                 ),
                 div()
@@ -1805,7 +1875,9 @@ impl AppView {
                     .child(self.extra_input(FormExtra::InitSql)),
                 theme,
             ));
-        // The engine's own 高级 fields (e.g. SQL Server's named instance / application name).
+        }
+        // The engine's own 高级 fields (e.g. SQL Server's named instance / application name, Oracle's
+        // TCPS wallet and tnsnames.ora directory).
         for option in self.page_option_elements(form, ConnectionPage::Advanced, cx) {
             page = page.child(option);
         }

@@ -38,8 +38,8 @@ not a later refactor.
   are managed through the 对象权限管理器. Statements use the
   text/batch path for DDL and `CREATE PROCEDURE`, and the parameterized RPC path for `SELECT`/DML so
   row counts are available. Its connection form declares SQL Server's own fields (验证 →
-  `sqlserver.authentication` = SQL Server / Windows, `sqlserver.instance_name`,
-  `sqlserver.application_name`) through the shared engine-field mechanism; Windows authentication is
+  `sqlserver.authentication` = SQL Server / Windows, `sqlserver.application_name`) through the shared
+  engine-field mechanism; Windows authentication is
   compiled in on Windows only (`winauth` under `[target.'cfg(windows)'.dependencies]`; tiberius' Unix
   `sspi-rs` backend is **not** enabled because it conflicts with the workspace's `russh`/`crypto-bigint`,
   so Unix offers SQL Server authentication only), while Navicat's Active Directory modes need an
@@ -76,7 +76,8 @@ not a later refactor.
   from `ALL_OBJECTS` and `DBMS_METADATA.GET_DDL`, and `view.rs`/`user.rs`/`backup.rs` cover views,
   users/roles and `.rgbak`. See `docs/oracle-driver.md`.
 - `crates/rustgrid-tunnel` — the shared **SSH / SOCKS5 / HTTP** tunnel (local port forwarding) used
-  by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`, `rustgrid-oracle`). Migrated out of
+  by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`, `rustgrid-oracle`,
+  `rustgrid-sqlserver`). Migrated out of
   `rustgrid-mysql` so PostgreSQL reuses it; `rustgrid-mysql` re-exports `Tunnel`.
 - `crates/rustgrid-odbc` — the **generic ODBC driver** (app feature `driver-odbc`, on by default).
   It connects through a user-installed ODBC driver or a raw connection string and speaks the engine's
@@ -211,13 +212,20 @@ touching UI code.
   the whole page spec: `home` (`ConnectionHomePage::{Network,File,Odbc}`) shapes the 常规 page,
   `tabs` lists the pages shown after it (`ConnectionPage::Tls`/`Tunnel`/`Advanced`), `labels`
   renames the standard fields per engine (Oracle's database field is a 服务名/SID, SQL Server's the
-  初始数据库), and `options` declares the engine's own fields — each a `ConnectionFieldSpec` with a
-  `profile.options` key, i18n `label_key`/`hint_key`, a `ConnectionFieldKind`
-  (`Text`/`Secret`/`Folder`/`Select`), the `page` it sits on and an optional `visible_when`
-  condition. The app renders each driver's pages generically (never matching an engine id) and
-  round-trips the options through `ConnectionProfile::options`, so an engine gets its own page set
-  without touching UI code and without migrating `connections.json`. The generic ODBC driver is the
-  one that keeps the plain form (`home: Odbc`).
+  初始数据库) and may hide one while an option is outside its `visible_when` list (Oracle hides
+  服务名/SID for the `tns`/`connect_string` types), and `options` declares the engine's own fields —
+  each a `ConnectionFieldSpec` with a `profile.options` key, i18n `label_key`/`hint_key`, a
+  `ConnectionFieldKind` (`Text`/`Secret`/`Folder`/`Select`), the `page` it sits on and an optional
+  `visible_when` condition. `advanced` (`AdvancedFields`) gates the standard 高级 fields
+  (connect/query timeout, keep-alive, read-only, init SQL) to the ones an engine honors, so no
+  driver shows a dead knob. The app renders each driver's pages generically (never matching an
+  engine id) and round-trips the options through `ConnectionProfile::options`, so an engine gets its
+  own page set without touching UI code and without migrating `connections.json`. Engine option
+  fields on 常规 render **before** 记住密码, so a controlling field (Oracle's 连接类型) sits directly
+  under the field it controls. The 常规 page does **not** repeat the engine in a read-only box — the
+  window title (`新建/编辑连接 · <engine>`) already names it. The generic ODBC driver is the one that
+  keeps the plain form (`home: Odbc`) and declares no TLS/tunnel/advanced pages (it reads none of
+  them).
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
   `crates/rustgrid-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.

@@ -85,9 +85,9 @@ T-SQL 方言、`[]` 标识符引用、`@P1` 参数占位、`sys.*` / `INFORMATIO
 
 ## 连接与 TLS
 
-- 解析 `ConnectionConfig`：host、port(1433)、username、password、database、`settings.tls.mode`、`settings.connect_timeout`、`settings.read_only`（可用 `ApplicationIntent=ReadOnly`）、`settings.init_sql`（连接后执行）。
+- 解析 `ConnectionConfig`：host、port(1433)、username、password、database、`settings.tls.mode`、`settings.connect_timeout`、`settings.read_only`（可用 `ApplicationIntent=ReadOnly`）、`settings.init_sql`（连接后执行）、`settings.tunnel`（SSH / SOCKS5 / HTTP，经 `rustgrid-tunnel`，池指向本地转发端口，连接持有 tunnel 保持存活）。
 - tiberius `Config`：`host`、`port`、`database`、`authentication(AuthMethod::sql_server(user, pass))`、`trust_cert()` 仅用于自测；TLS 映射到 `EncryptionLevel`（Disabled→Off/NotSupported，Preferred→On，Required/VerifyCa/VerifyIdentity→Required；证书校验按 tiberius 能力处理，文档说明限制）。
-- 支持命名实例 / 端口：至少支持 `host,port`；`instance_name` 可作为增强。
+- 命名实例：**不设 `instance_name` 字段**。仓库未启用 tiberius 的 `sql-browser-*`，且连接由 `TcpStream::connect(config.get_addr())` 手工建立（端口始终显式），SQL Browser（1434）解析不会触发；因此命名实例通过它实际的 TCP 端口连接（填在「端口」里）。`host\实例` 仍会被 `split_host` 拆开用于 prelogin 校验。
 - 认证失败 / 网络错误要映射到 `rustgrid_core::Error::Authentication` / `Error::Connection`（参考 `rustgrid-mysql::map_connect_error`）。
 
 ## 分阶段（建议）
