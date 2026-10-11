@@ -696,28 +696,32 @@ impl AppView {
                                 input(FormField::Password),
                                 theme,
                             )),
-                    )
-                    .when(
-                        form.standard_field_visible(ConnectionStandardField::Database),
-                        |page| {
-                            page.child(form_field(
-                                label(ConnectionStandardField::Database, "form.database_optional"),
-                                false,
-                                error_hint(FormField::Database)
-                                    .or_else(|| label_hint(ConnectionStandardField::Database)),
-                                input(FormField::Database),
-                                theme,
-                            ))
-                        },
                     );
             }
         }
 
-        // The engine's own fields for this page, in declaration order. They render before 记住密码
-        // so a controlling field (Oracle's 连接类型) sits directly under the field it controls
-        // (服务名/SID) instead of at the bottom of the page.
+        // The engine's own fields for this page, in declaration order. They render **before** the
+        // standard "default database" field so that a controlling field (Oracle's 连接类型) sits
+        // directly above the target field it controls and keeps the same position no matter which
+        // target is shown (服务名/SID, TNS 别名, 连接串, ...).
         for option in self.page_option_elements(form, ConnectionPage::General, cx) {
             page = page.child(option);
+        }
+
+        // A network engine's default database (Oracle's 服务名/SID, SQL Server's 初始数据库)
+        // follows the engine fields and hides when the engine declares it unused (Oracle's TNS /
+        // connect-string types).
+        if form.home == ConnectionHomePage::Network
+            && form.standard_field_visible(ConnectionStandardField::Database)
+        {
+            page = page.child(form_field(
+                label(ConnectionStandardField::Database, "form.database_optional"),
+                false,
+                error_hint(FormField::Database)
+                    .or_else(|| label_hint(ConnectionStandardField::Database)),
+                input(FormField::Database),
+                theme,
+            ));
         }
 
         // 记住密码: the network and ODBC layouts both carry credentials; a file engine does not.
