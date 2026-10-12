@@ -60,8 +60,14 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rust-i18n = "4"
 directories = "6"
 sys-locale = "0.3"
-gpui = { package = "gpui-pre", version = "0.3.7" }
-gpui-kit = { version = "0.7", features = ["tree-sitter-sql"] }
+# UI engine. `gpui` aliases the engine the ~40 view files import as `use gpui::…`. Enabling
+# gpui-kit's `gpui-fast` feature makes the kit re-export `gpui-fast`, so this alias must point at
+# gpui-fast too (a mismatched pair is two GPUI cores with incompatible element types). Note that
+# gpui-kit still depends on gpui-pre unconditionally, so both engines are compiled; the alternative
+# is the upstream backend: `gpui = { package = "gpui-pre", version = "0.3.7" }` with
+# `gpui-kit = { version = "0.7", features = ["tree-sitter-sql"] }`.
+gpui = { package = "gpui-fast", version = "0.1.7" }
+gpui-kit = { version = "0.7", features = ["tree-sitter-sql", "gpui-fast"] }
 lsp-types = "0.97"
 ropey = "=2.0.0-beta.1"
 sqlparser = "0.62"

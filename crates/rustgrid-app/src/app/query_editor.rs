@@ -182,6 +182,16 @@ impl AppView {
                 this.activate_query(index, cx);
                 this.run_query(true, cx);
             }))
+            .on_action(
+                cx.listener(move |this, _: &SelectAllOccurrences, _window, cx| {
+                    // Ctrl+Shift+L: put a cursor on every occurrence of the current word/selection.
+                    this.activate_query(index, cx);
+                    if let Some(Some(editor)) = this.query_editors.get(index) {
+                        let editor = editor.clone();
+                        editor.update(cx, |editor, cx| editor.select_all_occurrences(cx));
+                    }
+                }),
+            )
             .child(editor)
             .into_any_element()
     }

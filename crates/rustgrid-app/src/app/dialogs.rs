@@ -7,7 +7,15 @@
 use super::*;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
-use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::dialog::{DialogButtonProps, DialogEntrance};
+
+/// The entrance animation every app dialog uses.
+///
+/// A short in-place fade keeps the modal feeling anchored to where it appears — the previous
+/// `set_reduce_motion(true)` in `main.rs` made it appear instantly — while still animating, which
+/// is what 0.7.3's configurable `DialogEntrance` is for. Use `DialogEntrance::None` to go back to
+/// an instant appearance (or `SlideDown` for the kit's legacy slide).
+pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::Fade;
 
 /// gpui-kit anchors a dialog at 10% of the window height, which leaves short dialogs stranded near
 /// the top. Compute a top margin that centres a dialog of roughly `dialog_height` instead — the
@@ -88,6 +96,7 @@ impl AppView {
             let on_close = app.downgrade();
             let footer_ok = app.downgrade();
             dialog
+                .entrance(DIALOG_ENTRANCE)
                 .title(t!("error.title").to_string())
                 .margin_top(centered_margin_top(window, 170.0))
                 .content(move |content, _window, _cx| {
@@ -182,6 +191,7 @@ impl AppView {
             let ok_label = confirm_label.clone();
 
             dialog
+                .entrance(DIALOG_ENTRANCE)
                 .title(title)
                 .margin_top(centered_margin_top(window, 180.0))
                 .content(move |content, _window, _cx| content.child(message.clone()))
@@ -243,6 +253,7 @@ impl AppView {
             let footer_ok = app.downgrade();
             let footer_cancel = app.downgrade();
             dialog
+                .entrance(DIALOG_ENTRANCE)
                 .title(t!("unsaved.title").to_string())
                 .margin_top(centered_margin_top(window, 180.0))
                 .content(|content, _window, _cx| content.child(t!("unsaved.message").to_string()))
@@ -446,6 +457,7 @@ impl AppView {
             let content_app = app.clone();
 
             dialog
+                .entrance(DIALOG_ENTRANCE)
                 .title(title)
                 .margin_top(centered_margin_top(window, 240.0))
                 .footer(
@@ -562,6 +574,7 @@ impl AppView {
             let cancel_app = app.downgrade();
             let content_app = app.clone();
             dialog
+                .entrance(DIALOG_ENTRANCE)
                 .title(title)
                 .w(px(460.0))
                 .margin_top(centered_margin_top(window, 240.0))
@@ -705,6 +718,7 @@ impl AppView {
             let cancel_app = app.downgrade();
             let content_app = app.clone();
             dialog
+                .entrance(DIALOG_ENTRANCE)
                 .title(title)
                 .w(px(420.0))
                 .margin_top(centered_margin_top(window, 160.0))

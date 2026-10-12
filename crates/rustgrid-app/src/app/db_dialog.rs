@@ -18,6 +18,7 @@ impl AppView {
             let cancel_app = app.downgrade();
             let content_app = app.clone();
             dialog
+                .entrance(super::dialogs::DIALOG_ENTRANCE)
                 .title(title)
                 .w(px(560.0))
                 .content(move |content, window, cx| {
@@ -71,6 +72,7 @@ impl AppView {
             let ok_app = app.downgrade();
             let cancel_app = app.downgrade();
             dialog
+                .entrance(super::dialogs::DIALOG_ENTRANCE)
                 .title(title)
                 .margin_top(super::dialogs::centered_margin_top(window, 190.0))
                 .content(move |content, _window, cx| {

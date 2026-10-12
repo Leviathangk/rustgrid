@@ -18,6 +18,7 @@ mod theme;
 mod win_resize;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use rustgrid_core::{BuiltinDriverSource, DriverRegistry};
@@ -58,9 +59,17 @@ fn main() {
         // gpui-kit `Editor`. The grammar itself (tree-sitter `sql`) is linked in through the
         // `tree-sitter-sql` feature and needs no runtime registration.
         install_sql_language(cx);
-        // Dialogs (and gpui-kit's other animated chrome) should appear in place rather than
-        // sliding/fading in; this is the engine's global switch for that.
-        cx.set_reduce_motion(true);
+        // Dialogs enter with a short in-place fade (`dialogs::DIALOG_ENTRANCE`), so motion must stay
+        // on — this replaces the old global `set_reduce_motion(true)` kill switch, which made every
+        // entrance instant. A user who wants no motion can restore that call here.
+        //
+        // `TooltipDefaults` is gpui-kit's application-wide tooltip timing; it covers the kit's
+        // tooltips (buttons, clipboards, ...). Tooltips built on gpui's own `InteractiveElement::
+        // tooltip` keep gpui's 500 ms default unless a caller overrides them per element with
+        // `tooltip_show_delay`.
+        gpui_kit::base::TooltipDefaults::new()
+            .with_show_delay(Duration::from_millis(400))
+            .install(cx);
         let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
         let registry = registry.clone();
         let config = config.clone();

@@ -5,6 +5,7 @@
 //! / `ui::ComboBox`, the inner state needs a `&mut Window`, so it is built on the first render and
 //! pending mutations are flushed there.
 
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
@@ -142,6 +143,45 @@ impl SqlEditor {
         (range.start, range.end)
     }
 
+    /// Put a cursor on every occurrence of the selected text (or of the word at the caret when
+    /// nothing is selected), leaving the first occurrence as the active selection.
+    ///
+    /// This is the programmatic multi-cursor gpui-kit 0.7.3 added: `set_selected_range` replaces
+    /// the selection set and `add_selection` appends each further occurrence. Bound to Ctrl+Shift+L.
+    pub(crate) fn select_all_occurrences(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.state.clone() else {
+            return;
+        };
+        let (haystack, needle) = {
+            let state = state.read(cx);
+            let text = state.value().to_string();
+            let range = state.selected_range();
+            let needle = if range.start == range.end {
+                // Nothing selected: use the identifier under the caret. `selected_range` collapses
+                // to the caret offset when empty, so `range.end` is the cursor position.
+                word_bounds(&text, range.end)
+                    .map(|(start, end)| text[start..end].to_string())
+                    .unwrap_or_default()
+            } else {
+                text.get(range).unwrap_or_default().to_string()
+            };
+            (text, needle)
+        };
+        if needle.is_empty() {
+            return;
+        }
+        let ranges = find_all_occurrences(&haystack, &needle);
+        if ranges.len() < 2 {
+            return;
+        }
+        state.update(cx, |state, cx| {
+            state.set_selected_range(ranges[0].clone(), cx);
+            for range in ranges.iter().skip(1) {
+                state.add_selection(range.clone(), cx);
+            }
+        });
+    }
+
     /// Replace the whole document. Before the first render (and whenever no window is at hand) the
     /// text is queued and applied on the next `flush`.
     pub(crate) fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -261,9 +301,70 @@ fn sql_editor_context_menu(menu: NativeMenu) -> NativeMenu {
     .menu(t!("query.select_all").to_string(), Box::new(SelectAll))
 }
 
+/// The ASCII identifier-ish run around `cursor` (letters, digits and `_`), as a byte range, or
+/// `None` when the caret is not on or immediately after such a character. Used to pick the word for
+/// [`SqlEditor::select_all_occurrences`] when nothing is selected.
+fn word_bounds(text: &str, cursor: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let cursor = cursor.min(bytes.len());
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    // Accept the character under the caret, or the one just before it (the common "caret sits at
+    // the end of the word just typed" case).
+    let anchor = if cursor < bytes.len() && is_word(bytes[cursor]) {
+        cursor
+    } else if cursor > 0 && is_word(bytes[cursor - 1]) {
+        cursor - 1
+    } else {
+        return None;
+    };
+    let mut start = anchor;
+    while start > 0 && is_word(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = anchor + 1;
+    while end < bytes.len() && is_word(bytes[end]) {
+        end += 1;
+    }
+    Some((start, end))
+}
+
+/// Every non-overlapping occurrence of `needle` in `haystack`, in document order.
+fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    if needle.is_empty() {
+        return ranges;
+    }
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let start = from + offset;
+        let end = start + needle.len();
+        ranges.push(start..end);
+        from = end;
+    }
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_all_occurrences_is_non_overlapping_and_ordered() {
+        assert_eq!(find_all_occurrences("a_a_a", "a"), vec![0..1, 2..3, 4..5]);
+        assert_eq!(find_all_occurrences("aaaa", "aa"), vec![0..2, 2..4]);
+        assert!(find_all_occurrences("abc", "").is_empty());
+    }
+
+    #[test]
+    fn word_bounds_reads_the_identifier_under_or_before_the_caret() {
+        let text = "SELECT user_id FROM t";
+        assert_eq!(word_bounds(text, 10), Some((7, 14)));
+        assert_eq!(word_bounds(text, 3), Some((0, 6)));
+        // Caret in the run of spaces between the keywords selects nothing.
+        assert_eq!(word_bounds("SELECT  user_id", 7), None);
+        // End of a word includes the character before the caret.
+        assert_eq!(word_bounds(text, 6), Some((0, 6)));
+    }
 
     use gpui::{Bounds, Point, TestAppContext, WindowBounds, WindowOptions, size};
     use gpui_kit::test::TestWindowExt as _;

@@ -51,6 +51,7 @@ use crate::theme::Theme;
 // half (segmented hours/minutes/seconds with keyboard editing).
 use gpui_kit::component::Sizable;
 use gpui_kit::component::calendar::CalendarState;
+use gpui_kit::component::input::ShowCompletions;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::time_field::{TimeField, TimeFieldState, TimePrecision};
 
@@ -77,7 +78,13 @@ gpui::actions!(queryfile, [CopyQueryFile, PasteQueryFile, RenameQueryFile]);
 
 // Query-editor actions. The editor's own undo/redo bindings handle Ctrl+Z; `RunSelectedQuery`
 // is dispatched from the editor's right-click menu and Ctrl+Enter, and `SaveQuery` from Ctrl+S.
-gpui::actions!(queryeditor, [RunSelectedQuery, SaveQuery]);
+// `SelectAllOccurrences` (Ctrl+Shift+L) puts a cursor on every occurrence of the current word or
+// selection, using gpui-kit 0.7.3's `InputState::add_selection`; `ShowCompletions` (Ctrl+Space) is
+// the kit's editor action for requesting the completion menu on demand.
+gpui::actions!(
+    queryeditor,
+    [RunSelectedQuery, SaveQuery, SelectAllOccurrences]
+);
 
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
@@ -2205,6 +2212,20 @@ impl AppView {
             KeyBinding::new("cmd-enter", RunSelectedQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("ctrl-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("cmd-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
+            // Ask for the completion menu without typing (gpui-kit 0.7.3); the editor leaves it
+            // unbound by default. Ctrl+Shift+L selects every occurrence of the current word or
+            // selection, giving the editor a programmatic multi-cursor.
+            KeyBinding::new("ctrl-space", ShowCompletions, Some(QUERY_EDITOR_CONTEXT)),
+            KeyBinding::new(
+                "ctrl-shift-l",
+                SelectAllOccurrences,
+                Some(QUERY_EDITOR_CONTEXT),
+            ),
+            KeyBinding::new(
+                "cmd-shift-l",
+                SelectAllOccurrences,
+                Some(QUERY_EDITOR_CONTEXT),
+            ),
         ]);
         let app = cx.weak_entity();
         let app_entity = cx.entity();
