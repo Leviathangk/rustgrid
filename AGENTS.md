@@ -662,6 +662,15 @@ make more engines cheap later — do not build those features early.
   `SetWindowSubclass` hook that answers `WM_NCHITTEST` with the real frame-metric resize codes
   before gpui sees the message (`install(window)` is called from `open_window`). Do **not** edit
   the crates.io copy of gpui under `~/.cargo/registry` to fix this — it is not reproducible.
+- **macOS keeps its native window buttons.** gpui suppresses the OS titlebar
+  (`TitlebarOptions::appears_transparent`) so every window draws its own chrome from the window's
+  top-left corner, but AppKit still paints the traffic lights (close/minimise/zoom) over that
+  corner — which used to cover the titlebar's logo and title. Every custom titlebar therefore takes
+  its leading inset from `ui::titlebar_leading_padding(base)`: the plain `base` on Windows/Linux,
+  `base + 78px` on macOS. The app deliberately keeps its own right-hand min/max/close buttons on
+  macOS as well: the app's ✕ goes through `request_quit`'s unsaved-work confirmation, while the
+  native close button reaches `on_window_closed` and quits outright. Dragging in that top strip
+  stays AppKit's — `WindowControlArea::Drag` is Windows-only hit-testing (see `win_resize.rs`).
 - gpui-pre's Windows build script (`gpui-pre-windows`) compiles HLSL whenever `debug_assertions`
   is **off** (release); it is **not** gated by a feature, so `runtime_shaders` does not avoid it.
   On this machine the Windows SDK `fxc.exe` is absent, so a plain `cargo build --release` panics

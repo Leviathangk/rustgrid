@@ -1757,7 +1757,10 @@ pub(super) fn child_window_titlebar(title: String, theme: Theme) -> impl IntoEle
                 .gap_2()
                 .flex_1()
                 .h_full()
-                .px_3()
+                // Platform-aware leading inset: macOS draws its window buttons over this corner
+                // (see `ui::titlebar_leading_padding`).
+                .pr_3()
+                .pl(px(ui::titlebar_leading_padding(12.0)))
                 .text_size(px(12.5))
                 .window_control_area(WindowControlArea::Drag)
                 .child(

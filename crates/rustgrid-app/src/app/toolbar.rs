@@ -49,7 +49,10 @@ impl AppView {
                     .gap_2()
                     .flex_1()
                     .h_full()
-                    .px_3()
+                    // The leading inset is platform-aware: on macOS the native window buttons sit
+                    // over this corner of the content view (see `titlebar_leading_padding`).
+                    .pr_3()
+                    .pl(px(ui::titlebar_leading_padding(12.0)))
                     .text_size(px(12.5))
                     .window_control_area(WindowControlArea::Drag)
                     .child(

@@ -307,7 +307,7 @@ impl AppView {
             .w_full()
             .h(px(48.0))
             .flex_none()
-            .px_4()
+            .pr_4()
             .bg(rgb(theme.dialog_bg))
             .border_b_1()
             .border_color(rgb(theme.border))
@@ -320,6 +320,9 @@ impl AppView {
                     .gap_2()
                     .flex_1()
                     .h_full()
+                    // Platform-aware leading inset: macOS draws its window buttons over this corner
+                    // (see `ui::titlebar_leading_padding`).
+                    .pl(px(ui::titlebar_leading_padding(16.0)))
                     .window_control_area(WindowControlArea::Drag)
                     .child(
                         div()
