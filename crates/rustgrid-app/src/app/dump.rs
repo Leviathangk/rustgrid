@@ -159,10 +159,16 @@ impl AppView {
                 return;
             }
         };
-        let header = format!(
+        let mut header = format!(
             "-- RustGrid SQL dump\n-- Server: {connection_name}\n-- Database: {database}\n-- Date: {}\n\n",
             now_timestamp()
         );
+        // MySQL/MariaDB dumps disable foreign-key checks while the data loads (like mysqldump and
+        // Navicat), so tables can be inserted in any order without 1452 errors.
+        let foreign_keys = dialect == rustgrid_core::DriverDialect::Mysql;
+        if foreign_keys {
+            header.push_str("SET FOREIGN_KEY_CHECKS=0;\n\n");
+        }
         if let Err(error) = file.write_all(header.as_bytes()) {
             if let Some(dialog) = self.dump_dialog.as_mut() {
                 dialog.error = Some(error.to_string());
@@ -204,6 +210,14 @@ impl AppView {
                                 objects.push((BackupObjectKind::Event, name));
                             }
                         }
+                        // Tables before views before routines: `SHOW CREATE VIEW` references its
+                        // base tables, and routines may reference both, so they must already exist.
+                        objects.sort_by_key(|(kind, _)| match kind {
+                            BackupObjectKind::Table => 0,
+                            BackupObjectKind::View => 1,
+                            BackupObjectKind::Function => 2,
+                            BackupObjectKind::Event => 3,
+                        });
                         Ok::<_, Error>(objects)
                     })
                     .await
@@ -354,6 +368,11 @@ impl AppView {
                 });
             }
 
+            if foreign_keys {
+                let _ = file
+                    .lock()
+                    .map(|mut file| file.write_all(b"\nSET FOREIGN_KEY_CHECKS=1;\n"));
+            }
             let _ = file.lock().map(|file| file.sync_all());
             let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
             let _ = this.update(cx, |app, cx| {
@@ -649,8 +668,9 @@ fn quote_object_name(
 
 /// Streams a table's value tuples into the file as batched multi-row `INSERT` statements.
 struct InsertWriter {
+    /// The `INSERT INTO <table> (<columns>) VALUES` prefix, repeated before **every** batch (a
+    /// bare value list is not valid SQL).
     header: String,
-    wrote_header: bool,
     buffer: Vec<String>,
 }
 
@@ -658,19 +678,11 @@ impl InsertWriter {
     fn new(header: String) -> Self {
         Self {
             header,
-            wrote_header: false,
             buffer: Vec::new(),
         }
     }
 
     fn write_row(&mut self, file: &Mutex<std::fs::File>, tuple: &str) -> rustgrid_core::Result<()> {
-        if !self.wrote_header {
-            file.lock()
-                .unwrap()
-                .write_all(self.header.as_bytes())
-                .map_err(Error::other)?;
-            self.wrote_header = true;
-        }
         self.buffer.push(tuple.to_string());
         if self.buffer.len() >= DUMP_BATCH_ROWS {
             self.flush(file)?;
@@ -687,11 +699,50 @@ impl InsertWriter {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        let text = format!("{}\n;\n", self.buffer.join(",\n"));
+        let rows = self.buffer.join(",\n");
         self.buffer.clear();
+        // Every batch carries its own `INSERT` header.
+        let text = format!("{}{rows}\n;\n", self.header);
         file.lock()
             .unwrap()
             .write_all(text.as_bytes())
             .map_err(Error::other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DUMP_BATCH_ROWS, InsertWriter};
+    use std::sync::Mutex;
+
+    /// Every batch of a multi-row `INSERT` must repeat the `INSERT INTO …` header; only the first
+    /// one used to get it, so tables larger than one batch dumped invalid SQL for the rest.
+    #[test]
+    fn insert_batches_repeat_the_header() {
+        let dir = std::env::temp_dir().join(format!("rustgrid-dump-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dump.sql");
+        let file = Mutex::new(std::fs::File::create(&path).unwrap());
+        let header = "INSERT INTO `t` (`a`) VALUES\n".to_string();
+        let mut writer = InsertWriter::new(header.clone());
+        for index in 0..(DUMP_BATCH_ROWS + 3) {
+            writer.write_row(&file, &format!("({index})")).unwrap();
+        }
+        writer.finish(&file).unwrap();
+        drop(file);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text.matches("INSERT INTO `t` (`a`) VALUES").count(),
+            2,
+            "each batch needs its own header:\n{text}"
+        );
+        for statement in text.split(';').filter(|part| !part.trim().is_empty()) {
+            assert!(
+                statement.trim_start().starts_with("INSERT INTO"),
+                "a batch is missing its INSERT header:\n{statement}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
