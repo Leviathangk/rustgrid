@@ -2177,30 +2177,6 @@ impl AppView {
         .detach();
     }
 
-    /// A `复制日志` button for a dialog footer that copies the whole log to the clipboard, so the
-    /// log can be copied without relying on a text selection. Empty (and hidden) when the log has
-    /// no lines yet.
-    pub(super) fn copy_log_button(
-        &self,
-        id: &'static str,
-        log: &[String],
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        if log.is_empty() {
-            return div().into_any_element();
-        }
-        let text = log.join("\n");
-        self.dialog_button(
-            id,
-            t!("sqlfile.copy_log").to_string(),
-            false,
-            cx.listener(move |_this, _event, _window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            }),
-        )
-        .into_any_element()
-    }
-
     /// Append a line to whichever backup/restore/extract/dump/run-SQL dialog is open, keeping it
     /// scrolled.
     pub(super) fn backup_log(&mut self, message: String, cx: &mut Context<'_, Self>) {
@@ -4391,7 +4367,7 @@ pub(super) fn render_log_lines(
             );
         }
     }
-    div()
+    let mut panel = div()
         .relative()
         .flex()
         .flex_col()
@@ -4401,7 +4377,31 @@ pub(super) fn render_log_lines(
         .rounded(px(6.0))
         .border_1()
         .border_color(rgb(theme.border))
-        .overflow_hidden()
+        .overflow_hidden();
+    // The 复制日志 button sits at the log box's top-right corner, so it copies the whole log
+    // without needing a text selection.
+    if !log.is_empty() {
+        let text = log.join("\n");
+        panel = panel.child(
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .items_center()
+                .px_1()
+                .pt_1()
+                .child(ui::popup_button(
+                    "log-copy",
+                    t!("sqlfile.copy_log").to_string(),
+                    false,
+                    theme,
+                    move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    },
+                )),
+        );
+    }
+    panel
         .child(
             div()
                 .id("log-lines")
@@ -4764,17 +4764,17 @@ mod log_selection_tests {
             let _ = window.draw(cx);
         });
         cx.simulate_mouse_down(
-            point(px(4.), px(14.)),
+            point(px(4.), px(45.)),
             MouseButton::Left,
             gpui::Modifiers::default(),
         );
         cx.simulate_mouse_move(
-            point(px(300.), px(14.)),
+            point(px(300.), px(45.)),
             Some(MouseButton::Left),
             gpui::Modifiers::default(),
         );
         cx.simulate_mouse_up(
-            point(px(300.), px(14.)),
+            point(px(300.), px(45.)),
             MouseButton::Left,
             gpui::Modifiers::default(),
         );

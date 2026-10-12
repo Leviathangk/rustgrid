@@ -614,11 +614,10 @@ impl AppView {
             footer = footer.child(self.dialog_button(
                 "runsql-start",
                 t!("sqlfile.start").to_string(),
-                false,
+                true,
                 cx.listener(|this, _event, _window, cx| this.run_sql_file(cx)),
             ));
         }
-        footer = footer.child(self.copy_log_button("runsql-copy-log", &dialog.log, cx));
         footer = footer.child(self.dialog_button(
             "runsql-close",
             t!("backup.close").to_string(),

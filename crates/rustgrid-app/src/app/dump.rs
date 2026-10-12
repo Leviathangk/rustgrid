@@ -571,7 +571,6 @@ impl AppView {
                 cx.listener(|this, _event, _window, cx| this.dump_abort(cx)),
             ));
         }
-        footer = footer.child(self.copy_log_button("dump-copy-log", &dialog.log, cx));
         footer = footer.child(self.dialog_button(
             "dump-close",
             t!("backup.close").to_string(),
