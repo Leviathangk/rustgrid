@@ -1,7 +1,6 @@
 use super::*;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::dialog::DialogButtonProps;
-use std::cell::Cell;
 
 impl AppView {
     /// Opens the database dialog as a `Root`-managed modal.
@@ -18,18 +17,19 @@ impl AppView {
             let ok_app = app.downgrade();
             let cancel_app = app.downgrade();
             let content_app = app.clone();
-            let focused = Rc::new(Cell::new(false));
             dialog
                 .title(title)
                 .w(px(560.0))
                 .content(move |content, window, cx| {
                     let body =
                         content_app.update(cx, |app, cx| app.db_dialog_body(cx).into_any_element());
-                    if !focused.get() {
-                        focused.set(true);
-                        if let Some(input) = content_app.read(cx).db_name_input.clone() {
-                            input.update(cx, |input, cx| input.focus_state(window, cx));
-                        }
+                    // Focus the name field once; the flag lives on `AppView` because the builder is
+                    // re-invoked every frame and would otherwise re-steal focus each frame.
+                    if content_app.update(cx, |app, _cx| {
+                        super::dialogs::take_dialog_focus(&mut app.dialog_focus_done)
+                    }) && let Some(input) = content_app.read(cx).db_name_input.clone()
+                    {
+                        input.update(cx, |input, cx| input.focus_state(window, cx));
                     }
                     content.child(body)
                 })

@@ -22,6 +22,32 @@ pub enum DriverDialect {
 }
 
 impl DriverDialect {
+    /// The characters this dialect wraps an identifier in: `` ` `` for MySQL/SQLite, `[`/`]` for
+    /// SQL Server, `"` for PostgreSQL/Oracle and the generic dialect.
+    pub fn identifier_quote(self) -> (char, char) {
+        match self {
+            DriverDialect::Mysql | DriverDialect::Sqlite => ('`', '`'),
+            DriverDialect::SqlServer => ('[', ']'),
+            DriverDialect::Postgres | DriverDialect::Oracle | DriverDialect::Generic => ('"', '"'),
+        }
+    }
+
+    /// Quote `name` as an identifier in this dialect, doubling any embedded closing quote. Used by
+    /// the SQL-dump writer to build portable `INSERT` column/table names.
+    pub fn quote_identifier(self, name: &str) -> String {
+        let (open, close) = self.identifier_quote();
+        let mut quoted = String::with_capacity(name.len() + 2);
+        quoted.push(open);
+        for ch in name.chars() {
+            if ch == close {
+                quoted.push(close);
+            }
+            quoted.push(ch);
+        }
+        quoted.push(close);
+        quoted
+    }
+
     /// The built-in function names completion offers for this dialect. Kept static so the editor
     /// can offer them without a database round-trip; engines without a curated list contribute
     /// theirs as they are added (their stored functions are still offered).

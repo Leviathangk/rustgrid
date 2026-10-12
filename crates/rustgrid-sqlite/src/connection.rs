@@ -107,6 +107,11 @@ impl Connection for SqliteConnection {
         DriverId::new("sqlite")
     }
 
+    /// SQLite's own scanner, aware of `'`/`"`/`` ` ``/`[...]` quoting and comments.
+    fn split_statements(&self, sql: &str) -> Vec<String> {
+        split_statements(sql)
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         // `database_list` reports the main file (and any attached databases) as `main`.
         let rows = sqlx::query("PRAGMA database_list")

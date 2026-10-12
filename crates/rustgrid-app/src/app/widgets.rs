@@ -296,6 +296,16 @@ impl AppView {
                         }),
                     ))
                     .child(self.context_item(
+                        "db-run-sql",
+                        t!("database.run_sql_file").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.dump_submenu = None;
+                            this.open_run_sql_file(ci, di, cx);
+                        }),
+                    ))
+                    .child(self.dump_sql_submenu_item(ci, di, cx))
+                    .child(self.context_item(
                         "db-refresh",
                         t!("database.refresh").to_string(),
                         cx.listener(move |this, _event, _window, cx| {
@@ -1098,8 +1108,18 @@ impl AppView {
         ui::popup_panel(theme)
             .left(menu.position.x)
             .top(menu.position.y)
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                // The 转储 SQL 文件 flyout overflows past this panel, so a click on it also reads
+                // as "outside" here. Keep the menu alive when the click is on the flyout.
+                let on_flyout = this
+                    .dump_flyout_bounds
+                    .borrow()
+                    .is_some_and(|bounds| bounds.contains(&event.position));
+                if on_flyout {
+                    return;
+                }
                 this.context_menu = None;
+                this.dump_submenu = None;
                 cx.notify();
             }))
             .child(items)
@@ -1187,4 +1207,134 @@ impl AppView {
             .text_color(rgb(theme.text_muted))
             .child(label)
     }
+
+    /// The database context menu's 转储 SQL 文件 row: a submenu trigger that reveals a right-hand
+    /// flyout with the three dump modes (结构和数据 / 仅结构 / 仅数据). The flyout is a child of
+    /// this row, positioned just past the menu's right edge, so it reads like Navicat's submenu.
+    fn dump_sql_submenu_item(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> Stateful<Div> {
+        let theme = self.theme;
+        let open = self.dump_submenu == Some((connection_index, database_index));
+        let bounds_slot = self.dump_flyout_bounds.clone();
+        let clear_slot = self.dump_flyout_bounds.clone();
+        let mut base = div()
+            .relative()
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(26.0))
+            .px_3()
+            .gap_1()
+            .text_size(px(12.5));
+        if open {
+            // The flyout panel is this row's last child; its rectangle is what an outside click
+            // must be tested against (the flyout overflows the menu panel).
+            base = base.on_children_prepainted(move |bounds, _window, _cx| {
+                *bounds_slot.borrow_mut() = bounds.last().copied();
+            });
+        } else {
+            // Drop the stale flyout rectangle so a later outside click closes the menu normally.
+            *clear_slot.borrow_mut() = None;
+        }
+        let row = base
+            .id("db-dump-sql")
+            .cursor_pointer()
+            .hover(move |style| {
+                style
+                    .bg(rgb(theme.tree_hover_bg))
+                    .text_color(rgb(theme.tree_selected_text))
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                // Open the flyout when the row is hovered (Navicat's submenu behaviour). It stays
+                // open until the context menu closes, so moving the pointer onto it is safe.
+                if *hovered && this.dump_submenu != Some((connection_index, database_index)) {
+                    this.dump_submenu = Some((connection_index, database_index));
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.dump_submenu = Some((connection_index, database_index));
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(t!("database.dump_sql").to_string()),
+            )
+            .child(
+                svg()
+                    .path("icons/chevron-right.svg")
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            );
+        if open {
+            row.child(dump_sql_flyout(connection_index, database_index, theme, cx))
+        } else {
+            row
+        }
+    }
+}
+
+/// The 转储 SQL 文件 flyout: the three dump modes, each starting a whole-database `.sql` dump.
+fn dump_sql_flyout(
+    connection_index: usize,
+    database_index: usize,
+    theme: Theme,
+    cx: &mut Context<'_, AppView>,
+) -> AnyElement {
+    let modes = [
+        (
+            "db-dump-all",
+            t!("database.dump_structure_and_data").to_string(),
+            DumpMode::StructureAndData,
+        ),
+        (
+            "db-dump-structure",
+            t!("database.dump_structure").to_string(),
+            DumpMode::Structure,
+        ),
+        (
+            "db-dump-data",
+            t!("database.dump_data").to_string(),
+            DumpMode::Data,
+        ),
+    ];
+    let mut flyout = ui::popup_panel(theme)
+        .left(px(168.0))
+        .top(px(0.0))
+        .w(px(150.0))
+        .p_0p5();
+    for (id, label, mode) in modes {
+        flyout = flyout.child(
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .w_full()
+                .h(px(26.0))
+                .px_3()
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .hover(move |style| {
+                    style
+                        .bg(rgb(theme.tree_hover_bg))
+                        .text_color(rgb(theme.tree_selected_text))
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.context_menu = None;
+                    this.dump_submenu = None;
+                    this.request_dump(connection_index, database_index, mode, cx);
+                }))
+                .child(label),
+        );
+    }
+    flyout.into_any_element()
 }

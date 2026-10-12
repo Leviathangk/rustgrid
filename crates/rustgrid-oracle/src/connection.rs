@@ -247,6 +247,11 @@ impl Connection for OracleConnection {
         DriverId::new("oracle")
     }
 
+    /// PL/SQL's scanner, keeping `BEGIN … END;` blocks and `q'[…]'` quotes whole.
+    fn split_statements(&self, sql: &str) -> Vec<String> {
+        split_statements(sql)
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         // Oracle has no database list; the tree shows the current service/PDB as the one database.
         let name = self

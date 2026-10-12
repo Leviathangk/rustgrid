@@ -300,6 +300,14 @@ pub trait Connection: Send + Sync {
         Ok(vec![self.execute_query(database, sql).await?])
     }
 
+    /// Split a SQL script into individual statements, for the "Run SQL File" feature, so the app
+    /// can run (and report on) one statement at a time. The default cuts on top-level semicolons
+    /// while respecting string literals, quoted identifiers and comments; engines with a
+    /// block-structured dialect override it with their own scanner.
+    fn split_statements(&self, sql: &str) -> Vec<String> {
+        crate::split::split_statements(sql)
+    }
+
     /// Create a database with the given engine-agnostic options. Fields the engine does not use
     /// (empty strings) are omitted, letting the engine pick its defaults.
     async fn create_database(&self, name: &str, options: &DatabaseOptions) -> Result<()>;

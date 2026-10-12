@@ -132,6 +132,12 @@ impl Connection for MysqlConnection {
         DriverId::new(self.engine.driver_id())
     }
 
+    /// MySQL's own scanner: top-level semicolons, honouring `'`/`"`/`` ` `` literals, `--`/`#`
+    /// line comments and `/* */` block comments.
+    fn split_statements(&self, sql: &str) -> Vec<String> {
+        split_statements(sql)
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         let rows = sqlx::query("SHOW DATABASES")
             .fetch_all(&self.pool)

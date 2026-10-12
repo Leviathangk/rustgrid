@@ -417,6 +417,121 @@ struct ExtractSqlDialog {
     error: Option<String>,
 }
 
+/// Which parts of a database a *Dump SQL File* writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DumpMode {
+    /// Both the object `CREATE` DDL and the table data.
+    StructureAndData,
+    /// Only the object `CREATE` DDL.
+    Structure,
+    /// Only the table data (`INSERT` statements).
+    Data,
+}
+
+impl DumpMode {
+    fn includes_structure(self) -> bool {
+        matches!(self, DumpMode::StructureAndData | DumpMode::Structure)
+    }
+
+    fn includes_data(self) -> bool {
+        matches!(self, DumpMode::StructureAndData | DumpMode::Data)
+    }
+}
+
+/// State of the "Dump SQL File" dialog: a whole-database `CREATE`+data dump written straight to a
+/// `.sql` file, with the same async log/progress view as the backup dialogs.
+struct DumpSqlDialog {
+    connection_index: usize,
+    database_index: usize,
+    mode: DumpMode,
+    /// The `.sql` file the dump writes to, chosen through the system save dialog.
+    output_path: Option<std::path::PathBuf>,
+    running: bool,
+    /// Set by 停止 to abort the run loop early (checked between objects/rows).
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    log: Vec<String>,
+    /// Keeps the info log scrolled to the newest line while the operation runs.
+    log_scroll: ScrollHandle,
+    /// Progress counters for the run's summary.
+    total: usize,
+    success: usize,
+    failed: usize,
+    rows_total: usize,
+    rows_done: usize,
+    started: Option<std::time::Instant>,
+    elapsed: Option<std::time::Duration>,
+    error: Option<String>,
+}
+
+/// The encodings offered by the Run SQL File dialog's 编码 dropdown, paired with the
+/// `encoding_rs` codec used to decode the script.
+struct RunSqlEncoding {
+    /// The label shown in the dropdown, e.g. `65001 (UTF-8)`.
+    label: &'static str,
+    encoding: &'static encoding_rs::Encoding,
+}
+
+/// The script encodings the Run SQL File dialog offers, in display order. UTF-8 is the default.
+const RUN_SQL_ENCODINGS: [RunSqlEncoding; 6] = [
+    RunSqlEncoding {
+        label: "65001 (UTF-8)",
+        encoding: encoding_rs::UTF_8,
+    },
+    RunSqlEncoding {
+        label: "936 (GBK)",
+        encoding: encoding_rs::GBK,
+    },
+    RunSqlEncoding {
+        label: "54936 (GB18030)",
+        encoding: encoding_rs::GB18030,
+    },
+    RunSqlEncoding {
+        label: "950 (Big5)",
+        encoding: encoding_rs::BIG5,
+    },
+    RunSqlEncoding {
+        label: "932 (Shift-JIS)",
+        encoding: encoding_rs::SHIFT_JIS,
+    },
+    RunSqlEncoding {
+        label: "1252 (Windows-1252)",
+        encoding: encoding_rs::WINDOWS_1252,
+    },
+];
+
+/// State of the "Run SQL File" dialog: run a `.sql` script against a connection/database one
+/// statement at a time, with a log and per-statement progress.
+struct RunSqlDialog {
+    connection_index: usize,
+    database_index: usize,
+    /// The schema the script runs under, for schema-qualified engines; empty otherwise.
+    schema: String,
+    /// The chosen script file.
+    file_path: Option<std::path::PathBuf>,
+    /// The index into [`RUN_SQL_ENCODINGS`] of the chosen encoding.
+    encoding: usize,
+    /// Whether a failing statement is logged and skipped rather than aborting the run.
+    continue_on_error: bool,
+    tab: BackupDialogTab,
+    running: bool,
+    /// Set by 停止 to abort the run loop early (checked between statements).
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    log: Vec<String>,
+    /// Keeps the info log scrolled to the newest line while the operation runs.
+    log_scroll: ScrollHandle,
+    /// The number of statements the script split into (查询).
+    total: usize,
+    success: usize,
+    failed: usize,
+    started: Option<std::time::Instant>,
+    elapsed: Option<std::time::Duration>,
+    error: Option<String>,
+    /// The dialog's 文件 field, built when the dialog opens.
+    file_input: Option<Entity<TextInput>>,
+    /// The dialog's 编码 dropdown, built when the dialog opens.
+    encoding_combo: Option<Entity<ComboBox>>,
+}
+
 /// Which page of the export wizard (P1..P4) is showing. P4 merges Navicat's options page with the
 /// run/log page, so the wizard is four steps.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1531,6 +1646,16 @@ pub struct AppView {
     restore_dialog: Option<RestoreBackupDialog>,
     /// The open "extract SQL" dialog, if any.
     extract_dialog: Option<ExtractSqlDialog>,
+    /// The open "Dump SQL File" dialog, if any.
+    dump_dialog: Option<DumpSqlDialog>,
+    /// The open "Run SQL File" dialog, if any.
+    run_sql_dialog: Option<RunSqlDialog>,
+    /// The database context menu's 转储 SQL 文件 flyout target `(connection, database)`, while open.
+    dump_submenu: Option<(usize, usize)>,
+    /// Window-space bounds of that flyout while it is shown. The flyout overflows past the menu
+    /// panel, so the panel's `on_mouse_down_out` would otherwise close the menu on a click that
+    /// actually lands on the flyout (before the item's click can complete).
+    dump_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// The configuration-name field of the "new backup" dialog.
     backup_name_input: Option<Entity<TextInput>>,
     backup_name_focus_pending: bool,
@@ -1684,8 +1809,20 @@ pub struct AppView {
     pending_toasts: Vec<(ToastKind, String)>,
     /// A close/navigate action waiting on the "discard unsaved changes?" confirmation.
     unsaved_confirm: Option<PendingAction>,
+    /// Whether the currently-open modal dialog has already given its first field the focus.
+    ///
+    /// `Root` re-invokes a dialog's builder every frame, so a one-shot "focus the name field"
+    /// guard must live outside the builder. Held here (one dialog is open at a time) so the
+    /// guard survives across frames instead of re-stealing focus from the dialog's other
+    /// controls — most visibly the search box of a combo box.
+    dialog_focus_done: bool,
     /// The kind of dialog last opened through `Root`, if any.
     opened_dialog: Option<DialogKind>,
+    /// Shared text-selection handle for every `[Msg]` log view (backup/restore/extract/dump/run
+    /// SQL). One handle per window is enough — only one log is on screen at a time — and reusing it
+    /// keeps a selection alive across the dialog's per-frame rebuilds while letting a drag select
+    /// and copy across log lines.
+    log_handle: gpui_kit::base::TextSelectionHandle,
     window_bounds_subscription: Option<Subscription>,
     theme_setting: ThemeSetting,
     theme: Theme,
@@ -1879,6 +2016,7 @@ mod db_dialog;
 mod design;
 mod design_view;
 mod dialogs;
+mod dump;
 mod export;
 mod form;
 mod grid;
@@ -1901,6 +2039,7 @@ mod query_editor;
 mod query_view;
 mod routine;
 mod routine_view;
+mod runsql;
 mod sidebar;
 mod sql_completion;
 mod tabs;
@@ -2041,6 +2180,10 @@ impl AppView {
             new_backup_dialog: None,
             restore_dialog: None,
             extract_dialog: None,
+            dump_dialog: None,
+            run_sql_dialog: None,
+            dump_submenu: None,
+            dump_flyout_bounds: Rc::new(RefCell::new(None)),
             backup_name_input: None,
             backup_name_focus_pending: false,
             backup_clipboard: None,
@@ -2182,7 +2325,9 @@ impl AppView {
             error_dialog: None,
             pending_toasts: Vec::new(),
             unsaved_confirm: None,
+            dialog_focus_done: false,
             opened_dialog: None,
+            log_handle: gpui_kit::base::TextSelectionHandle::new(String::new(), cx),
             window_bounds_subscription: None,
             theme_setting,
             theme: Theme::dark(),

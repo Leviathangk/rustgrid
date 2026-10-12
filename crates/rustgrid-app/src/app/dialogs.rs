@@ -4,8 +4,6 @@
 //! truth; [`AppView::sync_dialog`] reconciles it with the Root dialog stack each render, opening
 //! or closing as needed.
 
-use std::cell::Cell;
-
 use super::*;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
@@ -17,6 +15,21 @@ use gpui_kit::component::dialog::DialogButtonProps;
 pub(super) fn centered_margin_top(window: &Window, dialog_height: f32) -> Pixels {
     let viewport = window.viewport_size().height;
     ((viewport - px(dialog_height)) * 0.5).max(px(24.0))
+}
+
+/// One-shot guard for a dialog's initial focus.
+///
+/// `Root` re-invokes a dialog's builder on every frame, so the "focus the first field once" flag
+/// must persist across frames (it lives on `AppView`). Returns `true` the first time and `false`
+/// afterwards, so a later control (for example a combo box's search field) keeps the focus the
+/// user gives it instead of being overridden each frame.
+pub(super) fn take_dialog_focus(done: &mut bool) -> bool {
+    if *done {
+        false
+    } else {
+        *done = true;
+        true
+    }
 }
 
 impl AppView {
@@ -46,6 +59,8 @@ impl AppView {
             return;
         }
         self.opened_dialog = desired;
+        // A freshly-opened dialog gives its first field the focus once (see the flags' doc).
+        self.dialog_focus_done = false;
 
         // Drop whatever was showing before switching to the new state.
         window.close_all_dialogs(cx);
@@ -428,7 +443,6 @@ impl AppView {
             let on_close = app.downgrade();
             let footer_ok = app.downgrade();
             let footer_cancel = app.downgrade();
-            let focused = Rc::new(Cell::new(false));
             let content_app = app.clone();
 
             dialog
@@ -472,8 +486,9 @@ impl AppView {
                             .unwrap_or(false);
                         (save, app.theme)
                     });
-                    if !focused.get() {
-                        focused.set(true);
+                    let focus_now = content_app
+                        .update(cx, |app, _cx| take_dialog_focus(&mut app.dialog_focus_done));
+                    if focus_now {
                         let handle = input.read(cx).focus_handle();
                         window.focus(&handle, cx);
                     }
@@ -546,7 +561,6 @@ impl AppView {
             let ok_app = app.downgrade();
             let cancel_app = app.downgrade();
             let content_app = app.clone();
-            let focused = Rc::new(Cell::new(false));
             dialog
                 .title(title)
                 .w(px(460.0))
@@ -555,11 +569,11 @@ impl AppView {
                     let body = content_app.update(cx, |app, cx| {
                         app.save_query_dialog_body(cx).into_any_element()
                     });
-                    if !focused.get() {
-                        focused.set(true);
-                        if let Some(input) = content_app.read(cx).query_name_input.clone() {
-                            input.update(cx, |input, cx| input.focus_state(window, cx));
-                        }
+                    if content_app
+                        .update(cx, |app, _cx| take_dialog_focus(&mut app.dialog_focus_done))
+                        && let Some(input) = content_app.read(cx).query_name_input.clone()
+                    {
+                        input.update(cx, |input, cx| input.focus_state(window, cx));
                     }
                     content.child(body)
                 })
@@ -690,7 +704,6 @@ impl AppView {
             let ok_app = app.downgrade();
             let cancel_app = app.downgrade();
             let content_app = app.clone();
-            let focused = Rc::new(Cell::new(false));
             dialog
                 .title(title)
                 .w(px(420.0))
@@ -699,11 +712,11 @@ impl AppView {
                     let body = content_app.update(cx, |app, cx| {
                         app.create_table_dialog_body(cx).into_any_element()
                     });
-                    if !focused.get() {
-                        focused.set(true);
-                        if let Some(input) = content_app.read(cx).create_table_input.clone() {
-                            input.update(cx, |input, cx| input.focus_state(window, cx));
-                        }
+                    if content_app
+                        .update(cx, |app, _cx| take_dialog_focus(&mut app.dialog_focus_done))
+                        && let Some(input) = content_app.read(cx).create_table_input.clone()
+                    {
+                        input.update(cx, |input, cx| input.focus_state(window, cx));
                     }
                     content.child(body)
                 })
@@ -1058,5 +1071,27 @@ impl AppView {
             ),
             None => (String::new(), String::new(), t!("form.ok").to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::take_dialog_focus;
+
+    #[test]
+    fn dialog_initial_focus_is_taken_once() {
+        let mut done = false;
+        assert!(
+            take_dialog_focus(&mut done),
+            "first frame focuses the field"
+        );
+        assert!(
+            !take_dialog_focus(&mut done),
+            "later frames leave focus alone"
+        );
+        assert!(!take_dialog_focus(&mut done));
+        // A newly-opened dialog resets the flag, so its field is focused again.
+        done = false;
+        assert!(take_dialog_focus(&mut done));
     }
 }

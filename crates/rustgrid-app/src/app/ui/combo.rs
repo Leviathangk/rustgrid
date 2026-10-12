@@ -307,3 +307,204 @@ impl Render for ComboBox {
         container.child(combo)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Bounds, Point, TestAppContext, WindowBounds, WindowOptions, size};
+    use gpui_kit::TestSupportExt as _;
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::TestWindowExt as _;
+
+    struct ComboHarness {
+        combo: Entity<ComboBox>,
+        show: bool,
+    }
+
+    impl Render for ComboHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let mut root = div().size_full().p_4();
+            if self.show {
+                root = root.child(
+                    div()
+                        .id("combo-host")
+                        .test_support()
+                        .w(px(300.0))
+                        .h(px(24.0))
+                        .child(self.combo.clone()),
+                );
+            }
+            root
+        }
+    }
+
+    fn options() -> Vec<ComboOption> {
+        vec![
+            ComboOption::plain("macce"),
+            ComboOption::plain("sjis"),
+            ComboOption::plain("utf8mb4"),
+        ]
+    }
+
+    fn query(harness: &Entity<ComboHarness>, cx: &App) -> String {
+        let combo = harness.read(cx).combo.read(cx);
+        let state = combo.state.clone().expect("combo state");
+        state.read(cx).query(cx).to_string()
+    }
+
+    fn open(cx: &mut TestAppContext) -> (gpui::AnyWindowHandle, Entity<ComboHarness>) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            let combo = cx.new(|cx| {
+                ComboBox::new(Theme::light(), options(), String::new(), 300.0, cx)
+                    .field_width(300.0)
+            });
+            let harness = cx.new(|_| ComboHarness { combo, show: true });
+            let (handle, _) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(800.0), px(600.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| harness.clone(),
+            )
+            .expect("open test window");
+            (handle, harness)
+        })
+    }
+
+    #[gpui_kit::test]
+    fn combo_search_receives_input_in_a_plain_window(cx: &mut TestAppContext) {
+        let (handle, harness) = open(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("combo-host", cx);
+            window.render_frame(cx);
+            window.input("mac", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(query(&harness, cx), "mac"));
+    }
+
+    #[gpui_kit::test]
+    fn combo_search_receives_input_inside_a_dialog(cx: &mut TestAppContext) {
+        let (handle, harness) = open(cx);
+        let combo = cx.read(|cx| harness.read(cx).combo.clone());
+        // The harness must not render the combo itself, or it would appear twice (behind the
+        // dialog and inside it).
+        harness.update(cx, |harness, cx| {
+            harness.show = false;
+            cx.notify();
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.open_dialog(cx, move |dialog, _window, _cx| {
+                let combo = combo.clone();
+                dialog.title("Test").content(move |content, _window, _cx| {
+                    content.child(
+                        div()
+                            .id("combo-host")
+                            .test_support()
+                            .w(px(300.0))
+                            .h(px(24.0))
+                            .child(combo.clone()),
+                    )
+                })
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.click("combo-host", cx);
+            window.render_frame(cx);
+            window.input("mac", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(query(&harness, cx), "mac"));
+    }
+
+    /// The New/Edit Database dialog keeps a name field focused once and then lets the user move to
+    /// the combo box. Its builder runs every frame, so the one-shot focus must survive across
+    /// frames — otherwise the name field is re-focused each frame and the combo's search box can
+    /// never hold the focus (this is what `AppView::dialog_focus_done` guards).
+    #[gpui_kit::test]
+    fn combo_search_survives_a_dialog_that_focuses_its_field_once(cx: &mut TestAppContext) {
+        use crate::app::dialogs::take_dialog_focus;
+        use crate::app::ui::{TextInput, TextInputOptions};
+        use std::cell::RefCell;
+
+        let (handle, harness) = open(cx);
+        let combo = cx.read(|cx| harness.read(cx).combo.clone());
+        harness.update(cx, |harness, cx| {
+            harness.show = false;
+            cx.notify();
+        });
+
+        let name = cx.new(|cx| {
+            TextInput::new(
+                Theme::light(),
+                String::new(),
+                TextInputOptions::default(),
+                cx,
+            )
+        });
+        let focused = Rc::new(RefCell::new(false));
+        let name_dialog = name.clone();
+        let combo_dialog = combo.clone();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.open_dialog(cx, move |dialog, _window, _cx| {
+                let name = name_dialog.clone();
+                let combo = combo_dialog.clone();
+                let focused = focused.clone();
+                dialog.title("Test").content(move |content, window, cx| {
+                    if take_dialog_focus(&mut focused.borrow_mut()) {
+                        name.update(cx, |input, cx| input.focus_state(window, cx));
+                    }
+                    content.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("name-host")
+                                    .test_support()
+                                    .w(px(300.0))
+                                    .h(px(24.0))
+                                    .child(name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("combo-host")
+                                    .test_support()
+                                    .w(px(300.0))
+                                    .h(px(24.0))
+                                    .child(combo.clone()),
+                            ),
+                    )
+                })
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.click("combo-host", cx);
+            window.render_frame(cx);
+            window.input("mac", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(query(&harness, cx), "mac"));
+    }
+}

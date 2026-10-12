@@ -632,6 +632,7 @@ impl TreePane {
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     this.selected = Some(format!("db-{connection_index}-{database_index}"));
                     let _ = menu_app.update(cx, |app, cx| {
+                        app.dump_submenu = None;
                         app.context_menu = Some(ContextMenu {
                             target: ContextTarget::Database {
                                 connection_index,
@@ -773,15 +774,22 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, _event, window, cx| {
+            .on_click(cx.listener(move |this, event, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
-                let name = click_name.clone();
-                let _ = app.update(cx, |app, cx| {
-                    app.select_schema(connection_index, database_index, name, cx);
-                });
+                // A schema opens on a double-click (like a database), not on a single click: a
+                // plain click only highlights the row.
+                let double_click =
+                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                if double_click {
+                    let name = click_name.clone();
+                    let _ = app.update(cx, |app, cx| {
+                        app.select_schema(connection_index, database_index, name, cx);
+                    });
+                }
+                cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Right,

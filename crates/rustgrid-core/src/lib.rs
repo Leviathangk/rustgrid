@@ -7,6 +7,7 @@ pub mod model;
 pub mod options;
 pub mod registry;
 pub mod routine;
+pub mod split;
 pub mod user;
 pub mod view;
 

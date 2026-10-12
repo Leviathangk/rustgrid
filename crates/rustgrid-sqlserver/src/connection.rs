@@ -327,6 +327,12 @@ impl Connection for SqlServerConnection {
         DriverId::new("sqlserver")
     }
 
+    /// T-SQL's scanner, tracking `BEGIN`/`CASE … END` so a block body is not split on its inner
+    /// semicolons.
+    fn split_statements(&self, sql: &str) -> Vec<String> {
+        split_statements(sql)
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         // `database_id > 4` hides the system databases (master/tempdb/model/msdb), matching
         // what other clients show. A user can still pick one explicitly as the profile's

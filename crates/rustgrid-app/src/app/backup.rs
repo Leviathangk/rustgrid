@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 use super::info_pane::info_panel;
 use super::*;
+use gpui_kit::base::SelectableText;
 use rustgrid_backup::BackupManifest;
 use rustgrid_core::{BackupObjectKind, ObjectKind, SavedBackup};
 
@@ -2176,7 +2177,32 @@ impl AppView {
         .detach();
     }
 
-    /// Append a line to whichever backup/restore/extract dialog is open, keeping it scrolled.
+    /// A `复制日志` button for a dialog footer that copies the whole log to the clipboard, so the
+    /// log can be copied without relying on a text selection. Empty (and hidden) when the log has
+    /// no lines yet.
+    pub(super) fn copy_log_button(
+        &self,
+        id: &'static str,
+        log: &[String],
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        if log.is_empty() {
+            return div().into_any_element();
+        }
+        let text = log.join("\n");
+        self.dialog_button(
+            id,
+            t!("sqlfile.copy_log").to_string(),
+            false,
+            cx.listener(move |_this, _event, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }),
+        )
+        .into_any_element()
+    }
+
+    /// Append a line to whichever backup/restore/extract/dump/run-SQL dialog is open, keeping it
+    /// scrolled.
     pub(super) fn backup_log(&mut self, message: String, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
             dialog.log.push(message.clone());
@@ -2185,6 +2211,12 @@ impl AppView {
             dialog.log.push(message.clone());
             dialog.log_scroll.scroll_to_bottom();
         } else if let Some(dialog) = self.extract_dialog.as_mut() {
+            dialog.log.push(message.clone());
+            dialog.log_scroll.scroll_to_bottom();
+        } else if let Some(dialog) = self.dump_dialog.as_mut() {
+            dialog.log.push(message.clone());
+            dialog.log_scroll.scroll_to_bottom();
+        } else if let Some(dialog) = self.run_sql_dialog.as_mut() {
             dialog.log.push(message.clone());
             dialog.log_scroll.scroll_to_bottom();
         }
@@ -2702,6 +2734,10 @@ impl AppView {
             .map(|file| file.name.clone())
         {
             format!("{} - {}", name, t!("backup.extract_sql"))
+        } else if self.dump_dialog.is_some() {
+            t!("sqlfile.dump_title").to_string()
+        } else if self.run_sql_dialog.is_some() {
+            t!("sqlfile.run_title").to_string()
         } else {
             return div().into_any_element();
         };
@@ -2720,6 +2756,10 @@ impl AppView {
                 self.extract_dialog_body(cx),
                 self.extract_dialog_footer(cx).into_any_element(),
             )
+        } else if self.dump_dialog.is_some() {
+            (self.dump_dialog_body(cx), self.dump_dialog_footer(cx))
+        } else if self.run_sql_dialog.is_some() {
+            (self.run_sql_dialog_body(cx), self.run_sql_dialog_footer(cx))
         } else {
             return div().into_any_element();
         };
@@ -2738,6 +2778,16 @@ impl AppView {
                 self.extract_dialog
                     .as_ref()
                     .and_then(|dialog| dialog.error.clone())
+            })
+            .or_else(|| {
+                self.dump_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.error.clone())
+            })
+            .or_else(|| {
+                self.run_sql_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.error.clone())
             });
         let mut root = div()
             .flex()
@@ -2752,6 +2802,10 @@ impl AppView {
                         this.close_new_backup(window, cx);
                     } else if this.extract_dialog.is_some() {
                         this.close_extract(window, cx);
+                    } else if this.dump_dialog.is_some() {
+                        this.close_dump(window, cx);
+                    } else if this.run_sql_dialog.is_some() {
+                        this.close_run_sql(window, cx);
                     } else {
                         this.close_restore(window, cx);
                     }
@@ -2770,7 +2824,7 @@ impl AppView {
     ///
     /// The open is deferred: `open_window` renders the new window immediately, and that render
     /// reads `AppView`, so it must not run while an `AppView` borrow is held.
-    fn open_backup_window(&mut self, title: String, cx: &mut Context<'_, Self>) {
+    pub(super) fn open_backup_window(&mut self, title: String, cx: &mut Context<'_, Self>) {
         if self.backup_window.is_some() {
             return;
         }
@@ -2832,6 +2886,8 @@ impl AppView {
             self.backup_name_input = None;
             self.restore_dialog = None;
             self.extract_dialog = None;
+            self.dump_dialog = None;
+            self.run_sql_dialog = None;
             self.export_window = None;
             self.export_wizard = None;
             self.import_window = None;
@@ -2866,11 +2922,23 @@ impl AppView {
                     .cancel
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            if let Some(dialog) = self.dump_dialog.as_mut() {
+                dialog
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(dialog) = self.run_sql_dialog.as_mut() {
+                dialog
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             self.backup_window = None;
             self.new_backup_dialog = None;
             self.backup_name_input = None;
             self.restore_dialog = None;
             self.extract_dialog = None;
+            self.dump_dialog = None;
+            self.run_sql_dialog = None;
             cx.notify();
             return;
         }
@@ -3022,6 +3090,7 @@ impl AppView {
                         .map(|dialog| dialog.log.as_slice())
                         .unwrap_or(&[]),
                     &scroll,
+                    &self.log_handle,
                     &stats,
                     theme,
                 )
@@ -3313,6 +3382,7 @@ impl AppView {
                         .map(|dialog| dialog.log.as_slice())
                         .unwrap_or(&[]),
                     &scroll,
+                    &self.log_handle,
                     &stats,
                     theme,
                 )
@@ -3536,6 +3606,7 @@ impl AppView {
                         .map(|dialog| dialog.log.as_slice())
                         .unwrap_or(&[]),
                     &scroll,
+                    &self.log_handle,
                     &stats,
                     theme,
                 )
@@ -3698,7 +3769,7 @@ impl AppView {
         cx.notify();
     }
 
-    fn backup_tab_button(
+    pub(super) fn backup_tab_button(
         &self,
         id: &'static str,
         label: String,
@@ -3769,7 +3840,7 @@ impl Render for BackupWindow {
 
 /// The child window's titlebar. The OS titlebar is suppressed (`appears_transparent`) so this
 /// chrome matches the app's theme; dragging and the min/max/close controls mirror the main window.
-fn backup_window_titlebar(title: String, theme: Theme) -> impl IntoElement {
+pub(super) fn backup_window_titlebar(title: String, theme: Theme) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -3880,7 +3951,7 @@ fn make_backup_name_input(
 
 /// The dialog's target line: a small muted label plus the fixed connection and database, shown
 /// above the tabs.
-fn backup_target_line(
+pub(super) fn backup_target_line(
     label: String,
     connection_name: String,
     database_name: String,
@@ -3941,7 +4012,7 @@ fn backup_target_line(
 
 /// A red alert banner shown above the dialog footer while an error is set, so the reason is
 /// visible on whichever tab is open (a validation error would otherwise hide on the Log tab).
-fn backup_error_banner(error: String, theme: Theme) -> impl IntoElement {
+pub(super) fn backup_error_banner(error: String, theme: Theme) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -4203,9 +4274,10 @@ fn render_object_picker(
 
 /// The information-log tab body shared by both dialogs: a Navicat-style summary block, the
 /// `[Msg]` log lines, and a green progress bar.
-fn render_backup_log(
+pub(super) fn render_backup_log(
     log: &[String],
     scroll: &ScrollHandle,
+    handle: &gpui_kit::base::TextSelectionHandle,
     stats: &LogStats,
     theme: Theme,
 ) -> AnyElement {
@@ -4242,20 +4314,6 @@ fn render_backup_log(
             theme,
         ));
 
-    let mut content = div().flex().flex_col().gap_0p5().p_2();
-    if log.is_empty() {
-        content = content.child(
-            div()
-                .text_size(px(12.0))
-                .text_color(rgb(theme.text_muted))
-                .child("--"),
-        );
-    } else {
-        for line in log {
-            content = content.child(div().text_size(px(12.0)).child(format!("[Msg] {line}")));
-        }
-    }
-
     let progress = stats.progress.clamp(0.0, 1.0);
     div()
         .flex()
@@ -4270,21 +4328,7 @@ fn render_backup_log(
         .bg(rgb(theme.dialog_bg))
         .overflow_hidden()
         .child(summary)
-        .child(
-            div()
-                .id("backup-log")
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .mx_3()
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(rgb(theme.border))
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .child(content),
-        )
+        .child(render_log_lines(log, scroll, handle, theme))
         .child(
             // Green progress bar (matches Navicat's restore/backup window).
             div()
@@ -4306,8 +4350,80 @@ fn render_backup_log(
         .into_any_element()
 }
 
+/// The scrollable `[Msg]` log box: one selectable line per entry (all sharing `handle`, so a drag
+/// selects and copies across lines) plus an always-visible vertical scrollbar — gpui paints none
+/// for an `overflow_y_scroll` container.
+///
+/// Shared by the backup/restore/extract/dump logs and the Run SQL File log, so every log view
+/// behaves the same.
+pub(super) fn render_log_lines(
+    log: &[String],
+    scroll: &ScrollHandle,
+    handle: &gpui_kit::base::TextSelectionHandle,
+    theme: Theme,
+) -> AnyElement {
+    let mut content = div().flex().flex_col().gap_0p5().p_2().w_full();
+    if log.is_empty() {
+        content = content.child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child("--"),
+        );
+    } else {
+        for (index, line) in log.iter().enumerate() {
+            content = content.child(
+                div()
+                    .w_full()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text))
+                    .child(
+                        SelectableText::with_handle(
+                            ("log-line", index as u64),
+                            handle.clone(),
+                            format!("[Msg] {line}"),
+                        )
+                        .document_order(index as u64)
+                        // A visible selection tint even when the kit's global theme selection
+                        // token is not initialised for this window.
+                        .selection_color(rgba((theme.grid_selection_bg << 8) | 0x59).into()),
+                    ),
+            );
+        }
+    }
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(px(0.0))
+        .mx_3()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .overflow_hidden()
+        .child(
+            div()
+                .id("log-lines")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .child(content),
+        )
+        .child(
+            Scrollbar::vertical(scroll)
+                .mode(ScrollbarMode::Always)
+                .id("log-lines-scrollbar"),
+        )
+        .into_any_element()
+}
+
 /// One `label    value` row of the log summary block.
-fn log_summary_row(label: String, value: String, theme: Theme) -> impl IntoElement {
+pub(super) fn log_summary_row(label: String, value: String, theme: Theme) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -4331,17 +4447,17 @@ fn log_summary_row(label: String, value: String, theme: Theme) -> impl IntoEleme
 }
 
 /// Format a count with thousands separators.
-fn format_count(value: usize) -> String {
+pub(super) fn format_count(value: usize) -> String {
     format_thousands(value as u64)
 }
 
 /// The local wall-clock timestamp used by the backup/restore logs.
-fn now_timestamp() -> String {
+pub(super) fn now_timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 /// Format an elapsed duration as `HH:MM:SS`.
-fn format_hms(elapsed: std::time::Duration) -> String {
+pub(super) fn format_hms(elapsed: std::time::Duration) -> String {
     let total = elapsed.as_secs();
     format!(
         "{:02}:{:02}:{:02}",
@@ -4352,7 +4468,7 @@ fn format_hms(elapsed: std::time::Duration) -> String {
 }
 
 /// The summary shown above the info log, mirroring Navicat's backup/restore window.
-struct LogStats {
+pub(super) struct LogStats {
     objects: usize,
     records: usize,
     processed_objects: usize,
@@ -4365,7 +4481,7 @@ struct LogStats {
 /// Build the log summary from a dialog's progress counters. While running, elapsed is measured
 /// live from `started`; otherwise the recorded final `elapsed` is shown.
 #[allow(clippy::too_many_arguments)]
-fn log_stats(
+pub(super) fn log_stats(
     total: usize,
     success: usize,
     failed: usize,
@@ -4591,5 +4707,83 @@ pub(super) fn open_with_default_app(path: &std::path::Path) {
     #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     {
         let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod log_selection_tests {
+    use super::*;
+    use gpui::{
+        Bounds, MouseButton, Point, TestAppContext, VisualTestContext, WindowBounds, WindowOptions,
+        point, size,
+    };
+    use gpui_kit::base::{TextSelection, TextSelectionHandle};
+
+    struct LogHarness {
+        handle: TextSelectionHandle,
+        scroll: ScrollHandle,
+    }
+
+    impl Render for LogHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(render_log_lines(
+                &["hello world".to_string()],
+                &self.scroll,
+                &self.handle,
+                Theme::light(),
+            ))
+        }
+    }
+
+    /// Mirrors the Backup/Run-SQL window: a `gpui_kit::open_window` window (whose root is the base
+    /// `Root`, carrying the text-selection layer). A drag over the log must select its text.
+    #[gpui_kit::test]
+    fn log_lines_can_be_selected(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let window_handle = cx.update(|cx| {
+            let view = cx.new(|cx| LogHarness {
+                handle: TextSelectionHandle::new(String::new(), cx),
+                scroll: ScrollHandle::new(),
+            });
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(600.), px(300.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| view,
+            )
+            .expect("open test window")
+            .0
+        });
+        let mut cx = VisualTestContext::from_window(window_handle, cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_down(
+            point(px(4.), px(14.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(300.), px(14.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(300.), px(14.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            assert!(
+                TextSelection::selected_text(window, cx).contains("hello world"),
+                "log text should be selectable"
+            );
+        });
     }
 }

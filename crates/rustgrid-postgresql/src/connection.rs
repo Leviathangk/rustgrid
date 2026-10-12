@@ -215,6 +215,12 @@ impl Connection for PostgresConnection {
         DriverId::new("postgresql")
     }
 
+    /// PostgreSQL's scanner, aware of dollar-quoted bodies (`$tag$ … $tag$`) so a function body is
+    /// kept whole.
+    fn split_statements(&self, sql: &str) -> Vec<String> {
+        split_statements(sql)
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         let pool = self.pool(None).await?;
         let rows = sqlx::query(
