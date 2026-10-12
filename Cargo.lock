@@ -7263,7 +7263,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-app"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7303,7 +7303,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-backup"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "rustgrid-core",
  "serde",
@@ -7315,7 +7315,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-config"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -7328,7 +7328,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "serde",
@@ -7337,7 +7337,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-export"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "rust_xlsxwriter",
  "rustgrid-core",
@@ -7346,7 +7346,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-import"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "calamine",
  "chrono",
@@ -7357,7 +7357,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-mysql"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7370,7 +7370,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-odbc"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "libloading",
@@ -7380,7 +7380,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-oracle"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7392,7 +7392,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-postgresql"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7405,7 +7405,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-sqlite"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "rustgrid-core",
@@ -7415,7 +7415,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-sqlserver"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "bb8",
@@ -7431,7 +7431,7 @@ dependencies = [
 
 [[package]]
 name = "rustgrid-tunnel"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "base64 0.22.1",
  "russh",
