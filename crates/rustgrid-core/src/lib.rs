@@ -18,7 +18,9 @@ pub use descriptor::{
     ConnectionStandardField, DriverDescriptor, DriverIconStyle,
 };
 pub use dialect::DriverDialect;
-pub use driver::{Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, UserEditorSpec};
+pub use driver::{
+    Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, ScriptSession, UserEditorSpec,
+};
 pub use error::{Error, Result};
 pub use model::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionProfile,

@@ -524,6 +524,8 @@ struct RunSqlDialog {
     total: usize,
     success: usize,
     failed: usize,
+    /// The total number of rows the statements affected (记录).
+    records: usize,
     started: Option<std::time::Instant>,
     elapsed: Option<std::time::Duration>,
     error: Option<String>,

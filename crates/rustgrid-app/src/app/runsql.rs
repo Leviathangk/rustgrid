@@ -87,6 +87,7 @@ impl AppView {
             total: 0,
             success: 0,
             failed: 0,
+            records: 0,
             started: None,
             elapsed: None,
             error: None,
@@ -212,6 +213,7 @@ impl AppView {
             dialog.total = 0;
             dialog.success = 0;
             dialog.failed = 0;
+            dialog.records = 0;
             dialog.elapsed = None;
             dialog.started = Some(std::time::Instant::now());
             dialog
@@ -267,24 +269,63 @@ impl AppView {
                 cx.notify();
             });
 
+            // Open a pinned session so a session-scoped statement (MySQL's
+            // `SET FOREIGN_KEY_CHECKS`, PostgreSQL's `SET`, …) applies to every later statement.
+            // Drivers that cannot pin a connection return `None` and we fall back to
+            // `execute_query` per statement.
+            let session = {
+                let connection = connection.clone();
+                let database = database.clone();
+                runtime
+                    .spawn(async move { connection.script_session(database.as_deref()).await })
+                    .await
+            };
+            let mut session = match session {
+                Ok(Ok(session)) => session,
+                _ => None,
+            };
+
             for (index, statement) in statements.into_iter().enumerate() {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
-                let connection = connection.clone();
-                let database = database.clone();
-                let sql = statement.clone();
-                let result = runtime
-                    .spawn(async move { connection.execute_query(database.as_deref(), &sql).await })
-                    .await;
-                let failed = match result {
-                    Ok(Ok(_)) => None,
-                    Ok(Err(error)) => Some(error.to_string()),
-                    Err(error) => Some(error.to_string()),
+                let result = if let Some(active) = session.take() {
+                    let sql = statement.clone();
+                    match runtime
+                        .spawn(async move {
+                            let mut active = active;
+                            let result = active.execute(&sql).await;
+                            (result, active)
+                        })
+                        .await
+                    {
+                        Ok((result, returned)) => {
+                            session = Some(returned);
+                            result
+                        }
+                        Err(error) => Err(Error::other(error)),
+                    }
+                } else {
+                    let connection = connection.clone();
+                    let database = database.clone();
+                    let sql = statement.clone();
+                    match runtime
+                        .spawn(
+                            async move { connection.execute_query(database.as_deref(), &sql).await },
+                        )
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => Err(Error::other(error)),
+                    }
+                };
+                let (failed, records) = match result {
+                    Ok(result) => (None, result.rows_affected as usize),
+                    Err(error) => (Some(error.to_string()), 0),
                 };
                 let stop = failed.is_some() && !continue_on_error;
                 let _ = this.update(cx, |app, cx| {
-                    app.record_run_sql_result(index, statement, failed, cx);
+                    app.record_run_sql_result(index, statement, failed, records, cx);
                 });
                 if stop {
                     break;
@@ -308,6 +349,7 @@ impl AppView {
         index: usize,
         statement: String,
         failed: Option<String>,
+        records: usize,
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(dialog) = self.run_sql_dialog.as_mut() {
@@ -327,6 +369,7 @@ impl AppView {
                 }
                 None => {
                     dialog.success += 1;
+                    dialog.records += records;
                 }
             }
             dialog.log_scroll.scroll_to_bottom();
@@ -412,6 +455,7 @@ impl AppView {
         let total = dialog.total;
         let success = dialog.success;
         let failed = dialog.failed;
+        let records = dialog.records;
         let running = dialog.running;
         let started = dialog.started;
         let elapsed = dialog.elapsed;
@@ -528,6 +572,11 @@ impl AppView {
                     .child(log_summary_row(
                         t!("sqlfile.processed").to_string(),
                         format_count(processed),
+                        theme,
+                    ))
+                    .child(log_summary_row(
+                        t!("sqlfile.records").to_string(),
+                        format_count(records),
                         theme,
                     ))
                     .child(log_summary_row(

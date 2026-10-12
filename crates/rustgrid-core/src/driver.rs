@@ -249,6 +249,19 @@ impl UserEditorSpec {
     }
 }
 
+/// One pinned database session for running a SQL script statement by statement.
+///
+/// [`Connection::execute_query`] may borrow a different pooled connection on each call, so a
+/// session-scoped setting made by an earlier statement (MySQL's `SET FOREIGN_KEY_CHECKS` or
+/// `USE db`, a `BEGIN`, PostgreSQL's `SET search_path`, SQL Server's `SET IDENTITY_INSERT`, …)
+/// would be lost before the next one runs. A script session keeps one connection checked out so
+/// that state carries across the whole script.
+#[async_trait]
+pub trait ScriptSession: Send {
+    /// Run one statement on the pinned connection and report its outcome.
+    async fn execute(&mut self, sql: &str) -> Result<QueryResult>;
+}
+
 #[async_trait]
 pub trait Connection: Send + Sync {
     fn driver_id(&self) -> DriverId;
@@ -306,6 +319,17 @@ pub trait Connection: Send + Sync {
     /// block-structured dialect override it with their own scanner.
     fn split_statements(&self, sql: &str) -> Vec<String> {
         crate::split::split_statements(sql)
+    }
+
+    /// Open a pinned session for running a SQL script statement by statement (see
+    /// [`ScriptSession`]), so session-scoped state carries across statements. Drivers that cannot
+    /// pin a connection return `None`; the caller then falls back to per-statement
+    /// [`Connection::execute_query`].
+    async fn script_session(
+        &self,
+        _database: Option<&str>,
+    ) -> Result<Option<Box<dyn ScriptSession>>> {
+        Ok(None)
     }
 
     /// Create a database with the given engine-agnostic options. Fields the engine does not use

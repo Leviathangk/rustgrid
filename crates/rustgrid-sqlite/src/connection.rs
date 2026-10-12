@@ -5,12 +5,13 @@ use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
     DriverId, Error, FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef,
     IndexDef, ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert, RowUpdate,
-    TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef, ViewDetails,
-    ViewEdit, ViewInfo,
+    ScriptSession, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
+    ViewDetails, ViewEdit, ViewInfo,
 };
 use sqlx::error::DatabaseError;
 use sqlx::sqlite::{SqliteColumn, SqliteRow};
 use sqlx::{AssertSqlSafe, Column, Executor, Row, SqlSafeStr, SqlitePool, Statement, ValueRef};
+use sqlx::{Sqlite, pool::PoolConnection};
 
 /// Rows fetched into one `INSERT` batch while restoring a backup. Kept moderate so a statement
 /// stays well under SQLite's limits even for wide rows.
@@ -101,6 +102,19 @@ impl SqliteConnection {
     }
 }
 
+/// A pinned SQLite session for running a script statement by statement (see
+/// [`rustgrid_core::ScriptSession`]).
+struct SqliteScriptSession {
+    connection: PoolConnection<Sqlite>,
+}
+
+#[async_trait]
+impl ScriptSession for SqliteScriptSession {
+    async fn execute(&mut self, sql: &str) -> Result<QueryResult> {
+        execute_one(&mut self.connection, sql).await
+    }
+}
+
 #[async_trait]
 impl Connection for SqliteConnection {
     fn driver_id(&self) -> DriverId {
@@ -110,6 +124,16 @@ impl Connection for SqliteConnection {
     /// SQLite's own scanner, aware of `'`/`"`/`` ` ``/`[...]` quoting and comments.
     fn split_statements(&self, sql: &str) -> Vec<String> {
         split_statements(sql)
+    }
+
+    /// Pin the (single) pooled connection for the whole script, so pragmas and a `BEGIN`/
+    /// `COMMIT` wrapper survive across statements.
+    async fn script_session(
+        &self,
+        _database: Option<&str>,
+    ) -> Result<Option<Box<dyn ScriptSession>>> {
+        let connection = self.pool.acquire().await.map_err(map_query_error)?;
+        Ok(Some(Box::new(SqliteScriptSession { connection })))
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {

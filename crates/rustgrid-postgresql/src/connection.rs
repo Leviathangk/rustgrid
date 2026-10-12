@@ -7,12 +7,13 @@ use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions, DriverId,
     Error, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult,
-    Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, TableInfo,
-    TablePage, TableSchema, TableStatus, UserAccount, UserDetails, UserEdit, UserEditSection,
-    ViewDetails, ViewEdit,
+    Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate,
+    ScriptSession, TableInfo, TablePage, TableSchema, TableStatus, UserAccount, UserDetails,
+    UserEdit, UserEditSection, ViewDetails, ViewEdit,
 };
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, TypeInfo};
+use sqlx::{Postgres, pool::PoolConnection};
 
 use crate::helpers::{
     cell_from_format_type, decode_text_cell, filter_clause, order_clause, qualify,
@@ -209,6 +210,38 @@ impl PostgresConnection {
     }
 }
 
+/// A pinned PostgreSQL session for running a script statement by statement (see
+/// [`rustgrid_core::ScriptSession`]). Keeping one connection checked out preserves `SET`, `BEGIN`
+/// and temporary objects across the run.
+struct PostgresScriptSession {
+    connection: PoolConnection<Postgres>,
+}
+
+#[async_trait]
+impl ScriptSession for PostgresScriptSession {
+    async fn execute(&mut self, sql: &str) -> Result<QueryResult> {
+        // One statement per call, run on the pinned connection. Result rows are drained but not
+        // kept — the Run SQL File feature reports counts, not a grid.
+        let mut rows_affected = 0u64;
+        let mut stream =
+            sqlx::raw_sql(AssertSqlSafe(sql.to_string())).fetch_many(&mut *self.connection);
+        while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
+            if let Either::Left(done) = item {
+                rows_affected += done.rows_affected();
+            }
+        }
+        drop(stream);
+        Ok(QueryResult {
+            statement: sql.trim().to_string(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected,
+            has_result_set: false,
+            last_insert_id: None,
+        })
+    }
+}
+
 #[async_trait]
 impl Connection for PostgresConnection {
     fn driver_id(&self) -> DriverId {
@@ -219,6 +252,17 @@ impl Connection for PostgresConnection {
     /// kept whole.
     fn split_statements(&self, sql: &str) -> Vec<String> {
         split_statements(sql)
+    }
+
+    /// Pin one pooled connection (of the target database) for the whole script, so `SET`, `BEGIN`
+    /// and temporary objects survive across statements.
+    async fn script_session(
+        &self,
+        database: Option<&str>,
+    ) -> Result<Option<Box<dyn ScriptSession>>> {
+        let pool = self.pool(database).await?;
+        let connection = pool.acquire().await.map_err(map_query_error)?;
+        Ok(Some(Box::new(PostgresScriptSession { connection })))
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {

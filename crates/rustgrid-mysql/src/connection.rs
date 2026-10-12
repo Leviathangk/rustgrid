@@ -6,14 +6,12 @@ use rustgrid_core::{
     DriverId, Error, FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef,
     IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog,
     QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert,
-    RowUpdate, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
-    UserAccount, UserDetails, UserEdit, ViewDetails, ViewEdit,
+    RowUpdate, ScriptSession, TableInfo, TableOptions, TablePage, TableSchema, TableStatus,
+    TriggerDef, UserAccount, UserDetails, UserEdit, ViewDetails, ViewEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
-use sqlx::{
-    AssertSqlSafe, Column, Either, Executor, MySqlConnection, MySqlPool, Row, SqlSafeStr,
-    Statement, ValueRef,
-};
+use sqlx::{AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, ValueRef};
+use sqlx::{MySql, MySqlConnection, MySqlPool, pool::PoolConnection};
 
 use crate::engine::Engine;
 
@@ -126,6 +124,20 @@ impl MysqlConnection {
     }
 }
 
+/// A pinned MySQL session for running a script statement by statement (see
+/// [`rustgrid_core::ScriptSession`]). Holding the `PoolConnection` keeps `SET` statements and
+/// `USE` in effect for every statement in the run.
+struct MySqlScriptSession {
+    connection: PoolConnection<MySql>,
+}
+
+#[async_trait]
+impl ScriptSession for MySqlScriptSession {
+    async fn execute(&mut self, sql: &str) -> Result<QueryResult> {
+        execute_one(&mut self.connection, sql).await
+    }
+}
+
 #[async_trait]
 impl Connection for MysqlConnection {
     fn driver_id(&self) -> DriverId {
@@ -136,6 +148,19 @@ impl Connection for MysqlConnection {
     /// line comments and `/* */` block comments.
     fn split_statements(&self, sql: &str) -> Vec<String> {
         split_statements(sql)
+    }
+
+    /// Pin one pooled connection for the whole script, so `SET` statements (e.g.
+    /// `SET FOREIGN_KEY_CHECKS=0`) and `USE` apply to every statement the caller runs.
+    async fn script_session(
+        &self,
+        database: Option<&str>,
+    ) -> Result<Option<Box<dyn ScriptSession>>> {
+        let mut connection = self.pool.acquire().await.map_err(map_query_error)?;
+        if let Some(database) = database {
+            use_database(&mut connection, database).await?;
+        }
+        Ok(Some(Box::new(MySqlScriptSession { connection })))
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
