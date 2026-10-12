@@ -968,15 +968,21 @@ impl AppView {
                     t!("connection.delete_button").to_string(),
                 )
             }
+            Some(DeleteConfirm::Group { id }) => {
+                let name = self
+                    .group(*id)
+                    .map(|group| group.name.clone())
+                    .unwrap_or_default();
+                (
+                    t!("group.delete_title").to_string(),
+                    t!("group.delete_confirm", name = name).to_string(),
+                    t!("group.delete_button").to_string(),
+                )
+            }
             Some(DeleteConfirm::Table {
                 name, operation, ..
             }) => {
                 let (title_key, message_key, button_key) = match operation {
-                    TableOperation::Drop => (
-                        "object.delete_table",
-                        "object.drop_confirm",
-                        "object.drop_button",
-                    ),
                     TableOperation::Empty => (
                         "object.empty_table",
                         "object.empty_confirm",
@@ -992,6 +998,14 @@ impl AppView {
                     t!(title_key).to_string(),
                     t!(message_key, name = name.clone()).to_string(),
                     t!(button_key).to_string(),
+                )
+            }
+            Some(DeleteConfirm::Tables { names, .. }) => {
+                let count = names.len();
+                (
+                    t!("object.delete_tables_title").to_string(),
+                    t!("object.drop_tables_confirm", count = count).to_string(),
+                    t!("object.drop_tables_button", count = count).to_string(),
                 )
             }
             Some(DeleteConfirm::SavedQuery { index }) => {

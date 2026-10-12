@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 6;
+const SETTINGS_VERSION: u32 = 7;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -86,6 +86,28 @@ impl LanguageSetting {
     }
 }
 
+/// One group in the connection tree. Groups nest: a group's `children` may hold both nested groups
+/// and connections (referenced by their `ConnectionProfile::id`). Group names are not required to be
+/// unique, so the numeric `id` is what identifies a group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConnectionGroup {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub expanded: bool,
+    #[serde(default)]
+    pub children: Vec<GroupEntry>,
+}
+
+/// One ordered entry of the connection tree: either a nested group or a connection (by profile id).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum GroupEntry {
+    Group(ConnectionGroup),
+    /// A connection, identified by its `ConnectionProfile::id`.
+    Connection(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SettingsFile {
     version: u32,
@@ -116,6 +138,10 @@ struct SettingsFile {
     /// Expanded database names per connection-profile id, for restoring the tree.
     #[serde(default)]
     expanded_databases: BTreeMap<String, Vec<String>>,
+    /// The connection tree's layout: nested groups (and the connections they hold), in display
+    /// order. Connections are stored by profile id so the layout survives reordering the profiles.
+    #[serde(default)]
+    groups: Vec<GroupEntry>,
 }
 
 /// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
@@ -145,6 +171,8 @@ pub struct AppSettings {
     pub expanded_connections: Vec<String>,
     /// Expanded database names per connection-profile id.
     pub expanded_databases: BTreeMap<String, Vec<String>>,
+    /// The connection tree's layout (nested groups and their connections).
+    pub groups: Vec<GroupEntry>,
 }
 
 impl Default for AppSettings {
@@ -160,6 +188,7 @@ impl Default for AppSettings {
             editor_word_wrap: true,
             expanded_connections: Vec::new(),
             expanded_databases: BTreeMap::new(),
+            groups: Vec::new(),
         }
     }
 }
@@ -354,6 +383,7 @@ impl ConfigStore {
             editor_word_wrap: file.editor_word_wrap,
             expanded_connections: file.expanded_connections,
             expanded_databases: file.expanded_databases,
+            groups: file.groups,
         })
     }
 
@@ -371,6 +401,7 @@ impl ConfigStore {
             editor_word_wrap: settings.editor_word_wrap,
             expanded_connections: settings.expanded_connections.clone(),
             expanded_databases: settings.expanded_databases.clone(),
+            groups: settings.groups.clone(),
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

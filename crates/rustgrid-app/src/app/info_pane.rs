@@ -107,6 +107,22 @@ impl Render for SidebarHost {
             cx.notify();
         });
 
+        // Right-clicking the blank space below the tree opens the tree's blank-area context menu.
+        // Rows stop propagation, so only the blank area reaches here.
+        let menu = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+            if let Some(app) = this.app.upgrade() {
+                app.update(cx, |app, cx| {
+                    app.dump_submenu = None;
+                    app.move_submenu = None;
+                    app.context_menu = Some(ContextMenu {
+                        target: ContextTarget::TreeBlank,
+                        position: event.position,
+                    });
+                    cx.notify();
+                });
+            }
+        });
+
         div()
             .flex()
             .flex_row()
@@ -114,12 +130,16 @@ impl Render for SidebarHost {
             .flex_none()
             .child(
                 div()
+                    .id("sidebar-column")
+                    .flex()
+                    .flex_col()
                     .w(px(self.width))
                     .h_full()
                     .flex_none()
                     .bg(rgb(theme.sidebar_bg))
                     .border_r_1()
                     .border_color(rgb(theme.border))
+                    .on_mouse_down(MouseButton::Right, menu)
                     .child(tree.cached(cached_style(|d| {
                         d.flex().flex_col().flex_1().min_h(px(0.0)).w_full()
                     }))),

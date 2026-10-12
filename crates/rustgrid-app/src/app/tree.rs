@@ -74,6 +74,7 @@ impl AppView {
         };
 
         self.editing = Some(index);
+        self.pending_group = None;
         self.show_form(
             ConnectionForm::from_profile(&profile, password, password_saved),
             window,
@@ -99,6 +100,7 @@ impl AppView {
         };
 
         self.editing = None;
+        self.pending_group = None;
         self.show_form(
             ConnectionForm::from_profile(&profile, password, password_saved),
             window,
@@ -229,7 +231,14 @@ impl AppView {
         }
 
         self.disconnect(index, cx);
+        let removed_id = self
+            .connections
+            .get(index)
+            .map(|node| node.profile.id.clone());
         self.connections.remove(index);
+        if let Some(id) = removed_id {
+            groups::remove_connection_entry(&mut self.tree_layout, &id);
+        }
 
         let active_query_id = self
             .active_query
@@ -268,6 +277,7 @@ impl AppView {
             self.warn_persist("connections", error, cx);
         }
         self.persist_secrets(cx);
+        self.persist_settings();
 
         cx.notify();
     }
@@ -1202,7 +1212,6 @@ impl AppView {
             let result = match runtime
                 .spawn(async move {
                     match operation {
-                        TableOperation::Drop => connection.drop_table(&database, &name).await,
                         TableOperation::Empty => connection.empty_table(&database, &name).await,
                         TableOperation::Truncate => {
                             connection.truncate_table(&database, &name).await
@@ -1218,25 +1227,68 @@ impl AppView {
             let _ = this.update(cx, |view, cx| {
                 match result {
                     Ok(()) => {
-                        match operation {
-                            // The table is gone: close its grids/designer.
-                            TableOperation::Drop => {
-                                view.close_table_views(
-                                    &close_connection,
-                                    &close_database,
-                                    &close_name,
-                                    cx,
-                                );
-                            }
-                            // Still there but empty: re-fetch the open grids.
-                            TableOperation::Empty | TableOperation::Truncate => {
-                                view.refresh_table_grids(
-                                    &close_connection,
-                                    &close_database,
-                                    &close_name,
-                                    cx,
-                                );
-                            }
+                        // The table is still there but empty: re-fetch the open grids.
+                        view.refresh_table_grids(
+                            &close_connection,
+                            &close_database,
+                            &close_name,
+                            cx,
+                        );
+                        view.reload_tables(connection_index, database_index, cx);
+                    }
+                    Err(error) => view.error_dialog = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drop several selected tables in one pass, then refresh the object list. The first failure is
+    /// surfaced but the remaining tables are still attempted, so a multi-drop is not all-or-nothing.
+    pub(super) fn run_drop_tables(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        names: Vec<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(connection) = self.connection_arc(connection_index) else {
+            return;
+        };
+        let Some(database) = self.database_name(connection_index, database_index) else {
+            return;
+        };
+
+        let runtime = self.runtime.clone();
+        let close_connection = connection.clone();
+        let close_database = database.clone();
+        let drop_names = names.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match runtime
+                .spawn(async move {
+                    let mut failures = Vec::new();
+                    for name in &drop_names {
+                        if let Err(error) = connection.drop_table(&database, name).await {
+                            failures.push(format!("{name}: {error}"));
+                        }
+                    }
+                    Ok::<Vec<String>, Error>(failures)
+                })
+                .await
+            {
+                Ok(inner) => inner,
+                Err(error) => Err(Error::other(error)),
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(failures) => {
+                        for name in &names {
+                            view.close_table_views(&close_connection, &close_database, name, cx);
+                        }
+                        if !failures.is_empty() {
+                            view.error_dialog = Some(failures.join("\n"));
                         }
                         view.reload_tables(connection_index, database_index, cx);
                     }

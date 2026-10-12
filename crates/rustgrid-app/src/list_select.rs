@@ -90,6 +90,12 @@ impl ListSelection {
         self.items.insert(item.into());
     }
 
+    /// Replace the selection with every item (Ctrl+A).
+    pub fn select_all(&mut self, items: &[String]) {
+        self.items = items.iter().cloned().collect();
+        self.anchor = items.first().cloned();
+    }
+
     /// Keep only the selected items for which `keep` returns true, e.g. after a rescan dropped
     /// some rows. The anchor is dropped when its item is no longer selected.
     pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {

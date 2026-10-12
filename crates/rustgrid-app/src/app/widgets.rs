@@ -172,7 +172,8 @@ impl AppView {
                             this.open_copy_form(index, window, cx);
                         }),
                     ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.manage_group_submenu_item(index, cx));
 
                 // Creating a database and refreshing the list both need a live connection, but stay
                 // visible (greyed out) when disconnected. Engines without database management
@@ -221,6 +222,65 @@ impl AppView {
                             t!("connection.refresh").to_string(),
                         ))
                     };
+            }
+            ContextTarget::Group { id } => {
+                let id = *id;
+                let menu_position = menu.position;
+                items = items
+                    .child(self.context_item(
+                        "group-new-connection",
+                        t!("group.new_connection").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.new_connection_in_group(id, menu_position, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "group-rename",
+                        t!("group.rename").to_string(),
+                        cx.listener(move |this, _event, window, cx| {
+                            this.context_menu = None;
+                            this.begin_group_rename(id, window, cx);
+                        }),
+                    ))
+                    .child(self.context_item(
+                        "group-delete",
+                        t!("group.delete").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.delete_confirm = Some(DeleteConfirm::Group { id });
+                            cx.notify();
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "group-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_tree(cx);
+                        }),
+                    ));
+            }
+            ContextTarget::TreeBlank => {
+                items = items
+                    .child(self.context_item(
+                        "tree-new-group",
+                        t!("group.new").to_string(),
+                        cx.listener(move |this, _event, window, cx| {
+                            this.context_menu = None;
+                            this.add_group(window, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "tree-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_tree(cx);
+                        }),
+                    ));
             }
             ContextTarget::Database {
                 connection_index,
@@ -518,11 +578,21 @@ impl AppView {
                             t!("object.delete_table").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.delete_confirm = Some(DeleteConfirm::Table {
+                                // Drop every selected table, not just the right-clicked one (when
+                                // the clicked row is part of the multi-selection).
+                                let selected = this.objects_selection.contains(&drop_name);
+                                let mut names = if selected {
+                                    this.objects_selection.items()
+                                } else {
+                                    Vec::new()
+                                };
+                                if names.is_empty() {
+                                    names.push(drop_name.clone());
+                                }
+                                this.delete_confirm = Some(DeleteConfirm::Tables {
                                     connection_index: ci,
                                     database_index: di,
-                                    name: drop_name.clone(),
-                                    operation: TableOperation::Drop,
+                                    names,
                                 });
                                 cx.notify();
                             }),
@@ -1109,17 +1179,22 @@ impl AppView {
             .left(menu.position.x)
             .top(menu.position.y)
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                // The 转储 SQL 文件 flyout overflows past this panel, so a click on it also reads
-                // as "outside" here. Keep the menu alive when the click is on the flyout.
+                // The 转储 SQL 文件 and 管理分组 flyouts overflow past this panel, so a click on one
+                // also reads as "outside" here. Keep the menu alive when the click is on a flyout.
                 let on_flyout = this
                     .dump_flyout_bounds
                     .borrow()
-                    .is_some_and(|bounds| bounds.contains(&event.position));
+                    .is_some_and(|bounds| bounds.contains(&event.position))
+                    || this
+                        .move_flyout_bounds
+                        .borrow()
+                        .is_some_and(|bounds| bounds.contains(&event.position));
                 if on_flyout {
                     return;
                 }
                 this.context_menu = None;
                 this.dump_submenu = None;
+                this.move_submenu = None;
                 cx.notify();
             }))
             .child(items)
@@ -1280,6 +1355,171 @@ impl AppView {
         } else {
             row
         }
+    }
+
+    /// The connection context menu's 管理分组 row: a submenu trigger that reveals a right-hand
+    /// flyout listing 移动到 (every group, nested by indentation) and 从分组内排除.
+    fn manage_group_submenu_item(&self, index: usize, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+        let theme = self.theme;
+        let open = self.move_submenu == Some(index);
+        let bounds_slot = self.move_flyout_bounds.clone();
+        let clear_slot = self.move_flyout_bounds.clone();
+        let mut base = div()
+            .relative()
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(26.0))
+            .px_3()
+            .gap_1()
+            .text_size(px(12.5));
+        if open {
+            base = base.on_children_prepainted(move |bounds, _window, _cx| {
+                *bounds_slot.borrow_mut() = bounds.last().copied();
+            });
+        } else {
+            *clear_slot.borrow_mut() = None;
+        }
+        let row = base
+            .id("ctx-manage-group")
+            .cursor_pointer()
+            .hover(move |style| {
+                style
+                    .bg(rgb(theme.tree_hover_bg))
+                    .text_color(rgb(theme.tree_selected_text))
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                if *hovered && this.move_submenu != Some(index) {
+                    this.dump_submenu = None;
+                    this.move_submenu = Some(index);
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.move_submenu = Some(index);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(t!("group.manage").to_string()),
+            )
+            .child(
+                svg()
+                    .path("icons/chevron-right.svg")
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            );
+        if open {
+            row.child(self.manage_group_flyout(index, theme, cx))
+        } else {
+            row
+        }
+    }
+
+    /// The 管理分组 flyout: a 移动到 header, the nested group list, and 从分组内排除 (enabled only
+    /// while the connection is in a group).
+    fn manage_group_flyout(
+        &self,
+        index: usize,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let mut flyout = ui::popup_panel(theme)
+            .left(px(168.0))
+            .top(px(0.0))
+            .w(px(190.0))
+            .p_0p5();
+        flyout = flyout.child(
+            div()
+                .px_3()
+                .py_1()
+                .text_size(px(11.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("group.move_to").to_string()),
+        );
+        let groups = self.groups_flat();
+        if groups.is_empty() {
+            flyout = flyout.child(
+                div()
+                    .px_3()
+                    .h(px(24.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("group.none").to_string()),
+            );
+        }
+        for (id, depth) in groups {
+            let name = self
+                .group(id)
+                .map(|group| group.name.clone())
+                .unwrap_or_default();
+            flyout = flyout.child(
+                div()
+                    .id(SharedString::from(format!("move-group-{id}")))
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .h(px(26.0))
+                    .pr_2()
+                    .pl(px(12.0 + depth as f32 * 12.0))
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .hover(move |style| {
+                        style
+                            .bg(rgb(theme.tree_hover_bg))
+                            .text_color(rgb(theme.tree_selected_text))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.context_menu = None;
+                        this.move_submenu = None;
+                        this.move_connection_to_group(index, id, cx);
+                    }))
+                    .child(name),
+            );
+        }
+        flyout = flyout.child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+        if self.connection_group(index).is_some() {
+            flyout = flyout.child(
+                div()
+                    .id("ctx-exclude-group")
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .h(px(26.0))
+                    .px_3()
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .hover(move |style| {
+                        style
+                            .bg(rgb(theme.tree_hover_bg))
+                            .text_color(rgb(theme.tree_selected_text))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.context_menu = None;
+                        this.move_submenu = None;
+                        this.exclude_connection_from_group(index, cx);
+                    }))
+                    .child(t!("group.exclude").to_string()),
+            );
+        } else {
+            flyout = flyout.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .h(px(26.0))
+                    .px_3()
+                    .text_size(px(12.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("group.exclude").to_string()),
+            );
+        }
+        flyout.into_any_element()
     }
 }
 

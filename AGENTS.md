@@ -503,7 +503,21 @@ shadcn chrome described above. Implemented today:
     `Connection::table_statuses`, one bulk query loaded with `list_tables`). F2 renames the
     selected item in place (accounts, backups and tables/views). Keep `ListSelection`
     layout-independent so both layouts share the selection, and publish row rectangles through
-    `AppView::note_row_rect(MarqueeTarget::…, …)` from each row's `on_children_prepainted`.
+    `AppView::note_row_rect(MarqueeTarget::…, …)` from each row's `on_children_prepainted`. The
+    Tables object list additionally supports Ctrl/Cmd+A (select every visible row) and dropping
+    every selected table through one confirm dialog (`DeleteConfirm::Tables` → `run_drop_tables`).
+
+14. Connection-tree groups (`app/groups.rs`): the tree is a nested list of groups and connections
+    (`AppView::tree_layout`, persisted in `settings.json` as `ConnectionGroup`/`GroupEntry`, with
+    `SETTINGS_VERSION` 7). A connection is referenced by its profile id, so the layout survives
+    reordering/deleting profiles; `reconcile_tree` prunes removed connections and appends new ones
+    at startup. Right-clicking the blank tree area offers 新建分组 / 刷新; a group's menu offers
+    新建连接 / 重命名 / 删除分组 / 刷新 (F2 renames in place, a new group is named 新分组 and enters
+    edit mode); deleting a group keeps its children by splicing them into the parent. A
+    connection's 管理分组 submenu lists 移动到 (every group, indented by depth) and 从分组内排除
+    (enabled only while the connection is in a group). Connections and groups are drag-reorderable
+    (drop before/after a row, or into a group's middle) with a `deferred` insertion indicator;
+    groups nest arbitrarily and a group cannot be dropped into its own descendant.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL and Oracle, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`

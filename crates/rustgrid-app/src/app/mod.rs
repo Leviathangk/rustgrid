@@ -17,7 +17,8 @@ use gpui::{
     canvas, deferred, div, img, prelude::*, px, rgb, rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{
-    AppSettings, ConfigStore, DEFAULT_EDITOR_FONT_SIZE, LanguageSetting, ThemeSetting,
+    AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, GroupEntry,
+    LanguageSetting, ThemeSetting,
 };
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, ConnectionFieldChoice,
@@ -880,6 +881,31 @@ struct RenameRow {
     input: Entity<TextInput>,
 }
 
+/// The in-place "rename group" editor, drawn in the group's tree row. `name` mirrors the input's
+/// text so `submit_group_rename` never reads the entity back during its own change callback.
+struct GroupRenameEdit {
+    id: u64,
+    name: String,
+    input: Entity<TextInput>,
+}
+
+/// What is being dragged over the connection tree.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum TreeDragPayload {
+    /// A connection, by profile id.
+    Connection(String),
+    /// A group, by id.
+    Group(u64),
+}
+
+/// An in-progress drag of a connection-tree row.
+#[derive(Clone)]
+pub(super) struct TreeDrag {
+    pub(super) payload: TreeDragPayload,
+    /// The current pointer position, in window space.
+    pub(super) position: Point<Pixels>,
+}
+
 /// Build the masked password field for the password prompt. The plaintext mirrors into
 /// `PasswordPrompt::password` so `submit_password` never reads the entity back during its own
 /// change callback.
@@ -1025,6 +1051,12 @@ enum TestStatus {
 
 enum ContextTarget {
     Connection(usize),
+    /// A connection group in the tree (新建连接 / 删除分组 / 重命名 / 刷新).
+    Group {
+        id: u64,
+    },
+    /// The blank area of the connection tree (新建分组 / 刷新).
+    TreeBlank,
     Database {
         connection_index: usize,
         database_index: usize,
@@ -1392,12 +1424,20 @@ enum DeleteConfirm {
     Rows { grid_id: u64, rows: Vec<usize> },
     /// Delete a connection (and its open grids/query tabs).
     Connection { index: usize },
+    /// Delete a connection-tree group (its connections are kept, only ungrouped).
+    Group { id: u64 },
     /// A destructive table operation.
     Table {
         connection_index: usize,
         database_index: usize,
         name: String,
         operation: TableOperation,
+    },
+    /// Drop several selected tables at once.
+    Tables {
+        connection_index: usize,
+        database_index: usize,
+        names: Vec<String>,
     },
     /// Delete a saved query from the saved-query list.
     SavedQuery { index: usize },
@@ -1450,7 +1490,6 @@ enum DesignDeleteKind {
 
 #[derive(Clone, Copy)]
 enum TableOperation {
-    Drop,
     Empty,
     Truncate,
 }
@@ -1865,6 +1904,29 @@ pub struct AppView {
     /// otherwise freezes them until they are explicitly notified).
     tree_revision: u64,
     tab_revision: u64,
+    /// The connection tree's layout: nested groups holding connections (by profile id), in display
+    /// order. Persisted in settings; the `connections` vector holds the live nodes themselves.
+    tree_layout: Vec<GroupEntry>,
+    /// The group whose in-place rename editor is open, if any.
+    group_rename: Option<GroupRenameEdit>,
+    group_rename_focus_pending: bool,
+    /// The group a to-be-created connection is filed under (set by the group menu's 新建连接).
+    pending_group: Option<u64>,
+    /// The connection whose 管理分组 flyout is open, if any.
+    move_submenu: Option<usize>,
+    /// Window-space bounds of that flyout while it is shown, so an outside click is not mistaken
+    /// for a click on the flyout (mirrors `dump_flyout_bounds`).
+    move_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// When the New Connection engine picker was opened from a group, the group the new connection
+    /// should be filed under. `None` when opened from the toolbar.
+    connect_menu_group: Option<u64>,
+    /// A pending row press that may become a drag once the pointer moves far enough.
+    tree_press: Option<(TreeDragPayload, Point<Pixels>)>,
+    /// The in-progress drag over the connection tree, if any.
+    tree_drag: Option<TreeDrag>,
+    /// Window-space rectangles of the draggable tree rows (connections and groups), for the
+    /// drag-and-drop hit test.
+    tree_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
     /// The connection-tree host, which owns its own (drag-resizable) width so resizing only
     /// re-renders it, not the whole app.
     sidebar_host: Entity<SidebarHost>,
@@ -2028,6 +2090,7 @@ mod grid_menu;
 mod grid_scroll;
 mod grid_toolbar;
 mod grid_view;
+mod groups;
 mod import;
 mod info_pane;
 mod list_ops;
@@ -2085,7 +2148,7 @@ impl AppView {
         let secrets = config.load_secrets().unwrap_or_default();
         let settings = load_startup_settings(&config);
 
-        let connections = config
+        let connections: Vec<ConnectionNode> = config
             .load_profiles()
             .unwrap_or_default()
             .into_iter()
@@ -2107,6 +2170,10 @@ impl AppView {
         let remembered_db_expansion = settings.expanded_databases.clone();
         let theme_setting = settings.theme;
         let language = settings.language;
+        // Reconcile the persisted tree layout with the profiles that actually loaded: drop entries
+        // for removed connections and append any connection the layout does not mention yet.
+        let mut tree_layout = settings.groups.clone();
+        groups::reconcile_tree(&mut tree_layout, &connections);
         let _ = config.migrate_legacy_queries();
         let query_files = query::scan_query_files(&config);
         let backup_configs = config.load_backups().unwrap_or_default();
@@ -2354,6 +2421,16 @@ impl AppView {
             update_checked: false,
             tree_revision: 0,
             tab_revision: 0,
+            tree_layout,
+            group_rename: None,
+            group_rename_focus_pending: false,
+            pending_group: None,
+            move_submenu: None,
+            move_flyout_bounds: Rc::new(RefCell::new(None)),
+            connect_menu_group: None,
+            tree_press: None,
+            tree_drag: None,
+            tree_row_rects: std::collections::HashMap::new(),
             sidebar_host,
             info_pane,
             sidebar_open: true,
@@ -2556,6 +2633,7 @@ impl AppView {
             editor_word_wrap: self.editor_word_wrap,
             expanded_connections,
             expanded_databases,
+            groups: self.tree_layout.clone(),
         }) {
             // Preferences failing to persist is not worth a modal; note it in the log line only.
             let _ = error;
@@ -2740,6 +2818,11 @@ impl AppView {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.theme.is_dark().hash(&mut hasher);
+        self.tree_layout.hash(&mut hasher);
+        self.group_rename
+            .as_ref()
+            .map(|edit| edit.id)
+            .hash(&mut hasher);
         self.connections.len().hash(&mut hasher);
         for node in &self.connections {
             node.profile.name.hash(&mut hasher);
@@ -3311,6 +3394,15 @@ impl Render for AppView {
             self.rename_focus_pending = false;
         }
 
+        if self.group_rename_focus_pending {
+            self.group_rename_focus_pending = false;
+            if let Some(edit) = self.group_rename.as_ref() {
+                // Focus the inner gpui-kit input so it emits `Blur` on click-away.
+                edit.input
+                    .update(cx, |input, cx| input.focus_state(window, cx));
+            }
+        }
+
         if self.save_query_focus_pending {
             self.save_query_focus_pending = false;
             // The dialog opens on a later frame, so focus the field once more after that frame;
@@ -3392,6 +3484,7 @@ impl Render for AppView {
                 let pane = this.info_pane.clone();
                 pane.update(cx, |pane, cx| pane.drag_move(event, cx));
                 this.drag_query_split(event, cx);
+                this.tree_drag_move(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -3401,6 +3494,7 @@ impl Render for AppView {
                     let pane = this.info_pane.clone();
                     pane.update(cx, |pane, cx| pane.end_drag(cx));
                     this.end_query_split_drag(cx);
+                    this.tree_drag_end(cx);
                 }),
             )
             .child(self.render_titlebar(cx))
@@ -3418,6 +3512,12 @@ impl Render for AppView {
 
         if let Some(menu) = self.context_menu.as_ref() {
             root = root.child(self.render_context_menu(menu, cx));
+        }
+
+        // The connection-tree drag-and-drop drop indicator, drawn in window coordinates so it
+        // follows the pointer as `AppView` re-renders on each drag move.
+        if let Some(hint) = self.tree_drop_indicator() {
+            root = root.child(sidebar::tree_drop_indicator_element(hint, theme));
         }
 
         if let Some(menu) = self.tab_menu.as_ref() {

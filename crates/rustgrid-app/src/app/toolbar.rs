@@ -271,6 +271,9 @@ impl AppView {
                 cx.listener(|this, _event, _window, cx| {
                     this.connect_menu_open = !this.connect_menu_open;
                     this.theme_menu_open = false;
+                    // A toolbar-initiated New Connection is never filed under a group.
+                    this.connect_menu_group = None;
+                    this.pending_group = None;
                     cx.notify();
                 }),
             ))
@@ -326,6 +329,7 @@ impl AppView {
         entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
 
         let mut items = div().flex().flex_col().w(px(150.0)).p_0p5();
+        let target_group = self.connect_menu_group;
         for (_, id, name, enabled) in entries {
             let label = format!("{name}...");
             if enabled {
@@ -335,6 +339,8 @@ impl AppView {
                     label,
                     cx.listener(move |this, _event, window, cx| {
                         this.connect_menu_open = false;
+                        this.connect_menu_group = None;
+                        this.pending_group = target_group;
                         this.open_new_form(driver.clone(), window, cx);
                     }),
                 ));

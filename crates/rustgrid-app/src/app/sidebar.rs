@@ -13,6 +13,8 @@ enum TreeStatus {
 /// real `ConnectionNode`; the snapshot only clones names and flags, never passwords.
 struct TreeConnection {
     index: usize,
+    /// The connection profile's id, used to place the row in the persisted tree layout.
+    id: String,
     name: String,
     /// The engine's icon asset path and how it is drawn, from the driver's descriptor.
     icon: &'static str,
@@ -204,6 +206,7 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 .map(|driver| driver.descriptor());
             TreeConnection {
                 index,
+                id: node.profile.id.clone(),
                 name: node.profile.name.clone(),
                 icon: descriptor
                     .as_ref()
@@ -239,33 +242,50 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
 }
 
 /// The ids of the tree rows that are currently visible, in draw order, for keyboard navigation.
-fn collect_visible_ids(connections: &[TreeConnection], out: &mut Vec<String>) {
-    for conn in connections {
-        out.push(format!("conn-{}", conn.index));
-        if !conn.expanded {
-            continue;
-        }
-        let Loadable::Loaded(databases) = &conn.databases else {
-            continue;
-        };
-        for db in databases {
-            out.push(format!("db-{}-{}", conn.index, db.index));
-            if !db.expanded {
-                continue;
+fn collect_visible_ids(
+    entries: &[GroupEntry],
+    connections: &[TreeConnection],
+    out: &mut Vec<String>,
+) {
+    for entry in entries {
+        match entry {
+            GroupEntry::Group(group) => {
+                out.push(format!("group-{}", group.id));
+                if group.expanded {
+                    collect_visible_ids(&group.children, connections, out);
+                }
             }
-            let schema_engine = !db.schemas.is_empty();
-            if let Loadable::Loaded(tables) = &db.tables {
-                for table in tables {
-                    let visible = if schema_engine {
-                        table
-                            .schema
-                            .as_ref()
-                            .is_some_and(|schema| db.expanded_schemas.contains(schema))
-                    } else {
-                        db.categories.tables
-                    };
-                    if visible {
-                        out.push(format!("tbl-{}-{}-{}", conn.index, db.index, table.name));
+            GroupEntry::Connection(id) => {
+                let Some(conn) = connections.iter().find(|conn| &conn.id == id) else {
+                    continue;
+                };
+                out.push(format!("conn-{}", conn.index));
+                if !conn.expanded {
+                    continue;
+                }
+                let Loadable::Loaded(databases) = &conn.databases else {
+                    continue;
+                };
+                for db in databases {
+                    out.push(format!("db-{}-{}", conn.index, db.index));
+                    if !db.expanded {
+                        continue;
+                    }
+                    let schema_engine = !db.schemas.is_empty();
+                    if let Loadable::Loaded(tables) = &db.tables {
+                        for table in tables {
+                            let visible = if schema_engine {
+                                table
+                                    .schema
+                                    .as_ref()
+                                    .is_some_and(|schema| db.expanded_schemas.contains(schema))
+                            } else {
+                                db.categories.tables
+                            };
+                            if visible {
+                                out.push(format!("tbl-{}-{}-{}", conn.index, db.index, table.name));
+                            }
+                        }
                     }
                 }
             }
@@ -331,6 +351,19 @@ impl TreePane {
                 if !keystroke.key.eq_ignore_ascii_case("f2") {
                     return;
                 }
+                // F2 on a group renames the group in place.
+                if let Some(id) = self.selected.as_deref()
+                    && let Some(rest) = id.strip_prefix("group-")
+                    && let Ok(group_id) = rest.parse::<u64>()
+                {
+                    cx.stop_propagation();
+                    let Some(app) = self.app.upgrade() else {
+                        return;
+                    };
+                    app.update(cx, |app, cx| app.begin_group_rename(group_id, window, cx));
+                    cx.notify();
+                    return;
+                }
                 let Some((connection_index, database_index, name, is_view)) =
                     self.selected_table.clone()
                 else {
@@ -390,6 +423,10 @@ impl TreePane {
                     }
                 });
             }
+        } else if let Some(rest) = id.strip_prefix("group-") {
+            if let Ok(group_id) = rest.parse::<u64>() {
+                app.update(cx, |app, cx| app.toggle_group(group_id, cx));
+            }
         } else if let Some(rest) = id.strip_prefix("db-") {
             let mut parts = rest.split('-');
             let connection_index = parts.next().and_then(|value| value.parse::<usize>().ok());
@@ -441,6 +478,8 @@ impl TreePane {
 
         let click_app = self.app.clone();
         let menu_app = self.app.clone();
+        let drag_app = self.app.clone();
+        let drag_id = connection.id.clone();
         let row = div()
             .id(SharedString::from(conn_id.clone()))
             .flex()
@@ -489,8 +528,23 @@ impl TreePane {
                 cx.notify();
             }))
             .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    if let Some(app) = drag_app.upgrade() {
+                        app.update(cx, |app, _| {
+                            app.tree_press_start(
+                                TreeDragPayload::Connection(drag_id.clone()),
+                                event.position,
+                            );
+                        });
+                    }
+                    let _ = this;
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
                     this.selected = Some(format!("conn-{index}"));
                     let _ = menu_app.update(cx, |app, cx| {
                         app.context_menu = Some(ContextMenu {
@@ -537,7 +591,11 @@ impl TreePane {
             None => row,
         };
 
-        let body = div().flex().flex_col().w_full().child(row);
+        let body = div().flex().flex_col().w_full().child(tree_row_with_rect(
+            self.app.clone(),
+            row,
+            format!("conn-{index}"),
+        ));
 
         let mut sub = div().flex().flex_col().w_full();
 
@@ -630,6 +688,7 @@ impl TreePane {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
                     this.selected = Some(format!("db-{connection_index}-{database_index}"));
                     let _ = menu_app.update(cx, |app, cx| {
                         app.dump_submenu = None;
@@ -794,6 +853,7 @@ impl TreePane {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
                     this.selected = Some(format!(
                         "schema-{connection_index}-{database_index}-{menu_schema}"
                     ));
@@ -911,6 +971,7 @@ impl TreePane {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
                     // Tables offer New Table / Import / Export / Refresh; the other categories
                     // offer Refresh.
                     window.focus(&this.focus, cx);
@@ -1111,6 +1172,7 @@ impl TreePane {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
                     window.focus(&this.focus, cx);
                     this.selected = Some(format!(
                         "rtn-{connection_index}-{database_index}-{menu_name}"
@@ -1242,6 +1304,7 @@ impl TreePane {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
                     if editing_here {
                         return;
                     }
@@ -1346,11 +1409,171 @@ impl TreePane {
                     .child(name),
             )
     }
+
+    /// Render one top-level or nested layout entry (a group or a connection).
+    fn render_tree_entry(
+        &self,
+        entry: &GroupEntry,
+        connections: &[TreeConnection],
+        group_rename: Option<&(u64, Entity<TextInput>)>,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        match entry {
+            GroupEntry::Group(group) => self.render_group(group, connections, group_rename, cx),
+            GroupEntry::Connection(id) => match connections.iter().find(|conn| &conn.id == id) {
+                Some(conn) => self.render_connection(conn, cx).into_any_element(),
+                None => div().into_any_element(),
+            },
+        }
+    }
+
+    /// One group row of the connection tree, plus its (nested) children when expanded.
+    fn render_group(
+        &self,
+        group: &ConnectionGroup,
+        connections: &[TreeConnection],
+        group_rename: Option<&(u64, Entity<TextInput>)>,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let id = group.id;
+        let row_id = format!("group-{id}");
+        let click_id = row_id.clone();
+        let selected = self.selected.as_deref() == Some(row_id.as_str());
+        let renaming = group_rename.filter(|(rid, _)| *rid == id);
+        let editing_here = renaming.is_some();
+
+        let label: AnyElement = match renaming {
+            Some((_, input)) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(20.0))
+                // Keep clicks on the editor from reaching the row/background, so editing does not
+                // immediately steal focus away (and the caret can be placed).
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_this, _event, _window, cx| cx.stop_propagation()),
+                )
+                .child(ui::rename_field(theme, input.clone()))
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(group.name.clone())
+                .into_any_element(),
+        };
+
+        let select_app = self.app.clone();
+        let toggle_app = self.app.clone();
+        let drag_app = self.app.clone();
+        let menu_app = self.app.clone();
+
+        let row = div()
+            .id(SharedString::from(row_id.clone()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .h(px(22.0))
+            .pl_1()
+            .pr_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .overflow_hidden()
+            .when(selected, move |style| {
+                style
+                    .bg(rgb(theme.tree_selected_bg))
+                    .text_color(rgb(theme.tree_selected_text))
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, event, window, cx| {
+                if editing_here {
+                    return;
+                }
+                this.commit_pending_rename(cx);
+                this.selected_table = None;
+                window.focus(&this.focus, cx);
+                this.selected = Some(click_id.clone());
+                let double_click =
+                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                if let Some(app) = select_app.upgrade() {
+                    app.update(cx, |app, cx| {
+                        if double_click {
+                            app.toggle_group(id, cx);
+                        } else {
+                            cx.notify();
+                        }
+                    });
+                }
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    if editing_here {
+                        return;
+                    }
+                    if let Some(app) = drag_app.upgrade() {
+                        app.update(cx, |app, _| {
+                            app.tree_press_start(TreeDragPayload::Group(id), event.position);
+                        });
+                    }
+                    let _ = this;
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.selected = Some(row_id.clone());
+                    this.selected_table = None;
+                    if let Some(app) = menu_app.upgrade() {
+                        app.update(cx, |app, cx| {
+                            app.move_submenu = None;
+                            app.context_menu = Some(ContextMenu {
+                                target: ContextTarget::Group { id },
+                                position: event.position,
+                            });
+                            cx.notify();
+                        });
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("group-toggle-{id}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_none()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |_this, _event, _window, cx| {
+                        let _ = toggle_app.update(cx, |app, cx| app.toggle_group(id, cx));
+                    }))
+                    .child(tree_chevron(group.expanded, theme.chevron)),
+            )
+            .child(tree_icon("icons/folder.svg", theme.icon_group))
+            .child(label);
+        let row = tree_row_with_rect(self.app.clone(), row, format!("group-{id}"));
+
+        let mut body = div().flex().flex_col().w_full().child(row);
+        if group.expanded {
+            let mut children = div().flex().flex_col().w_full().pl(px(12.0));
+            for child in &group.children {
+                children =
+                    children.child(self.render_tree_entry(child, connections, group_rename, cx));
+            }
+            body = body.child(children);
+        }
+        body.into_any_element()
+    }
 }
 
 impl Render for TreePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, connections, rename) = {
+        let (theme, connections, layout, rename, group_rename) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -1358,17 +1581,21 @@ impl Render for TreePane {
             (
                 app.theme,
                 snapshot_connections(app),
+                app.tree_layout.clone(),
                 app.rename_row(RowPane::Tree),
+                app.group_rename
+                    .as_ref()
+                    .map(|edit| (edit.id, edit.input.clone())),
             )
         };
         self.theme = theme;
         self.rename_row = rename;
 
         self.visible_ids.clear();
-        collect_visible_ids(&connections, &mut self.visible_ids);
+        collect_visible_ids(&layout, &connections, &mut self.visible_ids);
 
         let mut list = div().flex().flex_col().w_full();
-        if connections.is_empty() {
+        if layout.is_empty() {
             list = list.child(
                 div()
                     .w_full()
@@ -1377,15 +1604,23 @@ impl Render for TreePane {
                     .child(t!("sidebar.no_connections").to_string()),
             );
         }
-        for connection in &connections {
-            list = list.child(self.render_connection(connection, cx));
+        for entry in &layout {
+            list =
+                list.child(self.render_tree_entry(entry, &connections, group_rename.as_ref(), cx));
         }
 
-        div()
+        // The drag hit-test reads last frame's rectangles; drop them now so the rows can republish
+        // them during this frame's paint. The drop indicator itself is drawn by `AppView` (which
+        // re-renders on every drag move), not here.
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, _| app.clear_tree_row_rects());
+        }
+
+        let container = div()
             .flex()
             .flex_col()
             .w_full()
-            .flex_1()
+            .h_full()
             .min_h(px(0.0))
             .child(
                 div()
@@ -1411,8 +1646,72 @@ impl Render for TreePane {
                             window.focus(&this.focus, cx);
                         }),
                     )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            // Only the blank area reaches here: every row's right-click handler
+                            // stops propagation.
+                            window.focus(&this.focus, cx);
+                            this.selected = None;
+                            this.selected_table = None;
+                            if let Some(app) = this.app.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.dump_submenu = None;
+                                    app.move_submenu = None;
+                                    app.context_menu = Some(ContextMenu {
+                                        target: ContextTarget::TreeBlank,
+                                        position: event.position,
+                                    });
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    )
                     .child(list),
-            )
-            .into_any_element()
+            );
+        container.into_any_element()
     }
+}
+
+/// Wrap a connection-tree row so it publishes its window-space rectangle for the drag hit test.
+fn tree_row_with_rect(
+    app: WeakEntity<AppView>,
+    row: impl IntoElement + 'static,
+    key: String,
+) -> AnyElement {
+    div()
+        .on_children_prepainted(move |bounds, _window, cx| {
+            let Some(rect) = bounds.first().copied() else {
+                return;
+            };
+            let _ = app.update(cx, |app, _| app.note_tree_row_rect(key.clone(), rect));
+        })
+        .child(row)
+        .into_any_element()
+}
+
+/// Draw the drag-and-drop indicator (a 2px line or a group highlight) in window coordinates.
+pub(super) fn tree_drop_indicator_element(hint: groups::TreeDropHint, theme: Theme) -> AnyElement {
+    let element = match hint {
+        groups::TreeDropHint::Line(bounds) => div()
+            .absolute()
+            .left(bounds.left())
+            .top(bounds.top())
+            .w(bounds.size.width)
+            .h(px(2.0))
+            .bg(rgb(theme.brand))
+            .into_any_element(),
+        groups::TreeDropHint::Highlight(bounds) => div()
+            .absolute()
+            .left(bounds.left())
+            .top(bounds.top())
+            .w(bounds.size.width)
+            .h(bounds.size.height)
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(theme.brand))
+            .bg(rgba(0x3b82f622))
+            .into_any_element(),
+    };
+    deferred(element).with_priority(60).into_any_element()
 }

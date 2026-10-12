@@ -134,12 +134,18 @@ impl AppView {
                 }
             }
             DeleteConfirm::Connection { index } => self.delete_connection(index, cx),
+            DeleteConfirm::Group { id } => self.delete_group(id, cx),
             DeleteConfirm::Table {
                 connection_index,
                 database_index,
                 name,
                 operation,
             } => self.run_table_operation(connection_index, database_index, name, operation, cx),
+            DeleteConfirm::Tables {
+                connection_index,
+                database_index,
+                names,
+            } => self.run_drop_tables(connection_index, database_index, names, cx),
             DeleteConfirm::SavedQuery { index } => self.delete_saved_query(index, cx),
             DeleteConfirm::BackupFile { index } => self.delete_backup_file(index, cx),
             DeleteConfirm::BackupConfig { index } => self.delete_backup_config(index, cx),

@@ -196,6 +196,7 @@ impl AppView {
 
             let _ = this.update(cx, |view, cx| match result {
                 Ok(connection) => {
+                    let profile_id = profile.id.clone();
                     view.connections.push(ConnectionNode {
                         profile,
                         password,
@@ -206,8 +207,12 @@ impl AppView {
                     });
                     let index = view.connections.len() - 1;
 
+                    let target_group = view.pending_group.take();
+                    view.add_connection_to_tree(profile_id, target_group);
+
                     view.persist_profiles(cx);
                     view.persist_secrets(cx);
+                    view.persist_settings();
 
                     view.close_connection_window(cx);
                     view.load_databases(index, cx);

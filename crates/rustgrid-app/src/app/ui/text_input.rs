@@ -92,10 +92,15 @@ pub(crate) struct TextInput {
     programmatic_value: Option<String>,
     /// An Enter press reported by the inner input, waiting for the next render.
     pending_submit: bool,
+    /// A focus loss reported by the inner input, waiting for the next render.
+    pending_blur: bool,
     on_change: Option<TextChangeCallback>,
     on_submit: Option<TextVoidCallback>,
     on_cancel: Option<TextVoidCallback>,
     on_tab: Option<TextTabCallback>,
+    /// Called when the field loses focus (the inner gpui-kit input's `Blur` event). Used by the
+    /// in-place tree rename to commit on click-away.
+    on_blur: Option<TextVoidCallback>,
 }
 
 impl TextInput {
@@ -124,10 +129,12 @@ impl TextInput {
             pending_change: None,
             programmatic_value: None,
             pending_submit: false,
+            pending_blur: false,
             on_change: None,
             on_submit: None,
             on_cancel: None,
             on_tab: None,
+            on_blur: None,
         }
     }
 
@@ -194,6 +201,12 @@ impl TextInput {
         self
     }
 
+    /// Called when the field loses focus (commit-on-click-away).
+    pub(crate) fn on_blur(mut self, callback: TextVoidCallback) -> Self {
+        self.on_blur = Some(callback);
+        self
+    }
+
     /// Creates the inner gpui-kit state on the first render and wires its events.
     fn ensure_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.is_some() {
@@ -231,6 +244,10 @@ impl TextInput {
                     }
                     InputEvent::PressEnter { .. } => {
                         this.pending_submit = true;
+                        cx.notify();
+                    }
+                    InputEvent::Blur => {
+                        this.pending_blur = true;
                         cx.notify();
                     }
                     _ => {}
@@ -293,6 +310,13 @@ impl TextInput {
         if self.pending_submit {
             self.pending_submit = false;
             if let Some(callback) = self.on_submit.clone() {
+                callback(window, cx);
+            }
+        }
+
+        if self.pending_blur {
+            self.pending_blur = false;
+            if let Some(callback) = self.on_blur.clone() {
                 callback(window, cx);
             }
         }

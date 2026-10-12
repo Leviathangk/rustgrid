@@ -122,6 +122,11 @@ impl AppView {
         }
         let design_enabled = category == Category::Tables && open_enabled;
         let new_enabled = category == Category::Tables;
+        // Deleting works off the multi-selection: enabled when at least one row is selected, even
+        // if more than one (`pane.selected` is the single-selection mirror and is `None` for a
+        // multi-row selection).
+        let delete_enabled =
+            category == Category::Tables && (open_enabled || !self.objects_selection.is_empty());
         // Export works off the multi-selection: enabled when at least one row is selected, even if
         // more than one (`pane.selected` is the single-selection mirror and is `None` for a
         // multi-row selection).
@@ -217,22 +222,26 @@ impl AppView {
                         "obj-delete",
                         "icons/delete_table.svg",
                         t!("object.delete_table").to_string(),
-                        design_enabled,
+                        delete_enabled,
                         cx.listener(move |this, _event, _window, cx| {
-                            let Some((connection_index, database_index, name, is_view)) =
-                                object_selection(&pane_for_delete, cx)
-                            else {
-                                return;
-                            };
+                            let (connection_index, database_index, is_view) =
+                                object_scope(&pane_for_delete, cx);
                             // Views are dropped from the Views toolbar; here only tables.
                             if is_view {
                                 return;
                             }
-                            this.delete_confirm = Some(DeleteConfirm::Table {
+                            let mut names = this.objects_selection.items();
+                            if names.is_empty() {
+                                let Some((_, _, name, _)) = object_selection(&pane_for_delete, cx)
+                                else {
+                                    return;
+                                };
+                                names.push(name);
+                            }
+                            this.delete_confirm = Some(DeleteConfirm::Tables {
                                 connection_index,
                                 database_index,
-                                name,
-                                operation: TableOperation::Drop,
+                                names,
                             });
                             cx.notify();
                         }),
@@ -1774,7 +1783,7 @@ impl ObjectPane {
         app.update(cx, |app, cx| app.submit_rename(cx));
     }
 
-    /// F2 starts editing the selected object's name in place.
+    /// F2 starts editing the selected object's name in place; Ctrl/Cmd+A selects every visible row.
     fn object_key(
         &mut self,
         event: &KeyDownEvent,
@@ -1782,6 +1791,20 @@ impl ObjectPane {
         cx: &mut Context<'_, Self>,
     ) {
         let keystroke = &event.keystroke;
+        if (keystroke.modifiers.control || keystroke.modifiers.platform)
+            && !keystroke.modifiers.alt
+            && keystroke.key.eq_ignore_ascii_case("a")
+        {
+            cx.stop_propagation();
+            let visible = self.visible_keys.clone();
+            if let Some(app) = self.app.upgrade() {
+                app.update(cx, |app, _| app.objects_selection.select_all(&visible));
+            }
+            self.sync_single_from_app(cx);
+            self.notify_app(cx);
+            cx.notify();
+            return;
+        }
         if keystroke.modifiers.control
             || keystroke.modifiers.platform
             || keystroke.modifiers.alt
