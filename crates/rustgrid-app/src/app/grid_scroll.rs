@@ -135,18 +135,57 @@ impl GridView {
         self.grid_vscroll_set(relative, grab, cx);
     }
 
-    pub(super) fn grid_vscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
+    pub(super) fn grid_vscroll_set(
+        &mut self,
+        relative: f32,
+        grab: f32,
+        cx: &mut Context<'_, Self>,
+    ) {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
-        let max = (self.display_row_count() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
+        let rows = self.display_row_count();
+        let max = (rows as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
         }
         let thumb_y = (relative - grab).clamp(0.0, travel);
         let scroll = thumb_y / travel * max;
+        let old_scroll = -f32::from(handle.offset().y);
         let x = handle.offset().x;
         handle.set_offset(Point::new(x, px(-scroll)));
+        // Drag the selected cell along with the viewport. Without this the selection is left
+        // off-screen, and the very next wheel notch (which moves the selection and then scrolls it
+        // back into view) snapped the whole grid back to the selected row.
+        self.follow_scrollbar(scroll, old_scroll, viewport, rows);
         cx.notify();
+    }
+
+    /// Move the selected cell by the same number of rows the viewport just scrolled, keeping its
+    /// screen position and clamping it inside the viewport, so dragging the scrollbar carries the
+    /// selection with it (at most it lands at the top/bottom of the visible rows).
+    fn follow_scrollbar(&mut self, scroll: f32, old_scroll: f32, viewport: f32, rows: usize) {
+        if rows == 0 || viewport <= 0.0 {
+            return;
+        }
+        let Some((row, col)) = self
+            .state
+            .selection
+            .as_ref()
+            .map(|selection| selection.active_cursor())
+        else {
+            return;
+        };
+        let old_first = (old_scroll / GRID_ROW_HEIGHT).floor() as isize;
+        let first = (scroll / GRID_ROW_HEIGHT).floor() as isize;
+        let visible = (viewport / GRID_ROW_HEIGHT).ceil() as isize;
+        let last = (first + visible).clamp(1, rows as isize);
+        // The row the cursor should be on if it keeps its screen position, clamped so it stays
+        // visible.
+        let target = (row as isize) + (first - old_first);
+        let new_row = target.clamp(first, (last - 1).max(first)) as usize;
+        if new_row != row {
+            self.state.selection = Some(CellSelection::single((new_row, col), (new_row, col)));
+        }
     }
 }
