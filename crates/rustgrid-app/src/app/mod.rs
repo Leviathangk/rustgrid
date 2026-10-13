@@ -70,11 +70,29 @@ gpui::actions!(grid, [NextCell, PrevCell, MoveCellUp, MoveCellDown]);
 
 // Backup-list actions. `Root` binds `ctrl-c` to a copy action in the `"Root"` context, which
 // would swallow the keystroke before `on_key_down`; binding our own actions in a deeper context
-// (the backup list) takes precedence, like the grid's Tab binding above.
-gpui::actions!(backup, [CopyBackupFile, PasteBackupFile, RenameBackupFile]);
+// (the backup list) takes precedence, like the grid's Tab binding above. `SelectAllBackups` lets
+// Ctrl+A select every row, matching Explorer's list behavior.
+gpui::actions!(
+    backup,
+    [
+        CopyBackupFile,
+        PasteBackupFile,
+        RenameBackupFile,
+        SelectAllBackups
+    ]
+);
 
-// Saved-query file-list actions, mirroring the backup list's F2 / Ctrl+C / Ctrl+V handling.
-gpui::actions!(queryfile, [CopyQueryFile, PasteQueryFile, RenameQueryFile]);
+// Saved-query file-list actions, mirroring the backup list's F2 / Ctrl+C / Ctrl+V / Ctrl+A
+// handling.
+gpui::actions!(
+    queryfile,
+    [
+        CopyQueryFile,
+        PasteQueryFile,
+        RenameQueryFile,
+        SelectAllQueries
+    ]
+);
 
 // Query-editor actions. The editor's own undo/redo bindings handle Ctrl+Z; `RunSelectedQuery`
 // is dispatched from the editor's right-click menu and Ctrl+Enter, and `SaveQuery` from Ctrl+S.
@@ -352,6 +370,10 @@ struct NewBackupDialog {
     running: bool,
     /// Set by 停止 to abort the run loop early (checked between objects/rows).
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by 暂停 and cleared by 继续; the run loop parks between objects while it is set.
+    pause: Arc<std::sync::atomic::AtomicBool>,
+    /// UI mirror of `pause`, so the footer shows 暂停 vs 继续 without reading the atomic.
+    paused: bool,
     log: Vec<String>,
     /// Keeps the info log scrolled to the newest line while the operation runs.
     log_scroll: ScrollHandle,
@@ -1450,10 +1472,18 @@ enum DeleteConfirm {
     },
     /// Delete a saved query from the saved-query list.
     SavedQuery { index: usize },
+    /// Delete several saved queries at once (the list's multi-selection).
+    SavedQueries { indices: Vec<usize> },
     /// Delete a backup file from disk.
     BackupFile { index: usize },
     /// Delete a saved backup configuration.
     BackupConfig { index: usize },
+    /// Delete several backup files and/or saved configurations at once (the list's
+    /// multi-selection).
+    BackupEntries {
+        files: Vec<usize>,
+        configs: Vec<usize>,
+    },
     /// Delete the selected row(s) of a table designer's fields/indexes/foreign-keys grid.
     DesignRows {
         design_id: u64,
@@ -1871,6 +1901,12 @@ pub struct AppView {
     /// keeps a selection alive across the dialog's per-frame rebuilds while letting a drag select
     /// and copy across log lines.
     log_handle: gpui_kit::base::TextSelectionHandle,
+    /// Where the log box's right-click menu (复制 / 全选) is open, in the backup window's space.
+    /// Drawn by `backup_window_contents` so it survives that window's per-frame rebuilds.
+    log_menu: Option<Point<Pixels>>,
+    /// Whether the log's 全选 is active: every line is tinted as selected and 复制 takes the whole
+    /// log. Cleared by a plain click in the log.
+    log_select_all: bool,
     window_bounds_subscription: Option<Subscription>,
     theme_setting: ThemeSetting,
     theme: Theme,
@@ -2209,11 +2245,15 @@ impl AppView {
             KeyBinding::new("cmd-c", CopyBackupFile, Some(BACKUP_LIST_CONTEXT)),
             KeyBinding::new("ctrl-v", PasteBackupFile, Some(BACKUP_LIST_CONTEXT)),
             KeyBinding::new("cmd-v", PasteBackupFile, Some(BACKUP_LIST_CONTEXT)),
+            KeyBinding::new("ctrl-a", SelectAllBackups, Some(BACKUP_LIST_CONTEXT)),
+            KeyBinding::new("cmd-a", SelectAllBackups, Some(BACKUP_LIST_CONTEXT)),
             KeyBinding::new("f2", RenameQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("ctrl-c", CopyQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("cmd-c", CopyQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("ctrl-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
             KeyBinding::new("cmd-v", PasteQueryFile, Some(QUERY_LIST_CONTEXT)),
+            KeyBinding::new("ctrl-a", SelectAllQueries, Some(QUERY_LIST_CONTEXT)),
+            KeyBinding::new("cmd-a", SelectAllQueries, Some(QUERY_LIST_CONTEXT)),
             // Run the editor's selection (or whole script) and save it from the editor.
             KeyBinding::new("ctrl-enter", RunSelectedQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("cmd-enter", RunSelectedQuery, Some(QUERY_EDITOR_CONTEXT)),
@@ -2425,6 +2465,8 @@ impl AppView {
             dialog_focus_done: false,
             opened_dialog: None,
             log_handle: gpui_kit::base::TextSelectionHandle::new(String::new(), cx),
+            log_menu: None,
+            log_select_all: false,
             window_bounds_subscription: None,
             theme_setting,
             theme: Theme::dark(),

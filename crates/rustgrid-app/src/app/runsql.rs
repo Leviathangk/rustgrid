@@ -589,6 +589,31 @@ impl AppView {
                         elapsed_text,
                         theme,
                     ));
+                let log_box = render_log_lines(
+                    &log,
+                    &log_scroll,
+                    &self.log_handle,
+                    theme,
+                    self.log_select_all,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|app, _event, _window, cx| {
+                        if app.log_select_all || app.log_menu.is_some() {
+                            app.log_select_all = false;
+                            app.log_menu = None;
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|app, event: &MouseDownEvent, _window, cx| {
+                        app.log_menu = Some(event.position);
+                        app.log_select_all = false;
+                        cx.notify();
+                    }),
+                );
                 div()
                     .flex()
                     .flex_col()
@@ -603,7 +628,7 @@ impl AppView {
                     .bg(rgb(theme.dialog_bg))
                     .overflow_hidden()
                     .child(summary)
-                    .child(render_log_lines(&log, &log_scroll, &self.log_handle, theme))
+                    .child(log_box)
                     .child(
                         div()
                             .h(px(6.0))

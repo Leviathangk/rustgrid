@@ -453,6 +453,17 @@ impl Render for GridView {
                                     }
                                 }
                             };
+                            // A cell is exactly one row tall and truncates horizontally, so a value
+                            // that carries embedded line breaks (long PEM/base64 text, `TEXT`
+                            // columns) must be flattened first — otherwise its extra lines spill
+                            // over the rows below and the grid reads as garbled. The raw value is
+                            // kept for the editor and for copy/paste; only the display is collapsed.
+                            // Avoid the extra allocation when the value has no line break.
+                            let display = if display.contains(['\r', '\n', '\t']) {
+                                single_line(&display)
+                            } else {
+                                display
+                            };
                             let mut cell_element = div()
                                 .flex()
                                 .items_center()
@@ -648,6 +659,7 @@ impl Render for GridView {
             );
         }
         let wheel_weak = cx.weak_entity();
+        let wheel_focus = self.focus.clone();
         root = root.child(
             div()
                 .relative()
@@ -676,6 +688,7 @@ impl Render for GridView {
                 )
                 .child({
                     let weak = wheel_weak.clone();
+                    let grid_focus = wheel_focus.clone();
                     // The wheel handler must ignore events aimed at an overlay above the grid —
                     // the combobox popup covers the window with `.occlude()`. A plain rectangle
                     // test on the grid bounds cannot see that, so insert a hitbox and use gpui's
@@ -683,6 +696,7 @@ impl Render for GridView {
                     canvas(
                         |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                         move |_bounds, hitbox, window, _cx| {
+                            let grid_focus = grid_focus.clone();
                             window.on_mouse_event(
                                 move |event: &ScrollWheelEvent, phase, window, cx| {
                                     if phase != DispatchPhase::Capture
@@ -702,17 +716,28 @@ impl Render for GridView {
                                         return;
                                     }
                                     let position = event.position;
-                                    let _ = weak.update(cx, |this, cx| {
-                                        // A horizontal trackpad swipe pans the columns; the
-                                        // vertical wheel keeps driving vertical scrolling.
-                                        let horizontal =
-                                            dx != 0.0 && this.scroll_grid_columns(dx, cx);
-                                        let vertical = dy != 0.0
-                                            && this.scroll_grid_selection(position, dy, cx);
-                                        if horizontal || vertical {
-                                            cx.stop_propagation();
-                                        }
-                                    });
+                                    let consumed = weak
+                                        .update(cx, |this, cx| {
+                                            // A horizontal trackpad swipe pans the columns; the
+                                            // vertical wheel keeps driving vertical scrolling.
+                                            let horizontal =
+                                                dx != 0.0 && this.scroll_grid_columns(dx, cx);
+                                            let vertical = dy != 0.0
+                                                && this.scroll_grid_selection(position, dy, cx);
+                                            if horizontal || vertical {
+                                                cx.stop_propagation();
+                                            }
+                                            horizontal || vertical
+                                        })
+                                        .unwrap_or(false);
+                                    if consumed {
+                                        // Scrolling is an implicit commit of an in-place cell
+                                        // editor, and dropping that editor also drops the keyboard
+                                        // focus it held — after which Ctrl+C, the arrow keys and
+                                        // Delete would silently do nothing. Hand focus back to the
+                                        // grid so its shortcuts keep working.
+                                        window.focus(&grid_focus, cx);
+                                    }
                                 },
                             );
                         },

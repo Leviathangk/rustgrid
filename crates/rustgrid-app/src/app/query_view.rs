@@ -402,6 +402,9 @@ impl AppView {
             .on_action(cx.listener(|this, _: &PasteQueryFile, _window, cx| {
                 this.paste_query_file(cx);
             }))
+            .on_action(cx.listener(|this, _: &SelectAllQueries, _window, cx| {
+                this.select_all_queries(cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {

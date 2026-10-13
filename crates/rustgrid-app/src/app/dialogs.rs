@@ -1034,6 +1034,22 @@ impl AppView {
                     t!("query.delete_button").to_string(),
                 )
             }
+            Some(DeleteConfirm::SavedQueries { indices }) => {
+                let count = indices.len();
+                (
+                    t!("query.delete_title").to_string(),
+                    t!("query.delete_multi_confirm", count = count).to_string(),
+                    t!("query.delete_multi_button", count = count).to_string(),
+                )
+            }
+            Some(DeleteConfirm::BackupEntries { files, configs }) => {
+                let count = files.len() + configs.len();
+                (
+                    t!("backup.delete_title").to_string(),
+                    t!("backup.delete_multi_confirm", count = count).to_string(),
+                    t!("backup.delete_multi_button", count = count).to_string(),
+                )
+            }
             Some(DeleteConfirm::BackupFile { index }) => {
                 let name = self
                     .backup_files

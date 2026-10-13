@@ -471,7 +471,7 @@ impl AppView {
     }
 
     /// The window body of the open dump dialog.
-    pub(super) fn dump_dialog_body(&mut self, _cx: &mut Context<'_, Self>) -> AnyElement {
+    pub(super) fn dump_dialog_body(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let Some(dialog) = self.dump_dialog.as_ref() else {
             return div().into_any_element();
@@ -534,6 +534,8 @@ impl AppView {
                 &self.log_handle,
                 &stats,
                 theme,
+                self.log_select_all,
+                cx,
             ))
             .into_any_element()
     }

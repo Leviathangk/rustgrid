@@ -306,7 +306,7 @@ impl AppView {
     /// The object toolbar shown for the `Queries` category, including when no database is open.
     pub(super) fn render_query_object_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
-        let delete_enabled = self.query_selected_in_scope(cx);
+        let delete_enabled = !self.selected_query_indices(cx).is_empty();
         div()
             .flex()
             .flex_row()
@@ -337,9 +337,7 @@ impl AppView {
                         t!("connection.delete").to_string(),
                         delete_enabled,
                         cx.listener(|this, _event, _window, cx| {
-                            if let Some(index) = this.saved_query_selected {
-                                this.confirm_delete_saved_query(index, cx);
-                            }
+                            this.confirm_delete_selected_queries(cx);
                         }),
                     ))
                     .child(toolbar_separator(theme))

@@ -1,13 +1,20 @@
 # Build and publish the portable RustGrid release archives when a `v*` tag is pushed.
 #
-# Produces five assets, one per platform/arch (the names MUST contain the `platform` tag the app
+# Produces six assets, one per platform/arch (the names MUST contain the `platform` tag the app
 # looks for in `crates/rustgrid-app/src/app/update.rs`):
 #
 #   RustGrid-<version>-windows-x64.zip
 #   RustGrid-<version>-windows-arm64.zip
 #   RustGrid-<version>-macos-arm64.tar.gz
+#   RustGrid-<version>-macos-x64.tar.gz
 #   RustGrid-<version>-linux-x64.tar.gz
 #   RustGrid-<version>-linux-arm64.tar.gz
+#
+# Both macOS archives are built on the arm64 runner (macOS 15); `macos-x64` cross-compiles
+# `x86_64-apple-darwin` there because GitHub retired its Intel `macos-13` image, and the successor
+# `macos-15-intel` is itself scheduled to disappear after August 2027. `MACOSX_DEPLOYMENT_TARGET`
+# pins the minimum OS to macOS 12 (Monterey) — without it cc-rs stamps every C dependency with the
+# runner's SDK version, which would raise the whole binary's floor.
 #
 # Each archive holds the single self-contained executable at its root (`RustGrid.exe` on Windows,
 # `RustGrid` elsewhere). Only the Windows x64 executable is UPX-compressed: UPX would break macOS
@@ -45,9 +52,14 @@ jobs:
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             platform: windows-arm64
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             platform: macos-arm64
+          # Cross-compiled from the same arm64 runner; see the header note. The x86_64 std is
+          # installed by the `Install Rust` step below.
+          - os: macos-15
+            target: x86_64-apple-darwin
+            platform: macos-x64
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x64
@@ -61,6 +73,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # macOS binaries must run on macOS 12 (Monterey) and later. Both arches use the same floor;
+      # see the header note. Set before any compilation so `cc` and rustc both honour it.
+      - name: Set macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

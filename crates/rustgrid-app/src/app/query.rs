@@ -1726,24 +1726,6 @@ impl AppView {
         cx.notify();
     }
 
-    /// Whether the highlighted query file is inside the current scope (so Delete is enabled).
-    pub(super) fn query_selected_in_scope(&self, cx: &App) -> bool {
-        let Some(file) = self
-            .saved_query_selected
-            .and_then(|index| self.query_files.get(index))
-        else {
-            return false;
-        };
-        match self.query_scope(cx) {
-            Some((connection_id, database, schema)) => {
-                file.connection_id == connection_id
-                    && file.database == database
-                    && query_in_scope(file, schema.as_deref())
-            }
-            None => false,
-        }
-    }
-
     /// Open a saved query file in a new editor tab (or activate the tab that already shows it).
     pub(super) fn open_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let Some(file) = self.query_files.get(index) else {
@@ -1803,6 +1785,14 @@ impl AppView {
         cx.notify();
     }
 
+    /// Select every visible saved query (Ctrl+A), keeping the single-selection mirror in step.
+    pub(super) fn select_all_queries(&mut self, cx: &mut Context<'_, Self>) {
+        let visible = self.query_visible_keys(cx);
+        self.query_selection.select_all(&visible);
+        self.sync_query_selected();
+        cx.notify();
+    }
+
     /// Ask for confirmation before deleting a query file.
     pub(super) fn confirm_delete_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if index >= self.query_files.len() {
@@ -1810,6 +1800,64 @@ impl AppView {
         }
         self.delete_confirm = Some(DeleteConfirm::SavedQuery { index });
         cx.notify();
+    }
+
+    /// The indices of the selected saved queries that belong to the current scope. A scope change
+    /// can leave stale keys in the selection, so the toolbar and delete always re-filter.
+    pub(super) fn selected_query_indices(&self, cx: &App) -> Vec<usize> {
+        let in_scope: std::collections::HashSet<usize> =
+            self.visible_query_files(cx).into_iter().collect();
+        self.query_selection
+            .items()
+            .into_iter()
+            .filter_map(|key| {
+                self.query_files
+                    .iter()
+                    .position(|file| query_file_key(file) == key)
+            })
+            .filter(|index| in_scope.contains(index))
+            .collect()
+    }
+
+    /// Ask for confirmation before deleting every selected query (the list's multi-selection).
+    /// A lone selection keeps the specific "delete this query" wording.
+    pub(super) fn confirm_delete_selected_queries(&mut self, cx: &mut Context<'_, Self>) {
+        let indices = self.selected_query_indices(cx);
+        if indices.is_empty() {
+            return;
+        }
+        self.delete_confirm = if indices.len() == 1 {
+            Some(DeleteConfirm::SavedQuery { index: indices[0] })
+        } else {
+            Some(DeleteConfirm::SavedQueries { indices })
+        };
+        cx.notify();
+    }
+
+    /// Delete several saved query files at once.
+    pub(super) fn delete_saved_queries(&mut self, indices: Vec<usize>, cx: &mut Context<'_, Self>) {
+        let mut indices = indices;
+        indices.sort_unstable();
+        indices.dedup();
+        // Remove from the end so the earlier indices stay valid.
+        for index in indices.into_iter().rev() {
+            let Some(file) = self.query_files.get(index) else {
+                continue;
+            };
+            let query = SavedQuery {
+                name: file.name.clone(),
+                sql: String::new(),
+                connection_id: file.connection_id.clone(),
+                database: file.database.clone(),
+                schema: file.schema.clone(),
+            };
+            if let Err(error) = self.config.delete_query_file(&query) {
+                self.error_dialog = Some(error.to_string());
+            }
+        }
+        self.saved_query_selected = None;
+        self.query_selection.clear();
+        self.refresh_query_files(cx);
     }
 
     pub(super) fn delete_saved_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {

@@ -349,7 +349,8 @@ impl AppView {
         let theme = self.theme;
         let in_scope = self.backup_scope(cx).is_some();
         let has_file = in_scope && self.backup_single_selection().is_some_and(|s| s.is_file());
-        let has_selection = in_scope && !self.backups_selection.is_empty();
+        let (selected_files, selected_configs) = self.selected_backup_entries(cx);
+        let has_selection = in_scope && !(selected_files.is_empty() && selected_configs.is_empty());
         let can_create = in_scope;
         let weak = cx.weak_entity();
         let on_select = Rc::new(
@@ -492,6 +493,9 @@ impl AppView {
             }))
             .on_action(cx.listener(|this, _: &PasteBackupFile, _window, cx| {
                 this.paste_backup(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllBackups, _window, cx| {
+                this.select_all_backups(cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1245,16 +1249,103 @@ impl AppView {
         cx.notify();
     }
 
-    pub(super) fn confirm_delete_backup(&mut self, cx: &mut Context<'_, Self>) {
-        match self.backup_selected {
-            Some(BackupSelection::File(index)) => {
-                self.delete_confirm = Some(DeleteConfirm::BackupFile { index });
+    /// Select every visible backup row (Ctrl+A), keeping the single-selection mirror in step.
+    pub(super) fn select_all_backups(&mut self, cx: &mut Context<'_, Self>) {
+        let visible = self.backup_visible_keys(cx);
+        self.backups_selection.select_all(&visible);
+        self.sync_backup_selected();
+        cx.notify();
+    }
+
+    /// The selected backup files and saved profiles that belong to the current scope. A scope
+    /// change can leave stale keys in the selection, so the toolbar and delete always re-filter.
+    fn selected_backup_entries(&self, cx: &App) -> (Vec<usize>, Vec<usize>) {
+        let file_scope: std::collections::HashSet<usize> =
+            self.visible_backup_files(cx).into_iter().collect();
+        let config_scope: std::collections::HashSet<usize> =
+            self.visible_backup_configs(cx).into_iter().collect();
+        let mut files = Vec::new();
+        let mut configs = Vec::new();
+        for key in self.backups_selection.items() {
+            match backup_entry_from_key(&key) {
+                Some(BackupEntry::File(_)) => {
+                    if let Some(index) = self
+                        .backup_files
+                        .iter()
+                        .position(|file| backup_file_key(&file.name) == key)
+                        && file_scope.contains(&index)
+                    {
+                        files.push(index);
+                    }
+                }
+                Some(BackupEntry::Config(_)) => {
+                    if let Some(index) = self
+                        .backup_configs
+                        .iter()
+                        .position(|config| backup_config_key(&config.name) == key)
+                        && config_scope.contains(&index)
+                    {
+                        configs.push(index);
+                    }
+                }
+                None => {}
             }
-            Some(BackupSelection::Config(index)) => {
-                self.delete_confirm = Some(DeleteConfirm::BackupConfig { index });
-            }
-            None => {}
         }
+        (files, configs)
+    }
+
+    /// Ask for confirmation before deleting every selected backup entry (files and/or saved
+    /// profiles). A lone selection keeps the specific "delete this file/config" wording.
+    pub(super) fn confirm_delete_backup(&mut self, cx: &mut Context<'_, Self>) {
+        let (mut files, mut configs) = self.selected_backup_entries(cx);
+        // A right-click on a row that was not already selected replaces the selection first, but
+        // fall back to the single-selection mirror if the keys did not resolve.
+        if files.is_empty() && configs.is_empty() {
+            match self.backup_selected {
+                Some(BackupSelection::File(index)) => files.push(index),
+                Some(BackupSelection::Config(index)) => configs.push(index),
+                None => return,
+            }
+        }
+        self.delete_confirm = if files.len() == 1 && configs.is_empty() {
+            Some(DeleteConfirm::BackupFile { index: files[0] })
+        } else if files.is_empty() && configs.len() == 1 {
+            Some(DeleteConfirm::BackupConfig { index: configs[0] })
+        } else {
+            Some(DeleteConfirm::BackupEntries { files, configs })
+        };
+        cx.notify();
+    }
+
+    /// Delete several backup files and/or saved profiles at once.
+    pub(super) fn delete_backups(
+        &mut self,
+        files: Vec<usize>,
+        configs: Vec<usize>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        for index in &files {
+            if let Some(file) = self.backup_files.get(*index) {
+                let _ = std::fs::remove_file(&file.path);
+            }
+        }
+        let mut configs = configs;
+        configs.sort_unstable();
+        configs.dedup();
+        let mut removed_config = false;
+        // Remove from the end so the earlier indices stay valid.
+        for index in configs.into_iter().rev() {
+            if index < self.backup_configs.len() {
+                self.backup_configs.remove(index);
+                removed_config = true;
+            }
+        }
+        if removed_config && let Err(error) = self.config.save_backups(&self.backup_configs) {
+            self.warn_persist("backup profiles", error, cx);
+        }
+        self.backups_selection.clear();
+        self.backup_selected = None;
+        self.refresh_backups(cx);
         cx.notify();
     }
 
@@ -1702,6 +1793,8 @@ impl AppView {
             loading: false,
             running: false,
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            paused: false,
             log: Vec::new(),
             log_scroll: ScrollHandle::new(),
             total: 0,
@@ -2017,6 +2110,10 @@ impl AppView {
             dialog
                 .cancel
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+            dialog
+                .pause
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            dialog.paused = false;
             dialog.error = None;
             dialog.tab = BackupDialogTab::Log;
             dialog.log.clear();
@@ -2048,6 +2145,11 @@ impl AppView {
             .as_ref()
             .map(|dialog| dialog.cancel.clone())
             .unwrap_or_default();
+        let pause = self
+            .new_backup_dialog
+            .as_ref()
+            .map(|dialog| dialog.pause.clone())
+            .unwrap_or_default();
         let writer = match rustgrid_backup::BackupWriter::create(&path, &schema, &comment) {
             Ok(writer) => Arc::new(Mutex::new(writer)),
             Err(error) => {
@@ -2060,9 +2162,20 @@ impl AppView {
             }
         };
 
+        let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let mut fatal: Option<String> = None;
             for (kind, name) in selected {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                // Pause parks the loop here, between objects, until Resume (or Stop) is pressed.
+                // The short sleep keeps the task cooperative instead of spinning on the atomic.
+                while pause.load(std::sync::atomic::Ordering::Relaxed)
+                    && !cancel.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    executor.timer(Duration::from_millis(120)).await;
+                }
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
@@ -2199,12 +2312,28 @@ impl AppView {
         cx.notify();
     }
 
-    /// Ask the running backup to stop after the current object.
-    pub(super) fn backup_abort(&mut self, cx: &mut Context<'_, Self>) {
+    /// Pause the running backup: the run loop parks between objects until 继续.
+    pub(super) fn backup_pause(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
             dialog
-                .cancel
+                .pause
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            dialog.paused = true;
+            dialog.log.push(t!("backup.log.paused").to_string());
+            dialog.log_scroll.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    /// Resume a paused backup.
+    pub(super) fn backup_resume(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(dialog) = self.new_backup_dialog.as_mut() {
+            dialog
+                .pause
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            dialog.paused = false;
+            dialog.log.push(t!("backup.log.resumed").to_string());
+            dialog.log_scroll.scroll_to_bottom();
         }
         cx.notify();
     }
@@ -2253,6 +2382,10 @@ impl AppView {
     fn finish_backup(&mut self, fatal: Option<String>, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
             dialog.running = false;
+            dialog.paused = false;
+            dialog
+                .pause
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             if let Some(error) = &fatal {
                 dialog.error = Some(error.clone());
                 dialog.log.push(error.clone());
@@ -2715,6 +2848,10 @@ impl AppView {
         } else if self.run_sql_dialog.is_some() {
             t!("sqlfile.run_title").to_string()
         } else {
+            // No dialog is open: drop any log menu/tint left over from the previous one so the
+            // next dialog does not open with a stale menu on screen.
+            self.log_menu = None;
+            self.log_select_all = false;
             return div().into_any_element();
         };
         let (body, footer): (AnyElement, AnyElement) = if self.new_backup_dialog.is_some() {
@@ -2766,6 +2903,7 @@ impl AppView {
                     .and_then(|dialog| dialog.error.clone())
             });
         let mut root = div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -2792,7 +2930,83 @@ impl AppView {
         if let Some(error) = error {
             root = root.child(backup_error_banner(error, theme));
         }
-        root.child(footer).into_any_element()
+        let mut root = root.child(footer);
+        // The log's 复制 / 全选 menu floats over the whole window (not the log's clipped scroll
+        // container), so it is appended at the root and positioned in window space.
+        if let Some(position) = self.log_menu {
+            root = root.child(self.render_log_context_menu(position, theme, cx));
+        }
+        root.into_any_element()
+    }
+
+    /// The log box's right-click menu: 复制 (the selection, or the whole log when nothing is
+    /// selected) and 全选 (tint every line, so 复制 takes the whole log).
+    fn render_log_context_menu(
+        &self,
+        position: Point<Pixels>,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let log_text = self.active_log_text();
+        let items = div()
+            .flex()
+            .flex_col()
+            .w(px(170.0))
+            .p_0p5()
+            .child(self.context_item(
+                "log-menu-copy",
+                t!("backup.copy").to_string(),
+                cx.listener(move |app, _event, window, cx| {
+                    let selected = gpui_kit::base::TextSelection::selected_text(window, cx);
+                    let text = if selected.trim().is_empty() {
+                        log_text.clone()
+                    } else {
+                        selected
+                    };
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    app.log_menu = None;
+                    app.log_select_all = false;
+                    cx.notify();
+                }),
+            ))
+            .child(self.context_item(
+                "log-menu-select-all",
+                t!("backup.select_all").to_string(),
+                cx.listener(|app, _event, _window, cx| {
+                    app.log_select_all = true;
+                    app.log_menu = None;
+                    cx.notify();
+                }),
+            ));
+        ui::popup_panel(theme)
+            .id("log-menu")
+            .left(position.x)
+            .top(position.y)
+            .on_mouse_down_out(cx.listener(|app, _event: &MouseDownEvent, _window, cx| {
+                app.log_menu = None;
+                app.log_select_all = false;
+                cx.notify();
+            }))
+            .child(items)
+            .into_any_element()
+    }
+
+    /// The log currently shown in the backup window, joined for the 复制 menu item.
+    fn active_log_text(&self) -> String {
+        let log: Option<&[String]> = if let Some(dialog) = self.new_backup_dialog.as_ref() {
+            Some(&dialog.log)
+        } else if let Some(dialog) = self.restore_dialog.as_ref() {
+            Some(&dialog.log)
+        } else if let Some(dialog) = self.extract_dialog.as_ref() {
+            Some(&dialog.log)
+        } else if let Some(dialog) = self.dump_dialog.as_ref() {
+            Some(&dialog.log)
+        } else if let Some(dialog) = self.run_sql_dialog.as_ref() {
+            Some(&dialog.log)
+        } else {
+            None
+        };
+        log.map(|lines| lines.join("\n")).unwrap_or_default()
     }
 
     /// Open the OS window that hosts the Backup/Restore UI. It is a normal top-level window, so it
@@ -3069,6 +3283,8 @@ impl AppView {
                     &self.log_handle,
                     &stats,
                     theme,
+                    self.log_select_all,
+                    cx,
                 )
             }
         };
@@ -3151,6 +3367,40 @@ impl AppView {
 
     fn new_backup_dialog_footer(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        let (running, paused) = self
+            .new_backup_dialog
+            .as_ref()
+            .map(|dialog| (dialog.running, dialog.paused))
+            .unwrap_or((false, false));
+        // The run control is one button whose label follows the run state: 开始 before a run,
+        // 暂停 while it runs and 继续 while it is parked — exactly one of the three is ever shown
+        // (matching Navicat). 停止 and 关闭 were both removed: closing the window already cancels
+        // the run, so a stop button had nothing left to do.
+        let run_button: AnyElement = if !running {
+            self.dialog_button(
+                "backup-run",
+                t!("backup.start").to_string(),
+                true,
+                cx.listener(|this, _event, _window, cx| this.run_backup(cx)),
+            )
+            .into_any_element()
+        } else if paused {
+            self.dialog_button(
+                "backup-resume",
+                t!("backup.resume").to_string(),
+                true,
+                cx.listener(|this, _event, _window, cx| this.backup_resume(cx)),
+            )
+            .into_any_element()
+        } else {
+            self.dialog_button(
+                "backup-pause",
+                t!("backup.pause").to_string(),
+                true,
+                cx.listener(|this, _event, _window, cx| this.backup_pause(cx)),
+            )
+            .into_any_element()
+        };
         let name_input = match self.backup_name_input.clone() {
             Some(input) => div()
                 .w(px(220.0))
@@ -3202,40 +3452,7 @@ impl AppView {
                         false,
                         cx.listener(|this, _event, window, cx| this.save_backup_config(window, cx)),
                     ))
-                    .child(self.dialog_button(
-                        "backup-run",
-                        t!("backup.backup").to_string(),
-                        true,
-                        cx.listener(|this, _event, _window, cx| {
-                            if !this
-                                .new_backup_dialog
-                                .as_ref()
-                                .map(|dialog| dialog.running)
-                                .unwrap_or(false)
-                            {
-                                this.run_backup(cx);
-                            }
-                        }),
-                    ))
-                    .when(
-                        self.new_backup_dialog
-                            .as_ref()
-                            .is_some_and(|dialog| dialog.running),
-                        |row| {
-                            row.child(self.dialog_button(
-                                "backup-stop",
-                                t!("backup.stop").to_string(),
-                                false,
-                                cx.listener(|this, _event, _window, cx| this.backup_abort(cx)),
-                            ))
-                        },
-                    )
-                    .child(self.dialog_button(
-                        "backup-close",
-                        t!("backup.close").to_string(),
-                        false,
-                        cx.listener(|this, _event, window, cx| this.close_new_backup(window, cx)),
-                    )),
+                    .child(run_button),
             )
             .into_any_element()
     }
@@ -3243,6 +3460,9 @@ impl AppView {
     /// The small status indicator shown left of the footer's action buttons.
     fn backup_status_indicator(&self, theme: Theme) -> impl IntoElement {
         let (label, color) = match self.new_backup_dialog.as_ref() {
+            Some(dialog) if dialog.running && dialog.paused => {
+                (t!("backup.status.paused").to_string(), 0xf0a020)
+            }
             Some(dialog) if dialog.running => (t!("backup.status.running").to_string(), 0x22b14c),
             Some(dialog) if dialog.error.is_some() => {
                 (t!("backup.status.failed").to_string(), theme.danger)
@@ -3361,6 +3581,8 @@ impl AppView {
                     &self.log_handle,
                     &stats,
                     theme,
+                    self.log_select_all,
+                    cx,
                 )
             }
         };
@@ -3585,6 +3807,8 @@ impl AppView {
                     &self.log_handle,
                     &stats,
                     theme,
+                    self.log_select_all,
+                    cx,
                 )
             }
         };
@@ -4259,6 +4483,8 @@ pub(super) fn render_backup_log(
     handle: &gpui_kit::base::TextSelectionHandle,
     stats: &LogStats,
     theme: Theme,
+    select_all: bool,
+    cx: &mut Context<'_, AppView>,
 ) -> AnyElement {
     let summary = div()
         .flex()
@@ -4294,6 +4520,28 @@ pub(super) fn render_backup_log(
         ));
 
     let progress = stats.progress.clamp(0.0, 1.0);
+    // The log box opens the 复制 / 全选 menu on right-click and clears a 全选 tint on a plain
+    // click. The menu itself is drawn by `backup_window_contents` at the window root so it is not
+    // clipped by the log's scroll container.
+    let log_box = render_log_lines(log, scroll, handle, theme, select_all)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|app, _event, _window, cx| {
+                if app.log_select_all || app.log_menu.is_some() {
+                    app.log_select_all = false;
+                    app.log_menu = None;
+                    cx.notify();
+                }
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|app, event: &MouseDownEvent, _window, cx| {
+                app.log_menu = Some(event.position);
+                app.log_select_all = false;
+                cx.notify();
+            }),
+        );
     div()
         .flex()
         .flex_col()
@@ -4307,7 +4555,7 @@ pub(super) fn render_backup_log(
         .bg(rgb(theme.dialog_bg))
         .overflow_hidden()
         .child(summary)
-        .child(render_log_lines(log, scroll, handle, theme))
+        .child(log_box)
         .child(
             // Green progress bar (matches Navicat's restore/backup window).
             div()
@@ -4334,13 +4582,16 @@ pub(super) fn render_backup_log(
 /// for an `overflow_y_scroll` container.
 ///
 /// Shared by the backup/restore/extract/dump logs and the Run SQL File log, so every log view
-/// behaves the same.
+/// behaves the same. `select_all` tints every line as selected (the app's 全选); the caller adds
+/// the right-click menu that turns it on. Returned as a `Div` so `render_backup_log` can attach
+/// those handlers to the same panel.
 pub(super) fn render_log_lines(
     log: &[String],
     scroll: &ScrollHandle,
     handle: &gpui_kit::base::TextSelectionHandle,
     theme: Theme,
-) -> AnyElement {
+    select_all: bool,
+) -> Div {
     let mut content = div().flex().flex_col().gap_0p5().p_2().w_full();
     if log.is_empty() {
         content = content.child(
@@ -4351,22 +4602,29 @@ pub(super) fn render_log_lines(
         );
     } else {
         for (index, line) in log.iter().enumerate() {
+            let mut row = div()
+                .w_full()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text));
+            if select_all {
+                // A 全选 "selection": the kit cannot program-select across the runs, so tint
+                // every line and let 复制 take the whole log.
+                row = row
+                    .bg(rgba((theme.grid_selection_bg << 8) | 0x59))
+                    .text_color(rgb(theme.grid_selection_text));
+            }
             content = content.child(
-                div()
-                    .w_full()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text))
-                    .child(
-                        SelectableText::with_handle(
-                            ("log-line", index as u64),
-                            handle.clone(),
-                            format!("[Msg] {line}"),
-                        )
-                        .document_order(index as u64)
-                        // A visible selection tint even when the kit's global theme selection
-                        // token is not initialised for this window.
-                        .selection_color(rgba((theme.grid_selection_bg << 8) | 0x59).into()),
-                    ),
+                row.child(
+                    SelectableText::with_handle(
+                        ("log-line", index as u64),
+                        handle.clone(),
+                        format!("[Msg] {line}"),
+                    )
+                    .document_order(index as u64)
+                    // A visible selection tint even when the kit's global theme selection
+                    // token is not initialised for this window.
+                    .selection_color(rgba((theme.grid_selection_bg << 8) | 0x59).into()),
+                ),
             );
         }
     }
@@ -4422,7 +4680,6 @@ pub(super) fn render_log_lines(
                 .mode(ScrollbarMode::Always)
                 .id("log-lines-scrollbar"),
         )
-        .into_any_element()
 }
 
 /// One `label    value` row of the log summary block.
@@ -4734,6 +4991,7 @@ mod log_selection_tests {
                 &self.scroll,
                 &self.handle,
                 Theme::light(),
+                false,
             ))
         }
     }

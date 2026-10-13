@@ -170,12 +170,15 @@ impl GridView {
         }
     }
 
-    /// Scroll the grid by `delta` pixels (`> 0` scrolls toward the top) in response to the wheel,
-    /// keeping the selected row inside the viewport. Returns `true` when the event was consumed.
+    /// Handle one wheel notch: move the selected cell up or down one row and scroll the view just
+    /// enough to keep it visible. `delta > 0` is a scroll toward the first row. Returns `true` when
+    /// the notch was consumed.
     ///
-    /// Scrolling is pixel-based so trackpads and high-resolution wheels move smoothly instead of
-    /// jumping a whole row per event. A selection that is currently off-screen moves to the edge
-    /// row that scrolls into view rather than dragging the view back to it.
+    /// The wheel moves the *selection* (rather than scrolling the view and dragging the selection
+    /// along) so the gesture behaves the same whether or not the table has enough rows to overflow:
+    /// the cursor can always be wheeled all the way to the first row (to copy it) or to the last.
+    /// With nothing selected the first notch lands on the first row. The view follows only when the
+    /// moved row would leave the viewport, so short tables do not scroll at all.
     pub(super) fn scroll_grid_selection(
         &mut self,
         _position: Point<Pixels>,
@@ -187,76 +190,48 @@ impl GridView {
         if rows == 0 || delta == 0.0 {
             return false;
         }
-        let handle = self.list_scroll.0.borrow().base_handle.clone();
-        let viewport_h = f32::from(handle.bounds().size.height);
-        if viewport_h <= 0.0 {
+        let Some((row, col)) = self
+            .state
+            .selection
+            .as_ref()
+            .map(|selection| selection.active_cursor())
+        else {
+            // Nothing selected yet: the first notch lands on the first row so the wheel can start
+            // walking a cursor through the table.
+            self.state.selection = Some(CellSelection::new(0, 0));
+            self.list_scroll.scroll_to_item(0, ScrollStrategy::Nearest);
+            cx.notify();
+            return true;
+        };
+        // One notch moves a single row, regardless of how many "lines" the OS reports for it.
+        let steps: isize = if delta > 0.0 { -1 } else { 1 };
+        let new_row = (row as isize + steps).clamp(0, rows as isize - 1) as usize;
+        if new_row == row {
+            // Already on the first or the last row.
             return false;
         }
-        // Prefer gpui's measured max, but fall back to the row count for the first frame after a
-        // page loads (the handle is replaced and its extents are not measured until paint). This
-        // keeps wheeling from getting stuck right after loading.
-        let mut max = f32::from(handle.max_offset().y);
-        if max <= 0.0 {
-            max = (rows as f32 * GRID_ROW_HEIGHT - viewport_h).max(0.0);
-        }
-        if max <= 0.0 {
-            // No vertical overflow (every row is visible): the wheel moves the selected cell
-            // up/down instead of scrolling. With no selection, pan horizontally so a short but
-            // wide table's off-screen columns are still reachable.
-            if let Some(selection) = self.state.selection.as_ref() {
-                // One wheel notch moves the selection a single row, regardless of how many
-                // "lines" the OS reports for that notch.
-                let steps: isize = if delta > 0.0 { -1 } else { 1 };
-                let (row, col) = selection.active_cursor();
-                let new_row = (row as isize + steps).clamp(0, rows as isize - 1) as usize;
-                if new_row == row {
-                    return false;
-                }
-                self.state.selection = Some(CellSelection::single((new_row, col), (new_row, col)));
-                cx.notify();
-                return true;
-            }
-            return self.scroll_grid_columns(delta, cx);
-        }
-        let scroll = -f32::from(handle.offset().y);
-        let new_scroll = (scroll - delta).clamp(0.0, max);
-        if (new_scroll - scroll).abs() < 0.5 {
-            // Already at the top/bottom.
-            return false;
-        }
-        let x = handle.offset().x;
-        handle.set_offset(Point::new(x, px(-new_scroll)));
-
-        // Keep the cursor row inside the viewport, moving it to the nearest edge if it scrolled
-        // away (rather than dragging the view back to it).
-        if let Some(selection) = self.state.selection.as_ref() {
-            let (row, col) = selection.active_cursor();
-            let first = (new_scroll / GRID_ROW_HEIGHT).floor() as usize;
-            let visible = (viewport_h / GRID_ROW_HEIGHT).ceil() as usize;
-            let last = (first + visible).min(rows);
-            if row < first || row >= last {
-                let new_row = row.clamp(first, last.saturating_sub(1));
-                self.state.selection = Some(CellSelection::single((new_row, col), (new_row, col)));
-            }
-        }
-
+        self.state.selection = Some(CellSelection::single((new_row, col), (new_row, col)));
+        self.list_scroll
+            .scroll_to_item(new_row, ScrollStrategy::Nearest);
         cx.notify();
         true
     }
 
-    /// Scrolling is an implicit "done": dismiss the date picker (an absolute overlay anchored to
-    /// a row would otherwise float over unrelated rows) and commit/close the in-place editor so
-    /// it cannot stay anchored to a row that is moving away.
+    /// A wheel gesture is an implicit "done": dismiss the date picker (an absolute overlay anchored
+    /// to a row would otherwise float over unrelated rows) and close the in-place editor so it
+    /// cannot stay anchored to a row that is moving away. The editor's value is only *staged*, not
+    /// flushed: scrolling must never hit the database, and a flush would reload the page and drop
+    /// the selection the wheel is about to move.
     fn end_transient_editing(&mut self, cx: &mut Context<'_, Self>) {
         self.date_picker = None;
         if self.cell_editor.is_some() {
-            self.finish_cell_editor(cx);
+            self.commit_editor(cx);
         }
     }
 
     /// Pan the columns by `delta` pixels (`> 0` scrolls toward the first column), for a horizontal
-    /// trackpad swipe. Also used as the wheel fallback when the grid cannot scroll vertically, so
-    /// a short but wide table's off-screen columns are still reachable.
+    /// trackpad swipe. A vertical wheel never pans the columns — the horizontal scrollbar (or a
+    /// trackpad's horizontal swipe) is the way to reach off-screen columns.
     pub(super) fn scroll_grid_columns(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
         self.end_transient_editing(cx);
         let max = f32::from(self.hscroll.max_offset().x);

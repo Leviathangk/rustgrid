@@ -147,8 +147,12 @@ impl AppView {
                 names,
             } => self.run_drop_tables(connection_index, database_index, names, cx),
             DeleteConfirm::SavedQuery { index } => self.delete_saved_query(index, cx),
+            DeleteConfirm::SavedQueries { indices } => self.delete_saved_queries(indices, cx),
             DeleteConfirm::BackupFile { index } => self.delete_backup_file(index, cx),
             DeleteConfirm::BackupConfig { index } => self.delete_backup_config(index, cx),
+            DeleteConfirm::BackupEntries { files, configs } => {
+                self.delete_backups(files, configs, cx)
+            }
             DeleteConfirm::DesignRows { design_id, kind } => {
                 let target = self
                     .designs
