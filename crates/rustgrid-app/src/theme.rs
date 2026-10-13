@@ -1,6 +1,70 @@
 use gpui::WindowAppearance;
 use rustgrid_config::ThemeSetting;
 
+/// A per-connection environment colour, picked from the connection's right-click menu (参考
+/// Navicat). It tints the connection's subtree in the tree and its tabs so a production
+/// environment is hard to miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionColor {
+    Red,
+    Yellow,
+    Green,
+}
+
+impl ConnectionColor {
+    /// Every colour offered by the menu, in display order.
+    pub const ALL: [ConnectionColor; 3] = [Self::Red, Self::Yellow, Self::Green];
+
+    /// The stable id persisted in `settings.json`.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Red => "red",
+            Self::Yellow => "yellow",
+            Self::Green => "green",
+        }
+    }
+
+    /// Parse a persisted colour id; an unknown value means "no colour".
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "red" => Some(Self::Red),
+            "yellow" => Some(Self::Yellow),
+            "green" => Some(Self::Green),
+            _ => None,
+        }
+    }
+
+    /// The solid accent for this colour, resolved against the active theme so it reads correctly
+    /// in both light and dark mode. The hues are a true red / yellow / green (not the amber
+    /// "warning" tone), so the environment colour is unambiguous.
+    pub fn accent(self, theme: Theme) -> u32 {
+        let dark = theme.is_dark();
+        match self {
+            Self::Red if dark => 0xf87171,
+            Self::Red => 0xdc2626,
+            Self::Yellow if dark => 0xfacc15,
+            Self::Yellow => 0xeab308,
+            Self::Green if dark => 0x4ade80,
+            Self::Green => 0x16a34a,
+        }
+    }
+
+    /// A translucent background of this colour, as an `rgba` value (`0xRRGGBBAA`). Laid over the
+    /// theme's own background it gives the pastel Navicat paints behind a connection.
+    pub fn tint(self, theme: Theme, alpha: u32) -> u32 {
+        (self.accent(theme) << 8) | (alpha & 0xff)
+    }
+
+    /// The i18n key of this colour's label.
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Self::Red => "color.red",
+            Self::Yellow => "color.yellow",
+            Self::Green => "color.green",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub window_bg: u32,

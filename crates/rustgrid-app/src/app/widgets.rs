@@ -172,6 +172,7 @@ impl AppView {
                             this.open_copy_form(index, window, cx);
                         }),
                     ))
+                    .child(self.color_submenu_item(index, cx))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                     .child(self.manage_group_submenu_item(index, cx));
 
@@ -1188,6 +1189,10 @@ impl AppView {
                     || this
                         .move_flyout_bounds
                         .borrow()
+                        .is_some_and(|bounds| bounds.contains(&event.position))
+                    || this
+                        .color_flyout_bounds
+                        .borrow()
                         .is_some_and(|bounds| bounds.contains(&event.position));
                 if on_flyout {
                     return;
@@ -1195,6 +1200,7 @@ impl AppView {
                 this.context_menu = None;
                 this.dump_submenu = None;
                 this.move_submenu = None;
+                this.color_submenu = None;
                 cx.notify();
             }))
             .child(items)
@@ -1391,11 +1397,14 @@ impl AppView {
             .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                 if *hovered && this.move_submenu != Some(index) {
                     this.dump_submenu = None;
+                    this.color_submenu = None;
                     this.move_submenu = Some(index);
                     cx.notify();
                 }
             }))
             .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.dump_submenu = None;
+                this.color_submenu = None;
                 this.move_submenu = Some(index);
                 cx.notify();
             }))
@@ -1517,6 +1526,139 @@ impl AppView {
                     .text_size(px(12.5))
                     .text_color(rgb(theme.text_muted))
                     .child(t!("group.exclude").to_string()),
+            );
+        }
+        flyout.into_any_element()
+    }
+
+    /// The connection context menu's 颜色 row: a submenu trigger opening the red/green/blue
+    /// environment picker. Mirrors [`AppView::manage_group_submenu_item`].
+    fn color_submenu_item(&self, index: usize, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+        let theme = self.theme;
+        let open = self.color_submenu == Some(index);
+        let bounds_slot = self.color_flyout_bounds.clone();
+        let clear_slot = self.color_flyout_bounds.clone();
+        let mut base = div()
+            .relative()
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(26.0))
+            .px_3()
+            .gap_1()
+            .text_size(px(12.5));
+        if open {
+            base = base.on_children_prepainted(move |bounds, _window, _cx| {
+                *bounds_slot.borrow_mut() = bounds.last().copied();
+            });
+        } else {
+            *clear_slot.borrow_mut() = None;
+        }
+        let row = base
+            .id("ctx-connection-color")
+            .cursor_pointer()
+            .hover(move |style| {
+                style
+                    .bg(rgb(theme.tree_hover_bg))
+                    .text_color(rgb(theme.tree_selected_text))
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                if *hovered && this.color_submenu != Some(index) {
+                    this.dump_submenu = None;
+                    this.move_submenu = None;
+                    this.color_submenu = Some(index);
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.dump_submenu = None;
+                this.move_submenu = None;
+                this.color_submenu = Some(index);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(t!("connection.color").to_string()),
+            )
+            .child(
+                svg()
+                    .path("icons/chevron-right.svg")
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            );
+        if open {
+            row.child(self.color_flyout(index, theme, cx))
+        } else {
+            row
+        }
+    }
+
+    /// The 颜色 flyout: one row per colour, with a coloured dot on the left and a check on the
+    /// active one. Clicking the active colour clears it.
+    fn color_flyout(&self, index: usize, theme: Theme, cx: &mut Context<'_, Self>) -> AnyElement {
+        let current = self.connection_color(index);
+        let mut flyout = ui::popup_panel(theme)
+            .left(px(168.0))
+            .top(px(0.0))
+            .w(px(150.0))
+            .p_0p5();
+        for color in ConnectionColor::ALL {
+            let selected = current == Some(color);
+            flyout = flyout.child(
+                div()
+                    .id(SharedString::from(format!("conn-color-{}", color.id())))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .h(px(26.0))
+                    .px_3()
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .hover(move |style| {
+                        style
+                            .bg(rgb(theme.tree_hover_bg))
+                            .text_color(rgb(theme.tree_selected_text))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.context_menu = None;
+                        this.color_submenu = None;
+                        let next = if this.connection_color(index) == Some(color) {
+                            None
+                        } else {
+                            Some(color)
+                        };
+                        this.set_connection_color(index, next, cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(10.0))
+                            .h(px(10.0))
+                            .rounded_full()
+                            .flex_none()
+                            .bg(rgb(color.accent(theme))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(t!(color.label_key()).to_string()),
+                    )
+                    .child(
+                        svg()
+                            .path("icons/check.svg")
+                            .w(px(12.0))
+                            .h(px(12.0))
+                            .flex_none()
+                            .text_color(rgb(color.accent(theme)))
+                            .opacity(if selected { 1.0 } else { 0.0 }),
+                    ),
             );
         }
         flyout.into_any_element()

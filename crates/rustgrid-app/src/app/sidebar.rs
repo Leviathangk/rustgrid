@@ -28,6 +28,8 @@ struct TreeConnection {
     /// The error from the last failed connect, shown as a tooltip on the node.
     failed_error: Option<String>,
     expanded: bool,
+    /// The connection's environment colour, tinting this connection's whole subtree (参考 Navicat).
+    color: Option<ConnectionColor>,
     databases: Loadable<Vec<TreeDatabase>>,
     /// Saved queries belonging to this connection, across all its databases.
     saved_queries: Vec<TreeSavedQuery>,
@@ -223,6 +225,7 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 status,
                 failed_error,
                 expanded: node.expanded,
+                color: app.connection_color(index),
                 databases,
                 saved_queries: app
                     .query_files
@@ -480,6 +483,12 @@ impl TreePane {
         let menu_app = self.app.clone();
         let drag_app = self.app.clone();
         let drag_id = connection.id.clone();
+        // The environment colour is painted on the node itself, so it is visible even while the
+        // connection is closed (no children to tint) and while the row is selected (a darker shade
+        // replaces the generic selection blue).
+        let node_tint = connection.color.map(|color| rgba(color.tint(theme, 0x66)));
+        let node_selected = connection.color.map(|color| rgba(color.tint(theme, 0x99)));
+        let node_hover = connection.color.map(|color| rgba(color.tint(theme, 0x80)));
         let row = div()
             .id(SharedString::from(conn_id.clone()))
             .flex()
@@ -493,12 +502,15 @@ impl TreePane {
             .rounded_sm()
             .cursor_pointer()
             .overflow_hidden()
+            .when_some(node_tint, |style, bg| style.bg(bg))
             .when(selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
+                    .bg(node_selected.unwrap_or(rgba((theme.tree_selected_bg << 8) | 0xff)))
                     .text_color(rgb(theme.tree_selected_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .hover(move |style| {
+                style.bg(node_hover.unwrap_or(rgba((theme.tree_hover_bg << 8) | 0xff)))
+            })
             .on_click(cx.listener(move |this, event, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
@@ -551,6 +563,8 @@ impl TreePane {
                             target: ContextTarget::Connection(index),
                             position: event.position,
                         });
+                        app.move_submenu = None;
+                        app.color_submenu = None;
                         cx.notify();
                     });
                 }),
@@ -591,7 +605,15 @@ impl TreePane {
             None => row,
         };
 
-        let body = div().flex().flex_col().w_full().child(tree_row_with_rect(
+        // A connection's environment colour paints a tint behind the connection and every row
+        // under it, so the environment is visible at a glance (参考 Navicat). The connection's own
+        // row takes a stronger shade; rows keep their own hover/selection background, which paints
+        // over this tint.
+        let mut body = div().flex().flex_col().w_full();
+        if let Some(color) = connection.color {
+            body = body.bg(rgba(color.tint(theme, 0x33)));
+        }
+        let body = body.child(tree_row_with_rect(
             self.app.clone(),
             row,
             format!("conn-{index}"),
@@ -1658,6 +1680,7 @@ impl Render for TreePane {
                                 app.update(cx, |app, cx| {
                                     app.dump_submenu = None;
                                     app.move_submenu = None;
+                                    app.color_submenu = None;
                                     app.context_menu = Some(ContextMenu {
                                         target: ContextTarget::TreeBlank,
                                         position: event.position,

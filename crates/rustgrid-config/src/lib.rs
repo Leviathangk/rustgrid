@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 7;
+const SETTINGS_VERSION: u32 = 8;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -142,6 +142,10 @@ struct SettingsFile {
     /// order. Connections are stored by profile id so the layout survives reordering the profiles.
     #[serde(default)]
     groups: Vec<GroupEntry>,
+    /// The per-connection environment colour (Navicat-style), keyed by profile id so it survives
+    /// reordering/renaming. The value is a colour id (`"red"`, `"green"` or `"blue"`).
+    #[serde(default)]
+    connection_colors: BTreeMap<String, String>,
 }
 
 /// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
@@ -173,6 +177,9 @@ pub struct AppSettings {
     pub expanded_databases: BTreeMap<String, Vec<String>>,
     /// The connection tree's layout (nested groups and their connections).
     pub groups: Vec<GroupEntry>,
+    /// The per-connection environment colour, keyed by connection-profile id. The value is a
+    /// colour id (`"red"`, `"green"` or `"blue"`); a missing entry means no colour.
+    pub connection_colors: BTreeMap<String, String>,
 }
 
 impl Default for AppSettings {
@@ -189,6 +196,7 @@ impl Default for AppSettings {
             expanded_connections: Vec::new(),
             expanded_databases: BTreeMap::new(),
             groups: Vec::new(),
+            connection_colors: BTreeMap::new(),
         }
     }
 }
@@ -384,6 +392,7 @@ impl ConfigStore {
             expanded_connections: file.expanded_connections,
             expanded_databases: file.expanded_databases,
             groups: file.groups,
+            connection_colors: file.connection_colors,
         })
     }
 
@@ -402,6 +411,7 @@ impl ConfigStore {
             expanded_connections: settings.expanded_connections.clone(),
             expanded_databases: settings.expanded_databases.clone(),
             groups: settings.groups.clone(),
+            connection_colors: settings.connection_colors.clone(),
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

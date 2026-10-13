@@ -398,7 +398,15 @@ element types. Two kinds of upgrade:
 Keep Navicat's layout (connection tree on the left, content/details pane on the right) with the
 shadcn chrome described above. Implemented today:
 
-1. Connection management: create/edit/delete, connect/disconnect, password prompt
+1. Connection management: create/edit/delete, connect/disconnect, password prompt, and the
+   connection right-click menu's 颜色 submenu (红/黄/绿, clearing by re-picking the active colour),
+   which stores a per-connection environment colour (by profile id, in `settings.json`). The colour
+   paints the connection node (and its whole subtree) in the tree — visible whether the connection
+   is open or not, and kept on the selected/hovered row — and tints every tab of that connection in
+   the content pane's tab bar (the bar itself stays neutral so tabs never blend into it; the
+   active tab is markedly stronger and bold so it stands out, and the pinned 对象 tab keeps the
+   colour while it is the active tab, so the environment stays visible on 用户/查询/备份 too), so
+   production stands out. Tab titles ellipsize at 170px and show their full text on hover.
 2. Enumerate databases; create/edit/delete a database (charset + collation) and edit defaults
 3. Per database, list tables and views
 4. Show a selected table's data in a grid with **pagination** — display only, **no editing** yet

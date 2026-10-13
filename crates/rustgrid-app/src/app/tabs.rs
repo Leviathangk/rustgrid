@@ -1,5 +1,31 @@
 use super::*;
 
+/// A table/design tab row: `(index, id, title, is_view, environment colour)`.
+type ObjectTabRow = (usize, u64, String, bool, Option<ConnectionColor>);
+
+/// A query/editor tab row: `(index, id, title, icon, icon colour, environment colour)`.
+type QueryTabRow = (
+    usize,
+    u64,
+    String,
+    &'static str,
+    u32,
+    Option<ConnectionColor>,
+);
+
+/// The widest a tab grows before its title is ellipsized; the full title is in the tab's tooltip.
+const TAB_MAX_WIDTH: f32 = 170.0;
+
+/// The background fill of a tab (`0xRRGGBBAA`). Every tab of a connection with an environment
+/// colour is tinted with it (a stronger shade on the active tab), so the whole tab strip reads as
+/// that environment (参考 Navicat); the bar itself stays neutral so tabs never blend into it.
+fn tab_background(theme: Theme, color: Option<ConnectionColor>, alpha: u32, fallback: u32) -> u32 {
+    match color {
+        Some(color) => color.tint(theme, alpha),
+        None => (fallback << 8) | 0xff,
+    }
+}
+
 impl AppView {
     pub(super) fn render_content(
         &mut self,
@@ -152,9 +178,21 @@ impl TabBar {
         &self,
         theme: Theme,
         active: bool,
+        color: Option<ConnectionColor>,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let app = self.app.clone();
+        // The pinned Object tab keeps the connection colour while it is the active tab (e.g. on
+        // 用户/查询/备份, where it is the only tab), and turns neutral once a file tab takes over.
+        let active_bg = match (color, active) {
+            (Some(color), true) => rgba(color.tint(theme, 0x85)),
+            _ => rgba((theme.editor_bg << 8) | 0xff),
+        };
+        let hover_bg = if active {
+            active_bg
+        } else {
+            rgba((theme.tree_hover_bg << 8) | 0xff)
+        };
         div()
             .id("tab-object")
             .flex()
@@ -168,7 +206,7 @@ impl TabBar {
             .text_size(px(12.0))
             .when(active, |style| {
                 style
-                    .bg(rgb(theme.editor_bg))
+                    .bg(active_bg)
                     .border_t_1()
                     .border_l_1()
                     .border_r_1()
@@ -180,12 +218,16 @@ impl TabBar {
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .hover(move |style| style.bg(hover_bg))
             .on_click(cx.listener(move |_this, _event, _window, cx| {
                 let _ = app.update(cx, |app, cx| app.activate_grid(None, cx));
             }))
             .child(tree_icon("icons/tables.svg", theme.icon_tables))
-            .child(t!("object.header").to_string())
+            .child(
+                div()
+                    .when(active, |style| style.font_weight(FontWeight::SEMIBOLD))
+                    .child(t!("object.header").to_string()),
+            )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -198,6 +240,7 @@ impl TabBar {
         icon: &'static str,
         icon_color: u32,
         active: bool,
+        color: Option<ConnectionColor>,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let tab_id = SharedString::from(format!("query-tab-{id}"));
@@ -206,9 +249,17 @@ impl TabBar {
         let close = self.app.clone();
         let menu = self.app.clone();
         let middle = self.app.clone();
+        let active_bg = rgba(tab_background(theme, color, 0x85, theme.editor_bg));
+        let inactive_bg = rgba(tab_background(theme, color, 0x24, theme.button_bg));
+        let hover_bg = if active {
+            active_bg
+        } else {
+            rgba(tab_background(theme, color, 0x4d, theme.tree_hover_bg))
+        };
 
         div()
             .id(tab_id)
+            .tooltip(ui::text_tooltip(title.clone()))
             .flex()
             .flex_row()
             .items_center()
@@ -220,7 +271,7 @@ impl TabBar {
             .text_size(px(12.0))
             .when(active, |style| {
                 style
-                    .bg(rgb(theme.editor_bg))
+                    .bg(active_bg)
                     .border_t_1()
                     .border_l_1()
                     .border_r_1()
@@ -228,11 +279,11 @@ impl TabBar {
             })
             .when(!active, |style| {
                 style
-                    .bg(rgb(theme.button_bg))
+                    .bg(inactive_bg)
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .hover(move |style| style.bg(hover_bg))
             .on_click(cx.listener(move |_this, _event, _window, cx| {
                 let _ = activate.update(cx, |app, cx| {
                     if index < app.queries.len() {
@@ -262,9 +313,9 @@ impl TabBar {
             .child(tree_icon(icon, icon_color))
             .child(
                 div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .max_w(px(110.0))
+                    .truncate()
+                    .max_w(px(TAB_MAX_WIDTH))
+                    .when(active, |style| style.font_weight(FontWeight::SEMIBOLD))
                     .child(title),
             )
             .child(
@@ -293,6 +344,7 @@ impl TabBar {
         id: u64,
         title: String,
         is_view: bool,
+        color: Option<ConnectionColor>,
         active: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
@@ -312,9 +364,17 @@ impl TabBar {
         let close = self.app.clone();
         let menu = self.app.clone();
         let middle = self.app.clone();
+        let active_bg = rgba(tab_background(theme, color, 0x85, theme.editor_bg));
+        let inactive_bg = rgba(tab_background(theme, color, 0x24, theme.button_bg));
+        let hover_bg = if active {
+            active_bg
+        } else {
+            rgba(tab_background(theme, color, 0x4d, theme.tree_hover_bg))
+        };
 
         div()
             .id(tab_id)
+            .tooltip(ui::text_tooltip(title.clone()))
             .flex()
             .flex_row()
             .items_center()
@@ -326,7 +386,7 @@ impl TabBar {
             .text_size(px(12.0))
             .when(active, |style| {
                 style
-                    .bg(rgb(theme.editor_bg))
+                    .bg(active_bg)
                     .border_t_1()
                     .border_l_1()
                     .border_r_1()
@@ -334,11 +394,11 @@ impl TabBar {
             })
             .when(!active, |style| {
                 style
-                    .bg(rgb(theme.button_bg))
+                    .bg(inactive_bg)
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .hover(move |style| style.bg(hover_bg))
             .on_click(cx.listener(move |_this, _event, _window, cx| {
                 let _ = activate.update(cx, |app, cx| {
                     if index < app.grids.len() {
@@ -368,9 +428,9 @@ impl TabBar {
             .child(tree_icon(icon, icon_color))
             .child(
                 div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .max_w(px(110.0))
+                    .truncate()
+                    .max_w(px(TAB_MAX_WIDTH))
+                    .when(active, |style| style.font_weight(FontWeight::SEMIBOLD))
                     .child(title),
             )
             .child(
@@ -399,6 +459,7 @@ impl TabBar {
         id: u64,
         title: String,
         is_view: bool,
+        color: Option<ConnectionColor>,
         active: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
@@ -413,9 +474,17 @@ impl TabBar {
         let close = self.app.clone();
         let menu = self.app.clone();
         let middle = self.app.clone();
+        let active_bg = rgba(tab_background(theme, color, 0x85, theme.editor_bg));
+        let inactive_bg = rgba(tab_background(theme, color, 0x24, theme.button_bg));
+        let hover_bg = if active {
+            active_bg
+        } else {
+            rgba(tab_background(theme, color, 0x4d, theme.tree_hover_bg))
+        };
 
         div()
             .id(tab_id)
+            .tooltip(ui::text_tooltip(title.clone()))
             .flex()
             .flex_row()
             .items_center()
@@ -427,7 +496,7 @@ impl TabBar {
             .text_size(px(12.0))
             .when(active, |style| {
                 style
-                    .bg(rgb(theme.editor_bg))
+                    .bg(active_bg)
                     .border_t_1()
                     .border_l_1()
                     .border_r_1()
@@ -435,11 +504,11 @@ impl TabBar {
             })
             .when(!active, |style| {
                 style
-                    .bg(rgb(theme.button_bg))
+                    .bg(inactive_bg)
                     .border_1()
                     .border_color(rgb(theme.border))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .hover(move |style| style.bg(hover_bg))
             .on_click(cx.listener(move |_this, _event, _window, cx| {
                 let _ = activate.update(cx, |app, cx| {
                     if index < app.designs.len() {
@@ -469,9 +538,9 @@ impl TabBar {
             .child(tree_icon("icons/design_table.svg", icon_color))
             .child(
                 div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .max_w(px(160.0))
+                    .truncate()
+                    .max_w(px(TAB_MAX_WIDTH))
+                    .when(active, |style| style.font_weight(FontWeight::SEMIBOLD))
                     .child(title),
             )
             .child(
@@ -495,12 +564,21 @@ impl TabBar {
 
 impl Render for TabBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, active_grid, active_query, active_design, grid_tabs, query_tabs, design_tabs) = {
+        let (
+            theme,
+            active_grid,
+            active_query,
+            active_design,
+            grid_tabs,
+            query_tabs,
+            design_tabs,
+            object_color,
+        ) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
             let app = app.read(cx);
-            let grid_tabs: Vec<(usize, u64, String, bool)> = app
+            let grid_tabs: Vec<ObjectTabRow> = app
                 .grids
                 .iter()
                 .enumerate()
@@ -519,10 +597,13 @@ impl Render for TabBar {
                         "{} @{} ({}) - {}",
                         grid.state.table, grid.state.database, grid.state.connection_name, kind
                     );
-                    Some((index, grid.state.id, title, grid.state.is_view))
+                    let color = app
+                        .connection_index_of(&grid.state.connection)
+                        .and_then(|connection| app.connection_color(connection));
+                    Some((index, grid.state.id, title, grid.state.is_view, color))
                 })
                 .collect();
-            let query_tabs: Vec<(usize, u64, String, &'static str, u32)> = app
+            let query_tabs: Vec<QueryTabRow> = app
                 .queries
                 .iter()
                 .enumerate()
@@ -559,14 +640,19 @@ impl Render for TabBar {
                     } else {
                         let title = match &query.name {
                             Some(name) => format!("{name} - {}", t!("common.query")),
-                            None => format!("{} - {}", t!("query.untitled"), t!("common.query")),
+                            None => {
+                                format!("{} - {}", t!("query.untitled"), t!("common.query"))
+                            }
                         };
                         ("icons/queries.svg", app.theme.icon_queries, title)
                     };
-                    (index, query.id, title, icon, icon_color)
+                    let color = query
+                        .connection_index
+                        .and_then(|connection| app.connection_color(connection));
+                    (index, query.id, title, icon, icon_color, color)
                 })
                 .collect();
-            let design_tabs: Vec<(usize, u64, String, bool)> = app
+            let design_tabs: Vec<ObjectTabRow> = app
                 .designs
                 .iter()
                 .enumerate()
@@ -594,9 +680,19 @@ impl Render for TabBar {
                             name, design.database, design.connection_name, kind
                         )
                     };
-                    (index, design.id, title, design.is_view)
+                    let color = app
+                        .connection_index_of(&design.connection)
+                        .and_then(|connection| app.connection_color(connection));
+                    (index, design.id, title, design.is_view, color)
                 })
                 .collect();
+            // The pinned Object tab keeps the colour of the connection whose object list it shows,
+            // so the environment stays visible on every main tab (表/视图/函数/用户/查询/备份).
+            let object_color = app
+                .object_pane
+                .as_ref()
+                .map(|pane| pane.read(cx).connection_index)
+                .and_then(|connection| app.connection_color(connection));
             (
                 app.theme,
                 app.active_grid,
@@ -605,6 +701,7 @@ impl Render for TabBar {
                 grid_tabs,
                 query_tabs,
                 design_tabs,
+                object_color,
             )
         };
 
@@ -621,29 +718,31 @@ impl Render for TabBar {
             .overflow_x_scroll()
             .track_scroll(&self.scroll);
 
-        for (index, id, title, is_view) in grid_tabs {
+        for (index, id, title, is_view, color) in grid_tabs {
             strip = strip.child(self.table_tab(
                 theme,
                 index,
                 id,
                 title,
                 is_view,
+                color,
                 active_grid == Some(index),
                 cx,
             ));
         }
-        for (index, id, title, is_view) in design_tabs {
+        for (index, id, title, is_view, color) in design_tabs {
             strip = strip.child(self.design_tab(
                 theme,
                 index,
                 id,
                 title,
                 is_view,
+                color,
                 active_design == Some(index),
                 cx,
             ));
         }
-        for (index, id, title, icon, icon_color) in query_tabs {
+        for (index, id, title, icon, icon_color, color) in query_tabs {
             strip = strip.child(self.query_tab(
                 theme,
                 index,
@@ -652,6 +751,7 @@ impl Render for TabBar {
                 icon,
                 icon_color,
                 active_query == Some(index),
+                color,
                 cx,
             ));
         }
@@ -659,6 +759,8 @@ impl Render for TabBar {
         // The object tab is pinned; the arrows only appear (and wrap the scrollable tab strip)
         // when the open tabs no longer fit.
         let needs_scroll = self.scroll.max_offset().x > px(0.0);
+        // The bar itself stays neutral; the environment colour lives on the active tab, so tabs
+        // never blend into the bar.
         let mut bar = div()
             .flex()
             .flex_row()
@@ -666,12 +768,13 @@ impl Render for TabBar {
             .gap_1()
             .h(px(30.0))
             .flex_none()
-            .bg(rgb(theme.toolbar_bg))
-            .child(self.object_tab(
-                theme,
-                active_grid.is_none() && active_query.is_none() && active_design.is_none(),
-                cx,
-            ));
+            .bg(rgb(theme.toolbar_bg));
+        bar = bar.child(self.object_tab(
+            theme,
+            active_grid.is_none() && active_query.is_none() && active_design.is_none(),
+            object_color,
+            cx,
+        ));
         if needs_scroll {
             bar = bar.child(self.scroll_button("tab-scroll-left", true, cx));
         }

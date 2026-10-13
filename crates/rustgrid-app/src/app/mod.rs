@@ -44,7 +44,7 @@ use crate::session::{
     compute_column_widths,
 };
 use crate::sql::{self, SqlToken};
-use crate::theme::Theme;
+use crate::theme::{ConnectionColor, Theme};
 
 // The in-place date/time picker is built from gpui-kit: the calendar supplies the date half
 // (day/month/year views, navigation, selection and localization) and the `TimeField` the time
@@ -1916,6 +1916,9 @@ pub struct AppView {
     /// The connection tree's layout: nested groups holding connections (by profile id), in display
     /// order. Persisted in settings; the `connections` vector holds the live nodes themselves.
     tree_layout: Vec<GroupEntry>,
+    /// The per-connection environment colour, keyed by profile id (see [`ConnectionColor`]).
+    /// Persisted in settings; an absent entry means no colour.
+    connection_colors: BTreeMap<String, String>,
     /// The group whose in-place rename editor is open, if any.
     group_rename: Option<GroupRenameEdit>,
     group_rename_focus_pending: bool,
@@ -1926,6 +1929,10 @@ pub struct AppView {
     /// Window-space bounds of that flyout while it is shown, so an outside click is not mistaken
     /// for a click on the flyout (mirrors `dump_flyout_bounds`).
     move_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// The connection whose 颜色 flyout is open, if any.
+    color_submenu: Option<usize>,
+    /// Window-space bounds of the 颜色 flyout while it is shown (mirrors `move_flyout_bounds`).
+    color_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// When the New Connection engine picker was opened from a group, the group the new connection
     /// should be filed under. `None` when opened from the toolbar.
     connect_menu_group: Option<u64>,
@@ -2445,11 +2452,14 @@ impl AppView {
             tree_revision: 0,
             tab_revision: 0,
             tree_layout,
+            connection_colors: settings.connection_colors.clone(),
             group_rename: None,
             group_rename_focus_pending: false,
             pending_group: None,
             move_submenu: None,
             move_flyout_bounds: Rc::new(RefCell::new(None)),
+            color_submenu: None,
+            color_flyout_bounds: Rc::new(RefCell::new(None)),
             connect_menu_group: None,
             tree_press: None,
             tree_drag: None,
@@ -2621,6 +2631,40 @@ impl AppView {
         cx.notify();
     }
 
+    /// The environment colour of the connection at `index`, if the user set one.
+    pub(super) fn connection_color(&self, index: usize) -> Option<ConnectionColor> {
+        let id = &self.connections.get(index)?.profile.id;
+        self.connection_colors
+            .get(id)
+            .and_then(|value| ConnectionColor::from_id(value))
+    }
+
+    /// Set (or clear, with `None`) a connection's environment colour and persist the choice.
+    pub(super) fn set_connection_color(
+        &mut self,
+        index: usize,
+        color: Option<ConnectionColor>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(id) = self
+            .connections
+            .get(index)
+            .map(|node| node.profile.id.clone())
+        else {
+            return;
+        };
+        match color {
+            Some(color) => {
+                self.connection_colors.insert(id, color.id().to_string());
+            }
+            None => {
+                self.connection_colors.remove(&id);
+            }
+        }
+        self.persist_settings();
+        cx.notify();
+    }
+
     /// Write the current settings to disk. Every preference change funnels through here so new
     /// fields are persisted once.
     fn persist_settings(&self) {
@@ -2657,6 +2701,7 @@ impl AppView {
             expanded_connections,
             expanded_databases,
             groups: self.tree_layout.clone(),
+            connection_colors: self.connection_colors.clone(),
         }) {
             // Preferences failing to persist is not worth a modal; note it in the log line only.
             let _ = error;
@@ -2842,6 +2887,9 @@ impl AppView {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.theme.is_dark().hash(&mut hasher);
         self.tree_layout.hash(&mut hasher);
+        // Environment colours change the tree node/subtree backgrounds, so a colour edit must
+        // invalidate the cached tree even when nothing else about the connection changed.
+        self.connection_colors.hash(&mut hasher);
         self.group_rename
             .as_ref()
             .map(|edit| edit.id)
@@ -2921,6 +2969,7 @@ impl AppView {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.theme.is_dark().hash(&mut hasher);
+        self.connection_colors.hash(&mut hasher);
         self.active_grid.hash(&mut hasher);
         self.active_design.hash(&mut hasher);
         self.active_query.hash(&mut hasher);
@@ -3782,5 +3831,13 @@ mod tests {
         // A leaf row does not scope a database.
         assert_eq!(parse_tree_scope("tbl-0-2-dbo.users"), None);
         assert_eq!(parse_tree_scope("conn-1"), None);
+    }
+
+    #[test]
+    fn connection_color_ids_round_trip() {
+        for color in ConnectionColor::ALL {
+            assert_eq!(ConnectionColor::from_id(color.id()), Some(color));
+        }
+        assert_eq!(ConnectionColor::from_id("purple"), None);
     }
 }
