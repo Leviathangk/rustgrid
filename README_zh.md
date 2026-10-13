@@ -13,21 +13,21 @@ RustGrid 是一款使用 **Rust + GPUI** 构建的跨平台（Windows / macOS / 
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/img/img1_cn.png" width="320" alt="连接树与对象列表">
+      <img src="docs/img/img1_cn.png" width="400" alt="连接树与对象列表">
       <p align="center"><b>1.</b> 连接树与对象列表</p>
     </td>
     <td width="50%">
-      <img src="docs/img/img2_cn.png" width="320" alt="表数据网格">
+      <img src="docs/img/img2_cn.png" width="400" alt="表数据网格">
       <p align="center"><b>2.</b> 表数据网格 —— 分页浏览，支持就地编辑</p>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="docs/img/img3_cn.png" width="320" alt="备份与还原">
+      <img src="docs/img/img3_cn.png" width="400" alt="备份与还原">
       <p align="center"><b>3.</b> 备份与还原 —— <code>.rgbak</code> 容器</p>
     </td>
     <td width="50%">
-      <img src="docs/img/img4_cn.png" width="320" alt="SQL 编辑器">
+      <img src="docs/img/img4_cn.png" width="400" alt="SQL 编辑器">
       <p align="center"><b>4.</b> SQL 编辑器 —— 语法高亮、补全与结果</p>
     </td>
   </tr>

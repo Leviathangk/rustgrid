@@ -13,21 +13,21 @@ the connection tree, object lists, toolbars and dialogs all behave the way you a
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/img/img1_en.png" width="320" alt="Connection tree and object list">
+      <img src="docs/img/img1_en.png" width="400" alt="Connection tree and object list">
       <p align="center"><b>1.</b> Connection tree &amp; object list</p>
     </td>
     <td width="50%">
-      <img src="docs/img/img2_en.png" width="320" alt="Table data grid">
+      <img src="docs/img/img2_en.png" width="400" alt="Table data grid">
       <p align="center"><b>2.</b> Table data grid — paginated, in-place editing</p>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="docs/img/img3_en.png" width="320" alt="Backup and restore">
+      <img src="docs/img/img3_en.png" width="400" alt="Backup and restore">
       <p align="center"><b>3.</b> Backup &amp; restore — the <code>.rgbak</code> container</p>
     </td>
     <td width="50%">
-      <img src="docs/img/img4_en.png" width="320" alt="SQL editor">
+      <img src="docs/img/img4_en.png" width="400" alt="SQL editor">
       <p align="center"><b>4.</b> SQL editor — highlighting, completion, results</p>
     </td>
   </tr>
