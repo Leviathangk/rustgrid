@@ -2656,9 +2656,29 @@ impl AppView {
         }
         self.language = language;
         rust_i18n::set_locale(language.locale());
+        self.sync_search_placeholders(cx);
         self.persist_settings();
         self.notify_object_pane(cx);
         cx.notify();
+    }
+
+    /// Re-translate the search fields' baked-in placeholders after a language change. Most
+    /// placeholders resolve through `t!` on every render (or when their transient dialog/window is
+    /// created), but the four shared search boxes are built once with the startup locale, so their
+    /// text has to be pushed explicitly or it stays in the previous language.
+    fn sync_search_placeholders(&mut self, cx: &mut Context<'_, Self>) {
+        self.object_search_input.update(cx, |input, cx| {
+            input.set_placeholder(t!("object.search").to_string(), cx);
+        });
+        self.user_search_input.update(cx, |input, cx| {
+            input.set_placeholder(t!("user.search").to_string(), cx);
+        });
+        self.backup_search_input.update(cx, |input, cx| {
+            input.set_placeholder(t!("backup.search").to_string(), cx);
+        });
+        self.routine_find_input.update(cx, |input, cx| {
+            input.set_placeholder(t!("routine.find").to_string(), cx);
+        });
     }
 
     /// Show or hide the right-hand object-info pane and remember the choice, so the next launch
