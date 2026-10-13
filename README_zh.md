@@ -8,6 +8,31 @@ RustGrid 是一款使用 **Rust + GPUI** 构建的跨平台（Windows / macOS / 
 它的界面布局和交互习惯对齐 Navicat，连接树、对象列表、工具栏和弹窗都与你熟悉的操作一致，
 迁移毫无成本。
 
+## 界面预览
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/img/img1_cn.png" alt="连接树与对象列表">
+      <p align="center"><b>1.</b> 连接树与对象列表</p>
+    </td>
+    <td width="50%">
+      <img src="docs/img/img2_cn.png" alt="表数据网格">
+      <p align="center"><b>2.</b> 表数据网格 —— 分页浏览，支持就地编辑</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/img/img3_cn.png" alt="备份与还原">
+      <p align="center"><b>3.</b> 备份与还原 —— <code>.rgbak</code> 容器</p>
+    </td>
+    <td width="50%">
+      <img src="docs/img/img4_cn.png" alt="SQL 编辑器">
+      <p align="center"><b>4.</b> SQL 编辑器 —— 语法高亮、补全与结果</p>
+    </td>
+  </tr>
+</table>
+
 ## 亮点
 
 - **原生，而非 WebView** —— GPUI 元素由 GPU 直接渲染，不依赖浏览器引擎，单个二进制。

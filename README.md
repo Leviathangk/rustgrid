@@ -8,6 +8,31 @@ RustGrid is a cross-platform (Windows / macOS / Linux) database management tool 
 **Rust + GPUI**. Its layout and interactions follow Navicat, so switching costs nothing:
 the connection tree, object lists, toolbars and dialogs all behave the way you already expect.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/img/img1_en.png" alt="Connection tree and object list">
+      <p align="center"><b>1.</b> Connection tree &amp; object list</p>
+    </td>
+    <td width="50%">
+      <img src="docs/img/img2_en.png" alt="Table data grid">
+      <p align="center"><b>2.</b> Table data grid — paginated, in-place editing</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/img/img3_en.png" alt="Backup and restore">
+      <p align="center"><b>3.</b> Backup &amp; restore — the <code>.rgbak</code> container</p>
+    </td>
+    <td width="50%">
+      <img src="docs/img/img4_en.png" alt="SQL editor">
+      <p align="center"><b>4.</b> SQL editor — highlighting, completion, results</p>
+    </td>
+  </tr>
+</table>
+
 ## Highlights
 
 - **Native, not a WebView** — GPU-rendered GPUI elements, no browser engine, a single binary.
