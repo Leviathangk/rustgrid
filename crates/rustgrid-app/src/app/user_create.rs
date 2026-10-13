@@ -697,6 +697,22 @@ impl UserCreateDialog {
         self.editor.original_account.is_some()
     }
 
+    /// Whether the authentication plugin was switched away from the account's loaded one. MySQL
+    /// clears the stored credentials when the plugin changes, so a new password is mandatory and
+    /// the plugin alone can never be the whole edit.
+    pub(super) fn plugin_changed(&self) -> bool {
+        self.editor
+            .original
+            .as_ref()
+            .is_some_and(|details| details.account.plugin != self.editor.account.plugin)
+    }
+
+    /// Whether Save writes the password: the 修改登录密码 box is on, or the plugin changed (which
+    /// forces a new password).
+    pub(super) fn needs_password(&self) -> bool {
+        self.change_password || self.plugin_changed()
+    }
+
     /// The user/host pairs the role lists pick from.
     pub(super) fn membership_candidates(&self) -> &[(String, String)] {
         &self.accounts
@@ -1084,6 +1100,41 @@ fn check_row(
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text))
                 .child(label),
+        )
+}
+
+/// A checkbox row whose state another field forces: same look, but muted and not clickable.
+fn disabled_check_row(id: &'static str, label: String, checked: bool, theme: Theme) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .h(px(CREATE_ROW_HEIGHT))
+        .child(checkbox_box(checked, theme))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(label),
+        )
+        .into_any_element()
+}
+
+/// A muted hint line aligned under a form control (an empty label cell, then the text).
+fn create_hint_row(hint: String, theme: Theme) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(CREATE_LABEL_GAP))
+        .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none())
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(theme.text_muted))
+                .child(hint),
         )
 }
 
@@ -1926,7 +1977,14 @@ impl AppView {
     ) {
         if let Some(dialog) = self.create_user_dialog.as_mut() {
             match field {
-                CreateCombo::Plugin => dialog.editor.account.plugin = value.to_string(),
+                CreateCombo::Plugin => {
+                    dialog.editor.account.plugin = value.to_string();
+                    // Switching the plugin clears the account's stored password, so a new one
+                    // becomes mandatory: reveal the password fields right away.
+                    if dialog.is_edit() && dialog.plugin_changed() {
+                        dialog.change_password = true;
+                    }
+                }
                 CreateCombo::Expiry => dialog.expiry = CreateExpiry::from_value(value),
                 CreateCombo::Verification => dialog.editor.account.login_type = value.to_string(),
                 CreateCombo::DefaultDatabase => {
@@ -1955,6 +2013,10 @@ impl AppView {
     /// Toggle the 修改登录密码 checkbox; clearing it also drops any typed password.
     pub(super) fn toggle_create_change_password(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(dialog) = self.create_user_dialog.as_mut() {
+            // A switched plugin needs a new password, so the box is locked on while it differs.
+            if dialog.plugin_changed() {
+                return;
+            }
             dialog.change_password = !dialog.change_password;
             if !dialog.change_password {
                 dialog.editor.password.clear();
@@ -2918,7 +2980,7 @@ impl AppView {
                 },
                 ..dialog.editor.account.clone()
             },
-            password: if dialog.change_password && !dialog.editor.password.is_empty() {
+            password: if dialog.needs_password() && !dialog.editor.password.is_empty() {
                 Some(dialog.editor.password.clone())
             } else {
                 None
@@ -2969,6 +3031,11 @@ impl AppView {
         let Some(connection) = self.connection_arc(dialog.connection_index) else {
             return false;
         };
+        // A plugin switch cannot be applied on its own — MySQL clears the stored credentials — so
+        // it always counts as a change: Save stays enabled and reports the missing password.
+        if dialog.plugin_changed() {
+            return true;
+        }
         self.create_user_edit()
             .map(|edit| !connection.user_edit_groups(&edit).is_empty())
             .unwrap_or(false)
@@ -2998,7 +3065,7 @@ impl AppView {
             cx.notify();
             return;
         }
-        if dialog.is_edit() && dialog.change_password && dialog.editor.password.is_empty() {
+        if dialog.is_edit() && dialog.needs_password() && dialog.editor.password.is_empty() {
             let message = t!("user.create.password_required").to_string();
             if let Some(dialog) = self.create_user_dialog.as_mut() {
                 dialog.error = Some(message);
@@ -3165,7 +3232,7 @@ impl AppView {
             t!("user.create.preview_header", account = subject)
         ));
         if dialog.is_edit() {
-            let note = if dialog.change_password && !dialog.editor.password.is_empty() {
+            let note = if dialog.needs_password() && !dialog.editor.password.is_empty() {
                 t!("user.create.preview_password_changed")
             } else {
                 t!("user.create.preview_password_kept")
@@ -3741,6 +3808,14 @@ impl AppView {
                 sized_combo(self.create_user_plugin_combo.as_ref(), theme),
                 theme,
             ));
+            // Switching the plugin clears the stored password, so spell out that a new one is
+            // required (and why Save is otherwise a no-op).
+            if dialog.plugin_changed() {
+                identity = identity.child(create_hint_row(
+                    t!("user.create.plugin_change_hint").to_string(),
+                    theme,
+                ));
+            }
         }
 
         if dialog.spec.verification_type {
@@ -3753,22 +3828,29 @@ impl AppView {
 
         if sql_auth {
             if dialog.is_edit() {
+                let label = t!("user.create.change_password").to_string();
                 identity = identity.child(create_row(
                     String::new(),
-                    check_row(
-                        "user-create-change-password",
-                        t!("user.create.change_password").to_string(),
-                        dialog.change_password,
-                        theme,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.toggle_create_change_password(cx)
-                        }),
-                    )
-                    .into_any_element(),
+                    if dialog.plugin_changed() {
+                        // A switched plugin needs a new password, so the box is shown locked on
+                        // instead of hiding the fields the save now requires.
+                        disabled_check_row("user-create-change-password", label, true, theme)
+                    } else {
+                        check_row(
+                            "user-create-change-password",
+                            label,
+                            dialog.change_password,
+                            theme,
+                            cx.listener(|this, _event, _window, cx| {
+                                this.toggle_create_change_password(cx)
+                            }),
+                        )
+                        .into_any_element()
+                    },
                     theme,
                 ));
             }
-            if !dialog.is_edit() || dialog.change_password {
+            if !dialog.is_edit() || dialog.needs_password() {
                 identity = identity
                     .child(create_row(
                         t!("user.field.password").to_string(),
@@ -3789,20 +3871,7 @@ impl AppView {
                 } else {
                     t!("user.create.password_hint").to_string()
                 };
-                identity = identity.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(CREATE_LABEL_GAP))
-                        .child(div().w(px(CREATE_LABEL_WIDTH)).flex_none())
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(theme.text_muted))
-                                .child(hint),
-                        ),
-                );
+                identity = identity.child(create_hint_row(hint, theme));
             }
         }
 
@@ -6302,6 +6371,32 @@ mod tests {
         );
         assert!(!dialog.is_edit());
         assert_eq!(dialog.original_account(), None);
+    }
+
+    #[test]
+    fn switching_the_plugin_makes_a_new_password_mandatory() {
+        let mut dialog = UserCreateDialog::new(
+            0,
+            "caching_sha2_password".to_string(),
+            UserEditorSpec::mysql(),
+            PrivilegeCatalog::default(),
+            false,
+            Some(("root".to_string(), "localhost".to_string())),
+        );
+        dialog.apply_details(UserDetails {
+            account: UserAccount {
+                plugin: "caching_sha2_password".to_string(),
+                ..UserAccount::default()
+            },
+            ..UserDetails::default()
+        });
+        // The picker mirrors the loaded account, so nothing is demanded yet.
+        assert!(!dialog.plugin_changed());
+        assert!(!dialog.needs_password());
+
+        dialog.editor.account.plugin = "mysql_native_password".to_string();
+        assert!(dialog.plugin_changed());
+        assert!(dialog.needs_password());
     }
 
     #[test]
