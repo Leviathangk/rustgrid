@@ -274,6 +274,7 @@ impl AppView {
                 cx.listener(|this, _event, _window, cx| {
                     this.connect_menu_open = !this.connect_menu_open;
                     this.theme_menu_open = false;
+                    this.import_submenu = false;
                     // A toolbar-initiated New Connection is never filed under a group.
                     this.connect_menu_group = None;
                     this.pending_group = None;
@@ -334,7 +335,7 @@ impl AppView {
         let mut items = div().flex().flex_col().w(px(150.0)).p_0p5();
         let target_group = self.connect_menu_group;
         for (_, id, name, enabled) in entries {
-            let label = format!("{name}...");
+            let label = name;
             if enabled {
                 let driver = id.clone();
                 items = items.child(self.context_item(
@@ -355,14 +356,44 @@ impl AppView {
             }
         }
 
+        items = self.connect_menu_transfer_items(items, cx);
+
         ui::popup_panel(theme)
             .left(anchor.x)
             .top(anchor.y + px(2.0))
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                // The 导入连接 flyout overflows past this panel, so a click on it also reads as
+                // "outside" here; keep the menu alive when the click is on the flyout.
+                let on_flyout = this
+                    .import_flyout_bounds
+                    .borrow()
+                    .is_some_and(|bounds| bounds.contains(&event.position));
+                if on_flyout {
+                    return;
+                }
                 this.connect_menu_open = false;
+                this.import_submenu = false;
                 cx.notify();
             }))
             .child(items)
+    }
+
+    /// The New Connection dropdown's trailing group: 导入连接 (a submenu) and 导出连接.
+    fn connect_menu_transfer_items(&self, mut items: Div, cx: &mut Context<'_, Self>) -> Div {
+        let theme = self.theme;
+        items = items
+            .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+            .child(self.import_connections_submenu_item(cx))
+            .child(self.context_item(
+                "connect-export-connections",
+                t!("connection.export_connection").to_string(),
+                cx.listener(|this, _event, _window, cx| {
+                    this.connect_menu_open = false;
+                    this.import_submenu = false;
+                    this.open_export_connections_window(cx);
+                }),
+            ));
+        items
     }
 
     pub(super) fn render_main_tab(
@@ -534,6 +565,8 @@ impl AppView {
         };
         // Match the tree's own id shape (`cat-<ci>-<di>-<scope>-<id>`, scope empty here).
         let id = format!("cat-{connection_index}-{database_index}--{}", category.id());
+        // The category is a single, non-selectable row: drop any connection/group multi-selection.
+        self.tree_selection.clear();
         self.tree_pane.update(cx, |pane, cx| {
             pane.selected = Some(id);
             pane.selected_table = None;

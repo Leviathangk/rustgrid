@@ -1,4 +1,5 @@
 mod secrets;
+pub mod transfer;
 
 use std::collections::BTreeMap;
 use std::fs;

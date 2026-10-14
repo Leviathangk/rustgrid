@@ -279,6 +279,8 @@ impl AppView {
         self.persist_secrets(cx);
         self.persist_settings();
 
+        // Connection indices shift when one is removed, so any `conn-*` selection is now stale.
+        self.tree_selection.clear();
         cx.notify();
     }
 
@@ -403,6 +405,87 @@ impl AppView {
             return;
         }
         self.disconnect(index, cx);
+    }
+
+    /// Open every connection in the tree's multi-selection (a selected group contributes its
+    /// connections). Connections that are already open or opening are left alone.
+    pub(super) fn connect_tree_selection(&mut self, cx: &mut Context<'_, Self>) {
+        for index in self.tree_selection_connection_indexes() {
+            let closed = matches!(
+                self.connections.get(index).map(|node| &node.status),
+                Some(ConnectionStatus::Disconnected) | Some(ConnectionStatus::Failed(_))
+            );
+            if closed {
+                self.connect(index, cx);
+            }
+        }
+    }
+
+    /// Close every open connection in the tree's multi-selection, asking once when any of them has
+    /// unsaved work.
+    pub(super) fn request_disconnect_tree_selection(&mut self, cx: &mut Context<'_, Self>) {
+        let indexes: Vec<usize> = self
+            .tree_selection_connection_indexes()
+            .into_iter()
+            .filter(|index| {
+                matches!(
+                    self.connections.get(*index).map(|node| &node.status),
+                    Some(ConnectionStatus::Connected(_))
+                        | Some(ConnectionStatus::Connecting)
+                        | Some(ConnectionStatus::Failed(_))
+                )
+            })
+            .collect();
+        if indexes.is_empty() {
+            return;
+        }
+        if indexes
+            .iter()
+            .any(|index| self.connection_has_unsaved(*index, cx))
+        {
+            self.unsaved_confirm = Some(PendingAction::DisconnectMany { indexes });
+            cx.notify();
+            return;
+        }
+        self.disconnect_many(indexes, cx);
+    }
+
+    /// Disconnect several connections in one pass.
+    pub(super) fn disconnect_many(&mut self, indexes: Vec<usize>, cx: &mut Context<'_, Self>) {
+        for index in indexes {
+            self.disconnect(index, cx);
+        }
+    }
+
+    /// Delete the connection tree's multi-selection: the selected groups (with everything still
+    /// inside them) and the selected connections.
+    pub(super) fn delete_tree_selection(
+        &mut self,
+        connections: Vec<String>,
+        groups: Vec<u64>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut ids: BTreeSet<String> = connections.into_iter().collect();
+        // A selected group is removed wholesale, so its connections go with it.
+        for group_id in &groups {
+            groups::collect_subtree_connection_ids(&self.tree_layout, *group_id, &mut ids);
+        }
+        // Remove the groups first (their children are spliced out), then delete the connections by
+        // profile id so index shifts never matter.
+        for group_id in groups {
+            self.delete_group(group_id, cx);
+        }
+        for id in ids {
+            if let Some(index) = self
+                .connections
+                .iter()
+                .position(|node| node.profile.id == id)
+            {
+                self.delete_connection(index, cx);
+            }
+        }
+        self.tree_selection.clear();
+        cx.notify();
     }
 
     pub(super) fn disconnect(&mut self, index: usize, cx: &mut Context<'_, Self>) {

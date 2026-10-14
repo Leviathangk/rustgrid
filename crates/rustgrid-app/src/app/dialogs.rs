@@ -368,6 +368,7 @@ impl AppView {
         match action {
             PendingAction::Quit => window.remove_window(),
             PendingAction::Disconnect { index } => self.disconnect(index, cx),
+            PendingAction::DisconnectMany { indexes } => self.disconnect_many(indexes, cx),
             PendingAction::CloseQuery { index } => self.close_query_now(index, cx),
             PendingAction::CloseDesign { index } => self.close_design_now(index, cx),
             PendingAction::CloseAllTabs => self.close_all_tabs_now(cx),
@@ -991,6 +992,24 @@ impl AppView {
                     t!("group.delete_title").to_string(),
                     t!("group.delete_confirm", name = name).to_string(),
                     t!("group.delete_button").to_string(),
+                )
+            }
+            Some(DeleteConfirm::TreeSelection {
+                connections,
+                groups,
+            }) => {
+                // A group is removed with everything inside it, so the count includes its
+                // connections on top of the ones directly selected.
+                let mut count = connections.len() + groups.len();
+                for id in groups {
+                    let mut ids = BTreeSet::new();
+                    groups::collect_subtree_connection_ids(&self.tree_layout, *id, &mut ids);
+                    count += ids.len();
+                }
+                (
+                    t!("connection.delete_title").to_string(),
+                    t!("connection.delete_multi_confirm", count = count).to_string(),
+                    t!("connection.delete_multi_button", count = count).to_string(),
                 )
             }
             Some(DeleteConfirm::Table {

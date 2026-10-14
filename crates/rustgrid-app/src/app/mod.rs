@@ -239,6 +239,17 @@ struct CreateTableDialog {
     error: Option<String>,
 }
 
+/// State of the "export connections" window: the checked connections, whether passwords are
+/// included, and an inline validation/write error.
+struct ConnectionExportDialog {
+    /// Indices into `AppView::connections` that are checked for export.
+    selected: BTreeSet<usize>,
+    /// Whether each connection's stored password is written into the file.
+    include_passwords: bool,
+    /// The last validation/write error, shown inline.
+    error: Option<String>,
+}
+
 /// Which tab of a backup dialog is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BackupDialogTab {
@@ -929,10 +940,11 @@ pub(super) enum TreeDragPayload {
     Group(u64),
 }
 
-/// An in-progress drag of a connection-tree row.
+/// An in-progress drag of a connection-tree row (one row, or the whole multi-selection).
 #[derive(Clone)]
 pub(super) struct TreeDrag {
-    pub(super) payload: TreeDragPayload,
+    /// The entries being dragged: a single row, or every row of the tree's multi-selection.
+    pub(super) payloads: Vec<TreeDragPayload>,
     /// The current pointer position, in window space.
     pub(super) position: Point<Pixels>,
 }
@@ -1086,6 +1098,9 @@ enum ContextTarget {
     Group {
         id: u64,
     },
+    /// A multi-selection of connection and/or group rows in the tree (打开连接 / 关闭连接 /
+    /// 导入连接 / 删除连接 / 刷新). Only shown when more than one row is selected.
+    TreeSelection,
     /// The blank area of the connection tree (新建分组 / 刷新).
     TreeBlank,
     Database {
@@ -1301,6 +1316,9 @@ struct TreePane {
     theme: Theme,
     /// The ids of the currently visible nodes, in draw order, for keyboard navigation.
     visible_ids: Vec<String>,
+    /// The multi-selected connection/group row keys this frame, mirrored from `AppView` for row
+    /// highlighting.
+    selection: BTreeSet<String>,
 }
 
 /// Which text field of a grid owns the platform text input (IME / `WM_CHAR`). Grids keep several
@@ -1457,6 +1475,12 @@ enum DeleteConfirm {
     Connection { index: usize },
     /// Delete a connection-tree group (its connections are kept, only ungrouped).
     Group { id: u64 },
+    /// Delete the connection tree's multi-selection: the named connections plus the named groups
+    /// (each group is removed with everything left inside it).
+    TreeSelection {
+        connections: Vec<String>,
+        groups: Vec<u64>,
+    },
     /// A destructive table operation.
     Table {
         connection_index: usize,
@@ -1567,6 +1591,8 @@ enum PendingAction {
     Quit,
     /// Disconnect `index` and close its grids/designers.
     Disconnect { index: usize },
+    /// Disconnect several connections at once (the tree's multi-selection).
+    DisconnectMany { indexes: Vec<usize> },
     /// Close the query tab at `index`.
     CloseQuery { index: usize },
     /// Close the table designer at `index`.
@@ -1734,6 +1760,10 @@ pub struct AppView {
     /// panel, so the panel's `on_mouse_down_out` would otherwise close the menu on a click that
     /// actually lands on the flyout (before the item's click can complete).
     dump_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// Whether the 导入连接 submenu (in the New Connection dropdown and the tree's blank menu) is
+    /// open, and the window-space bounds of its flyout (mirrors `dump_flyout_bounds`).
+    import_submenu: bool,
+    import_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// The configuration-name field of the "new backup" dialog.
     backup_name_input: Option<Entity<TextInput>>,
     backup_name_focus_pending: bool,
@@ -1758,6 +1788,10 @@ pub struct AppView {
     /// The open "save query" dialog, if any.
     save_query_dialog: Option<SaveQueryDialog>,
     query_name_input: Option<Entity<TextInput>>,
+    /// The open "export connections" window, if any.
+    export_connections_dialog: Option<ConnectionExportDialog>,
+    /// The OS window hosting the "export connections" dialog, if open.
+    export_connections_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The open "new table" name prompt, if any, and its shared name input.
     create_table_dialog: Option<CreateTableDialog>,
     create_table_input: Option<Entity<TextInput>>,
@@ -1972,13 +2006,24 @@ pub struct AppView {
     /// When the New Connection engine picker was opened from a group, the group the new connection
     /// should be filed under. `None` when opened from the toolbar.
     connect_menu_group: Option<u64>,
-    /// A pending row press that may become a drag once the pointer moves far enough.
-    tree_press: Option<(TreeDragPayload, Point<Pixels>)>,
+    /// A pending row press that may become a drag once the pointer moves far enough. The payloads
+    /// are the pressed row alone, or the whole tree multi-selection when the pressed row is part
+    /// of one.
+    tree_press: Option<(Vec<TreeDragPayload>, Point<Pixels>)>,
     /// The in-progress drag over the connection tree, if any.
     tree_drag: Option<TreeDrag>,
     /// Window-space rectangles of the draggable tree rows (connections and groups), for the
     /// drag-and-drop hit test.
     tree_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
+    /// The connection tree's multi-selection of connection/group rows (Explorer-style). Kept
+    /// separate from the tree pane's active row (`TreePane::selected`), which still drives the
+    /// content-pane scoping.
+    tree_selection: ListSelection,
+    /// The in-progress rubber-band drag over the connection tree, if any.
+    tree_marquee: Option<MarqueeDrag>,
+    /// The connection tree's window-space bounds (published by the tree pane), so the rubber band
+    /// is clamped to it.
+    tree_bounds: Option<Bounds<Pixels>>,
     /// The connection-tree host, which owns its own (drag-resizable) width so resizing only
     /// re-renders it, not the whole app.
     sidebar_host: Entity<SidebarHost>,
@@ -2116,6 +2161,7 @@ pub struct AppView {
     /// Focus targets for the child windows, so ESC closes them before any control is focused.
     export_focus: FocusHandle,
     import_focus: FocusHandle,
+    export_connections_focus: FocusHandle,
     backup_window_focus: FocusHandle,
     /// The main window's id, so closing it also closes the Backup/Restore window.
     main_window_id: Option<WindowId>,
@@ -2159,6 +2205,7 @@ mod sidebar;
 mod sql_completion;
 mod tabs;
 mod toolbar;
+mod transfer;
 mod tree;
 mod ui;
 mod update;
@@ -2321,6 +2368,8 @@ impl AppView {
             run_sql_dialog: None,
             dump_submenu: None,
             dump_flyout_bounds: Rc::new(RefCell::new(None)),
+            import_submenu: false,
+            import_flyout_bounds: Rc::new(RefCell::new(None)),
             backup_name_input: None,
             backup_name_focus_pending: false,
             backup_clipboard: None,
@@ -2356,6 +2405,8 @@ impl AppView {
             },
             save_query_dialog: None,
             query_name_input: None,
+            export_connections_dialog: None,
+            export_connections_window: None,
             create_table_dialog: None,
             create_table_input: None,
             save_connection_combo: None,
@@ -2506,6 +2557,9 @@ impl AppView {
             tree_press: None,
             tree_drag: None,
             tree_row_rects: std::collections::HashMap::new(),
+            tree_selection: ListSelection::default(),
+            tree_marquee: None,
+            tree_bounds: None,
             sidebar_host,
             info_pane,
             sidebar_open: true,
@@ -2634,6 +2688,7 @@ impl AppView {
             import_window: None,
             export_focus: cx.focus_handle(),
             import_focus: cx.focus_handle(),
+            export_connections_focus: cx.focus_handle(),
             backup_window_focus: cx.focus_handle(),
             main_window_id: None,
             _window_closed: window_closed,
@@ -3023,6 +3078,8 @@ impl AppView {
                 }
             }
         }
+        // The multi-selection changes the row highlight, so it must invalidate the cached tree.
+        self.tree_selection.items().hash(&mut hasher);
         hasher.finish()
     }
 
@@ -3619,6 +3676,7 @@ impl Render for AppView {
                 pane.update(cx, |pane, cx| pane.drag_move(event, cx));
                 this.drag_query_split(event, cx);
                 this.tree_drag_move(event, cx);
+                this.drag_tree_marquee(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -3629,6 +3687,7 @@ impl Render for AppView {
                     pane.update(cx, |pane, cx| pane.end_drag(cx));
                     this.end_query_split_drag(cx);
                     this.tree_drag_end(cx);
+                    this.end_tree_marquee(cx);
                 }),
             )
             .child(self.render_titlebar(cx))
@@ -3652,6 +3711,13 @@ impl Render for AppView {
         // follows the pointer as `AppView` re-renders on each drag move.
         if let Some(hint) = self.tree_drop_indicator() {
             root = root.child(sidebar::tree_drop_indicator_element(hint, theme));
+        }
+
+        // The connection tree's rubber-band selection rectangle, in window coordinates.
+        if let Some((origin, current, bounds)) = self.tree_marquee_rect() {
+            root = root.child(sidebar::tree_marquee_element(
+                origin, current, bounds, theme,
+            ));
         }
 
         if let Some(menu) = self.tab_menu.as_ref() {
@@ -3686,40 +3752,38 @@ fn chevron_spacer() -> AnyElement {
     div().w(px(14.0)).flex_none().into_any_element()
 }
 
-/// A connection icon, drawn from the driver's descriptor: an engine brand mark, a white glyph on a
-/// solid badge (whose colour carries the connection status), or a plain status-tinted glyph.
+/// A connection icon, drawn from the driver's descriptor: the engine's mark as a white glyph on a
+/// solid badge. The badge keeps the mark legible on a tinted — environment-coloured — row, which a
+/// bare glyph would blend into.
 fn tree_driver_icon(
     icon: &'static str,
     style: DriverIconStyle,
-    color: u32,
     badge: u32,
     connected: bool,
 ) -> AnyElement {
-    match style {
-        // Brand marks keep the engine colour only while the connection is open; a closed one is
-        // greyed out (like the badge/plain styles) instead of staying colourful.
-        DriverIconStyle::Brand(brand) => {
-            tree_icon(icon, if connected { brand } else { color }).into_any_element()
-        }
-        DriverIconStyle::SolidBadge => div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(16.0))
-            .h(px(16.0))
-            .flex_none()
-            .bg(rgb(badge))
-            .child(
-                svg()
-                    .path(icon)
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .flex_none()
-                    .text_color(rgb(0xffffff)),
-            )
-            .into_any_element(),
-        DriverIconStyle::Plain => tree_icon(icon, color).into_any_element(),
-    }
+    let block = match style {
+        // Brand marks keep the engine colour only while the connection is open; a closed one uses
+        // the status badge colour (grey) instead of staying colourful.
+        DriverIconStyle::Brand(brand) if connected => brand,
+        DriverIconStyle::Brand(_) | DriverIconStyle::SolidBadge | DriverIconStyle::Plain => badge,
+    };
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(16.0))
+        .h(px(16.0))
+        .flex_none()
+        .bg(rgb(block))
+        .child(
+            svg()
+                .path(icon)
+                .w(px(12.0))
+                .h(px(12.0))
+                .flex_none()
+                .text_color(rgb(0xffffff)),
+        )
+        .into_any_element()
 }
 
 /// A compact human-readable byte size for list columns, e.g. `512 B`, `2 KB`, `1.5 MB`.

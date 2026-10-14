@@ -307,6 +307,7 @@ impl TreePane {
             focus: cx.focus_handle(),
             theme: Theme::dark(),
             visible_ids: Vec::new(),
+            selection: BTreeSet::new(),
         }
     }
 
@@ -317,6 +318,24 @@ impl TreePane {
     /// Tree keyboard handling: arrow/Home/End navigation, Enter to open, and F2 to rename.
     fn tree_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
         let keystroke = &event.keystroke;
+        // Ctrl/Cmd+A selects every visible connection/group row.
+        if (keystroke.modifiers.control || keystroke.modifiers.platform)
+            && !keystroke.modifiers.alt
+            && keystroke.key.eq_ignore_ascii_case("a")
+        {
+            cx.stop_propagation();
+            let selectable: Vec<String> = self
+                .visible_ids
+                .iter()
+                .filter(|id| list_ops::is_tree_selectable(id))
+                .cloned()
+                .collect();
+            if let Some(app) = self.app.upgrade() {
+                app.update(cx, |app, cx| app.tree_select_all(&selectable, cx));
+            }
+            cx.notify();
+            return;
+        }
         if keystroke.modifiers.control || keystroke.modifiers.platform || keystroke.modifiers.alt {
             return;
         }
@@ -339,8 +358,22 @@ impl TreePane {
                     "end" => self.visible_ids.len() - 1,
                     _ => return,
                 };
-                self.selected = Some(self.visible_ids[next].clone());
+                let id = self.visible_ids[next].clone();
+                self.selected = Some(id.clone());
                 self.selected_table = None;
+                // Keep the multi-selection in step: a selectable row becomes the single selection,
+                // any other row clears it.
+                if let Some(app) = self.app.upgrade() {
+                    let selectable = list_ops::is_tree_selectable(&id);
+                    app.update(cx, |app, cx| {
+                        if selectable {
+                            app.tree_selection.select_one(id.clone());
+                        } else {
+                            app.tree_selection.clear();
+                        }
+                        cx.notify();
+                    });
+                }
                 self.scroll_selected_into_view(cx);
                 cx.notify();
             }
@@ -461,15 +494,9 @@ impl TreePane {
         let theme = self.theme;
         let index = connection.index;
         let conn_id = format!("conn-{index}");
-        let selected = self.selected.as_deref() == Some(conn_id.as_str());
+        let selected = self.selection.contains(&conn_id);
         let connected = matches!(connection.status, TreeStatus::Connected);
 
-        let icon_color = match &connection.status {
-            TreeStatus::Connected => theme.icon_connection,
-            TreeStatus::Connecting => theme.warning,
-            TreeStatus::Failed => theme.danger,
-            TreeStatus::Disconnected => theme.neutral,
-        };
         // A theme-independent badge color so the driver glyph keeps its contrast on both the
         // light and dark backgrounds.
         let badge = match &connection.status {
@@ -511,13 +538,28 @@ impl TreePane {
             .hover(move |style| {
                 style.bg(node_hover.unwrap_or(rgba((theme.tree_hover_bg << 8) | 0xff)))
             })
-            .on_click(cx.listener(move |this, event, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                // Releasing a drag of the multi-selection must not collapse it to this row.
+                if click_was_drag(event) {
+                    return;
+                }
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
                 this.selected = Some(format!("conn-{index}"));
+                // Extend/replace the tree's multi-selection from the click's modifiers.
+                let click_id = format!("conn-{index}");
+                let visible: Vec<String> = this
+                    .visible_ids
+                    .iter()
+                    .filter(|id| list_ops::is_tree_selectable(id))
+                    .cloned()
+                    .collect();
+                let mode = selection_mode(event.modifiers());
+                let shift = event.modifiers().shift;
                 if let Some(app) = this.app.upgrade() {
                     app.update(cx, |app, cx| {
+                        app.tree_row_click(&click_id, &visible, mode, shift, cx);
                         app.clear_info_selection();
                         cx.notify();
                     });
@@ -557,12 +599,27 @@ impl TreePane {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
-                    this.selected = Some(format!("conn-{index}"));
+                    let row_id = format!("conn-{index}");
+                    // Right-clicking inside a multi-selection keeps it and opens the multi menu;
+                    // otherwise the row becomes the single selection with its own menu.
+                    let multi = this.app.upgrade().is_some_and(|app| {
+                        let app = app.read(cx);
+                        app.tree_multi_selected() && app.tree_selection().contains(&row_id)
+                    });
+                    this.selected = Some(row_id.clone());
                     let _ = menu_app.update(cx, |app, cx| {
-                        app.context_menu = Some(ContextMenu {
-                            target: ContextTarget::Connection(index),
-                            position: event.position,
-                        });
+                        if multi {
+                            app.context_menu = Some(ContextMenu {
+                                target: ContextTarget::TreeSelection,
+                                position: event.position,
+                            });
+                        } else {
+                            app.tree_selection.select_one(row_id.clone());
+                            app.context_menu = Some(ContextMenu {
+                                target: ContextTarget::Connection(index),
+                                position: event.position,
+                            });
+                        }
                         app.move_submenu = None;
                         app.color_submenu = None;
                         cx.notify();
@@ -577,7 +634,6 @@ impl TreePane {
             .child(tree_driver_icon(
                 connection.icon,
                 connection.icon_style,
-                icon_color,
                 badge,
                 connected,
             ))
@@ -1461,7 +1517,7 @@ impl TreePane {
         let id = group.id;
         let row_id = format!("group-{id}");
         let click_id = row_id.clone();
-        let selected = self.selected.as_deref() == Some(row_id.as_str());
+        let selected = self.selection.contains(&row_id);
         let renaming = group_rename.filter(|(rid, _)| *rid == id);
         let editing_here = renaming.is_some();
 
@@ -1510,23 +1566,36 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if editing_here {
+                    return;
+                }
+                // Releasing a drag of the multi-selection must not collapse it to this row.
+                if click_was_drag(event) {
                     return;
                 }
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
+                // Extend/replace the tree's multi-selection from the click's modifiers.
+                let visible: Vec<String> = this
+                    .visible_ids
+                    .iter()
+                    .filter(|id| list_ops::is_tree_selectable(id))
+                    .cloned()
+                    .collect();
+                let mode = selection_mode(event.modifiers());
+                let shift = event.modifiers().shift;
                 let double_click =
                     matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
                 if let Some(app) = select_app.upgrade() {
                     app.update(cx, |app, cx| {
+                        app.tree_row_click(&click_id, &visible, mode, shift, cx);
                         if double_click {
                             app.toggle_group(id, cx);
-                        } else {
-                            cx.notify();
                         }
+                        cx.notify();
                     });
                 }
                 cx.notify();
@@ -1549,15 +1618,28 @@ impl TreePane {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
+                    let row_id = format!("group-{id}");
+                    let multi = this.app.upgrade().is_some_and(|app| {
+                        let app = app.read(cx);
+                        app.tree_multi_selected() && app.tree_selection().contains(&row_id)
+                    });
                     this.selected = Some(row_id.clone());
                     this.selected_table = None;
                     if let Some(app) = menu_app.upgrade() {
                         app.update(cx, |app, cx| {
                             app.move_submenu = None;
-                            app.context_menu = Some(ContextMenu {
-                                target: ContextTarget::Group { id },
-                                position: event.position,
-                            });
+                            if multi {
+                                app.context_menu = Some(ContextMenu {
+                                    target: ContextTarget::TreeSelection,
+                                    position: event.position,
+                                });
+                            } else {
+                                app.tree_selection.select_one(row_id.clone());
+                                app.context_menu = Some(ContextMenu {
+                                    target: ContextTarget::Group { id },
+                                    position: event.position,
+                                });
+                            }
                             cx.notify();
                         });
                     }
@@ -1595,7 +1677,7 @@ impl TreePane {
 
 impl Render for TreePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (theme, connections, layout, rename, group_rename) = {
+        let (theme, connections, layout, rename, group_rename, tree_selection) = {
             let Some(app) = self.app.upgrade() else {
                 return div().into_any_element();
             };
@@ -1608,10 +1690,12 @@ impl Render for TreePane {
                 app.group_rename
                     .as_ref()
                     .map(|edit| (edit.id, edit.input.clone())),
+                app.tree_selection.items(),
             )
         };
         self.theme = theme;
         self.rename_row = rename;
+        self.selection = tree_selection.into_iter().collect();
 
         self.visible_ids.clear();
         collect_visible_ids(&layout, &connections, &mut self.visible_ids);
@@ -1661,11 +1745,21 @@ impl Render for TreePane {
                     }))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             // Clicking outside the in-place rename commits it (the editor swallows
                             // clicks on itself), then the tree takes focus so F2 works.
                             this.commit_pending_rename(cx);
                             window.focus(&this.focus, cx);
+                            // Start a rubber band unless the press lands on a connection/group row,
+                            // which starts a drag-reorder instead.
+                            if let Some(app) = this.app.upgrade() {
+                                let on_row = app.read(cx).tree_press_on_reorder_row(event.position);
+                                if !on_row {
+                                    app.update(cx, |app, cx| {
+                                        app.begin_tree_marquee(event.position, event.modifiers, cx);
+                                    });
+                                }
+                            }
                         }),
                     )
                     .on_mouse_down(
@@ -1678,6 +1772,7 @@ impl Render for TreePane {
                             this.selected_table = None;
                             if let Some(app) = this.app.upgrade() {
                                 app.update(cx, |app, cx| {
+                                    app.tree_selection.clear();
                                     app.dump_submenu = None;
                                     app.move_submenu = None;
                                     app.color_submenu = None;
@@ -1692,8 +1787,30 @@ impl Render for TreePane {
                     )
                     .child(list),
             );
-        container.into_any_element()
+        let app = self.app.clone();
+        div()
+            .w_full()
+            .h_full()
+            .on_children_prepainted(move |bounds, _window, cx| {
+                let Some(rect) = bounds.first().copied() else {
+                    return;
+                };
+                let _ = app.update(cx, |app, _| app.note_tree_bounds(rect));
+            })
+            .child(container)
+            .into_any_element()
     }
+}
+
+/// Whether a click event was actually a drag (press and release far apart), so a row drag of the
+/// multi-selection does not collapse the selection on release.
+fn click_was_drag(event: &ClickEvent) -> bool {
+    let ClickEvent::Mouse(mouse) = event else {
+        return false;
+    };
+    let dx = f32::from(mouse.up.position.x) - f32::from(mouse.down.position.x);
+    let dy = f32::from(mouse.up.position.y) - f32::from(mouse.down.position.y);
+    dx.hypot(dy) > 4.0
 }
 
 /// Wrap a connection-tree row so it publishes its window-space rectangle for the drag hit test.
@@ -1737,4 +1854,37 @@ pub(super) fn tree_drop_indicator_element(hint: groups::TreeDropHint, theme: The
             .into_any_element(),
     };
     deferred(element).with_priority(60).into_any_element()
+}
+
+/// Draw the connection tree's rubber-band selection rectangle in window coordinates (like the
+/// drop indicator, which `AppView` renders above the panes so it can track the pointer).
+pub(super) fn tree_marquee_element(
+    origin: Point<Pixels>,
+    current: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    theme: Theme,
+) -> AnyElement {
+    let left = origin.x.min(current.x).max(bounds.left());
+    let top = origin.y.min(current.y).max(bounds.top());
+    let right = origin.x.max(current.x).min(bounds.right());
+    let bottom = origin.y.max(current.y).min(bounds.bottom());
+    let width = (right - left).max(px(0.0));
+    let height = (bottom - top).max(px(0.0));
+    if width <= px(0.0) || height <= px(0.0) {
+        return div().into_any_element();
+    }
+    deferred(
+        div()
+            .absolute()
+            .left(left)
+            .top(top)
+            .w(width)
+            .h(height)
+            .rounded(px(2.0))
+            .bg(rgba((theme.brand << 8) | 0x22))
+            .border_1()
+            .border_color(rgb(theme.brand)),
+    )
+    .with_priority(61)
+    .into_any_element()
 }

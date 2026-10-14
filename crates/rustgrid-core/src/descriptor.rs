@@ -10,14 +10,18 @@ use crate::driver::DatabaseEditorSpec;
 use crate::model::DriverId;
 
 /// How a driver's icon is drawn in the connection tree and menus.
+///
+/// Every style paints the engine's mark as a white glyph on a solid 16px badge, so it stays legible
+/// on a tinted (environment-coloured) row as well as on the plain background; the variants only
+/// differ in the badge's colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverIconStyle {
-    /// A plain single-colour glyph tinted with the connection status colour.
+    /// The badge carries the connection status colour.
     Plain,
-    /// A white glyph drawn on a solid badge whose colour carries the connection status (the
-    /// detailed MySQL/MariaDB brand marks).
+    /// The badge carries the connection status colour (the MySQL/MariaDB brand marks).
     SolidBadge,
-    /// The engine's own brand-coloured mark (SQLite, SQL Server).
+    /// The badge carries the engine's brand colour while the connection is open, and the status
+    /// colour while it is closed (SQLite, SQL Server, PostgreSQL, Oracle).
     Brand(u32),
 }
 

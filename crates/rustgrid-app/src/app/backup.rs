@@ -3080,6 +3080,8 @@ impl AppView {
             self.run_sql_dialog = None;
             self.export_window = None;
             self.export_wizard = None;
+            self.export_connections_window = None;
+            self.export_connections_dialog = None;
             self.import_window = None;
             self.import_wizard = None;
             self.create_user_window = None;
@@ -3159,6 +3161,17 @@ impl AppView {
             }
             self.import_window = None;
             self.import_wizard = None;
+            cx.notify();
+            return;
+        }
+        if self
+            .export_connections_window
+            .as_ref()
+            .is_some_and(|handle| handle.window_id() == id)
+        {
+            // The user closed the 导出连接 window from the OS chrome.
+            self.export_connections_window = None;
+            self.export_connections_dialog = None;
             cx.notify();
             return;
         }

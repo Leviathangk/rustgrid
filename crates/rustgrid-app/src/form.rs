@@ -424,7 +424,7 @@ impl ConnectionForm {
     }
 }
 
-fn now_nanos() -> u128 {
+pub(crate) fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())

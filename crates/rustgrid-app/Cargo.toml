@@ -52,6 +52,12 @@ driver-odbc = ["dep:rustgrid-odbc"]
 [build-dependencies]
 embed-resource.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The Dock icon: the release ships a bare executable, so AppKit has no bundle icon to read.
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle.workspace = true
 windows.workspace = true

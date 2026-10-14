@@ -68,6 +68,16 @@ sys-locale = "0.3"
 # `gpui-kit = { version = "0.7", features = ["tree-sitter-sql"] }`.
 gpui = { package = "gpui-fast", version = "0.1.7" }
 gpui-kit = { version = "0.7", features = ["tree-sitter-sql", "gpui-fast"] }
+# macOS-only: the Dock icon (`rustgrid-app/src/dock_icon.rs`). Every version below is already in the
+# lock file through `gpui-fast-macos`, so this adds no new crates to the tree — which is why the
+# features are listed here rather than at the (single) use site.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData"] }
 lsp-types = "0.97"
 ropey = "=2.0.0-beta.1"
 sqlparser = "0.62"
@@ -77,6 +87,16 @@ calamine = { version = "0.36", default-features = false, features = ["dates"] }
 encoding_rs = "0.8"
 dtparse = "2"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# Connection import/export. RustGrid's own `.rgc` and DBX's plain export are JSON (serde_json);
+# Navicat's `.ncx` is XML with the password stored as AES-128-CBC (the same scheme DBX reads).
+# `aes`/`cbc`/`hex`/`quick-xml` were already in the lock file as transitive dependencies, so this
+# adds no new crates to the tree.
+quick-xml = "0.41"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+# Navicat 11 `.ncx` passwords use Blowfish; Navicat 12+ use AES-128-CBC (above).
+blowfish = "0.10"
+hex = "0.4"
 # GitHub-Releases self-update: detection, download of the portable archive for the running target,
 # in-place replacement and relaunch. Uses ureq (blocking, rustls) instead of the default reqwest
 # client to keep the dependency tree small.

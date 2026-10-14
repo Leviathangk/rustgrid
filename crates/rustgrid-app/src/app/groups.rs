@@ -86,11 +86,12 @@ fn remove_entry(entries: &mut Vec<GroupEntry>, payload: &TreeDragPayload) -> Opt
     None
 }
 
-/// Insert `moving` directly before/after `target`, in whatever sibling list holds `target`.
-fn insert_relative(
+/// Insert several `moving` entries directly before/after `target`, in whatever sibling list holds
+/// `target`, preserving their order.
+fn insert_relative_all(
     entries: &mut Vec<GroupEntry>,
     target: &TreeDragPayload,
-    moving: &GroupEntry,
+    moving: &[GroupEntry],
     after: bool,
 ) -> bool {
     if let Some(index) = entries
@@ -98,12 +99,14 @@ fn insert_relative(
         .position(|entry| entry_matches(entry, target))
     {
         let at = if after { index + 1 } else { index };
-        entries.insert(at, moving.clone());
+        for (offset, entry) in moving.iter().enumerate() {
+            entries.insert(at + offset, entry.clone());
+        }
         return true;
     }
     for entry in entries.iter_mut() {
         if let GroupEntry::Group(group) = entry
-            && insert_relative(&mut group.children, target, moving, after)
+            && insert_relative_all(&mut group.children, target, moving, after)
         {
             return true;
         }
@@ -162,6 +165,29 @@ fn collect_group_ids(entries: &[GroupEntry], out: &mut Vec<u64>) {
         if let GroupEntry::Group(group) = entry {
             out.push(group.id);
             collect_group_ids(&group.children, out);
+        }
+    }
+}
+
+/// Collect the profile ids of every connection inside the group `id` (recursively). No-op when the
+/// group does not exist.
+pub(super) fn collect_subtree_connection_ids(
+    entries: &[GroupEntry],
+    id: u64,
+    out: &mut BTreeSet<String>,
+) {
+    if let Some(group) = find_group(entries, id) {
+        collect_connection_ids(&group.children, out);
+    }
+}
+
+fn collect_connection_ids(entries: &[GroupEntry], out: &mut BTreeSet<String>) {
+    for entry in entries {
+        match entry {
+            GroupEntry::Connection(id) => {
+                out.insert(id.clone());
+            }
+            GroupEntry::Group(group) => collect_connection_ids(&group.children, out),
         }
     }
 }
@@ -329,6 +355,10 @@ impl AppView {
         if self.group_rename.as_ref().is_some_and(|edit| edit.id == id) {
             self.group_rename = None;
         }
+        // A deleted group cannot stay selected.
+        let key = format!("group-{id}");
+        self.tree_selection
+            .retain(|selected| selected != key.as_str());
         self.persist_tree();
         cx.notify();
     }
@@ -425,56 +455,106 @@ impl AppView {
         cx.notify();
     }
 
-    /// Apply a drag-and-drop move over the tree.
-    pub(super) fn drop_tree_entry(
+    /// Apply a drag-and-drop move over the tree. `payloads` is one row or the whole multi-selection;
+    /// every dragged entry lands at the same spot, keeping their relative order.
+    pub(super) fn drop_tree_entries(
         &mut self,
-        payload: TreeDragPayload,
+        payloads: Vec<TreeDragPayload>,
         drop: TreeDrop,
         cx: &mut Context<'_, Self>,
     ) {
-        // Refuse to drop a group into itself or one of its own descendants.
-        if let TreeDragPayload::Group(id) = &payload {
-            let illegal = match &drop {
-                TreeDrop::Into(target) => {
-                    *target == *id || group_in_subtree(&self.tree_layout, *id, *target)
+        if payloads.is_empty() {
+            return;
+        }
+
+        // Which groups are being dragged, and every connection carried inside them.
+        let selected_groups: Vec<u64> = payloads
+            .iter()
+            .filter_map(|payload| match payload {
+                TreeDragPayload::Group(id) => Some(*id),
+                TreeDragPayload::Connection(_) => None,
+            })
+            .collect();
+        let mut inside_selected_group: BTreeSet<String> = BTreeSet::new();
+        for group_id in &selected_groups {
+            collect_subtree_connection_ids(
+                &self.tree_layout,
+                *group_id,
+                &mut inside_selected_group,
+            );
+        }
+
+        // Refuse to drop a group into itself or one of its own descendants, or onto an entry the
+        // dragged groups already carry (it would vanish with them).
+        match &drop {
+            TreeDrop::Into(target) => {
+                if selected_groups
+                    .iter()
+                    .any(|id| id == target || group_in_subtree(&self.tree_layout, *id, *target))
+                {
+                    return;
                 }
-                TreeDrop::Before(TreeDragPayload::Group(target))
-                | TreeDrop::After(TreeDragPayload::Group(target)) => {
-                    *target == *id || group_in_subtree(&self.tree_layout, *id, *target)
+            }
+            TreeDrop::Before(target) | TreeDrop::After(target) => {
+                if payloads.iter().any(|payload| payload == target) {
+                    return;
                 }
-                _ => false,
+                let carried = match target {
+                    TreeDragPayload::Group(target_id) => selected_groups.iter().any(|id| {
+                        id == target_id || group_in_subtree(&self.tree_layout, *id, *target_id)
+                    }),
+                    TreeDragPayload::Connection(id) => inside_selected_group.contains(id),
+                };
+                if carried {
+                    return;
+                }
+            }
+            TreeDrop::RootEnd => {}
+        }
+
+        // Drop the payloads that are already carried by another dragged group, so a group and a
+        // connection inside it are not detached and re-inserted separately.
+        let mut roots: Vec<TreeDragPayload> = Vec::new();
+        for payload in &payloads {
+            let redundant = match payload {
+                TreeDragPayload::Group(id) => selected_groups
+                    .iter()
+                    .any(|other| other != id && group_in_subtree(&self.tree_layout, *other, *id)),
+                TreeDragPayload::Connection(id) => inside_selected_group.contains(id),
             };
-            if illegal {
-                return;
+            if !redundant {
+                roots.push(payload.clone());
             }
         }
-        // A no-op drop onto itself.
-        if let TreeDrop::Before(target) | TreeDrop::After(target) = &drop
-            && target == &payload
-        {
+
+        let mut removed: Vec<GroupEntry> = Vec::new();
+        for payload in &roots {
+            if let Some(entry) = remove_entry(&mut self.tree_layout, payload) {
+                removed.push(entry);
+            }
+        }
+        if removed.is_empty() {
             return;
         }
-        let Some(entry) = remove_entry(&mut self.tree_layout, &payload) else {
-            return;
-        };
+
         match drop {
-            TreeDrop::RootEnd => self.tree_layout.push(entry),
+            TreeDrop::RootEnd => self.tree_layout.extend(removed),
             TreeDrop::Into(id) => {
                 if let Some(group) = find_group_mut(&mut self.tree_layout, id) {
-                    group.children.push(entry);
+                    group.children.extend(removed);
                     group.expanded = true;
                 } else {
-                    self.tree_layout.push(entry);
+                    self.tree_layout.extend(removed);
                 }
             }
             TreeDrop::Before(target) => {
-                if !insert_relative(&mut self.tree_layout, &target, &entry, false) {
-                    self.tree_layout.push(entry);
+                if !insert_relative_all(&mut self.tree_layout, &target, &removed, false) {
+                    self.tree_layout.extend(removed);
                 }
             }
             TreeDrop::After(target) => {
-                if !insert_relative(&mut self.tree_layout, &target, &entry, true) {
-                    self.tree_layout.push(entry);
+                if !insert_relative_all(&mut self.tree_layout, &target, &removed, true) {
+                    self.tree_layout.extend(removed);
                 }
             }
         }
@@ -494,9 +574,11 @@ impl AppView {
         self.tree_row_rects.clear();
     }
 
-    /// Record a left-press on a draggable row, so it can start a drag once the pointer moves.
+    /// Record a left-press on a draggable row, so it can start a drag once the pointer moves. When
+    /// the pressed row is part of the tree's multi-selection, the whole selection is dragged.
     pub(super) fn tree_press_start(&mut self, payload: TreeDragPayload, position: Point<Pixels>) {
-        self.tree_press = Some((payload, position));
+        let payloads = self.tree_drag_payloads_for(&payload);
+        self.tree_press = Some((payloads, position));
     }
 
     /// Update the in-progress drag as the pointer moves.
@@ -509,12 +591,12 @@ impl AppView {
             return;
         }
         if self.tree_drag.is_none() {
-            if let Some((payload, start)) = self.tree_press.clone() {
+            if let Some((payloads, start)) = self.tree_press.clone() {
                 let dx = f32::from(event.position.x) - f32::from(start.x);
                 let dy = f32::from(event.position.y) - f32::from(start.y);
                 if dx.hypot(dy) > 4.0 {
                     self.tree_drag = Some(TreeDrag {
-                        payload,
+                        payloads,
                         position: event.position,
                     });
                     cx.notify();
@@ -535,7 +617,7 @@ impl AppView {
             return;
         };
         if let Some(drop) = self.tree_drop_at(drag.position) {
-            self.drop_tree_entry(drag.payload, drop, cx);
+            self.drop_tree_entries(drag.payloads, drop, cx);
         }
         cx.notify();
     }
@@ -716,7 +798,7 @@ mod tests {
     #[test]
     fn a_group_cannot_be_dropped_into_its_own_descendant() {
         let layout = vec![group(1, "g", vec![group(2, "n", vec![])])];
-        // A descendant is rejected; a group is handled as "itself" separately (see drop_tree_entry).
+        // A descendant is rejected; a group is handled as "itself" separately (see drop_tree_entries).
         assert!(group_in_subtree(&layout, 1, 2));
         assert!(!group_in_subtree(&layout, 1, 1));
         assert!(!group_in_subtree(&layout, 2, 1));
@@ -732,8 +814,8 @@ mod tests {
     #[test]
     fn insert_relative_places_a_group_before_its_sibling() {
         let mut layout = vec![group(1, "a", vec![]), group(2, "b", vec![])];
-        let moving = group(3, "c", vec![]);
-        assert!(insert_relative(
+        let moving = [group(3, "c", vec![])];
+        assert!(insert_relative_all(
             &mut layout,
             &TreeDragPayload::Group(2),
             &moving,
@@ -741,6 +823,20 @@ mod tests {
         ));
         assert!(matches!(&layout[1], GroupEntry::Group(g) if g.id == 3));
         assert!(matches!(&layout[2], GroupEntry::Group(g) if g.id == 2));
+    }
+
+    #[test]
+    fn insert_relative_all_keeps_the_order_of_several_entries() {
+        let mut layout = vec![group(1, "a", vec![])];
+        let moving = [conn("x"), conn("y")];
+        assert!(insert_relative_all(
+            &mut layout,
+            &TreeDragPayload::Group(1),
+            &moving,
+            true
+        ));
+        assert!(matches!(&layout[1], GroupEntry::Connection(id) if id == "x"));
+        assert!(matches!(&layout[2], GroupEntry::Connection(id) if id == "y"));
     }
 
     #[test]

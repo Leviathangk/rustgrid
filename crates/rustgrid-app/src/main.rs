@@ -7,6 +7,8 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 mod app;
 mod assets;
+#[cfg(target_os = "macos")]
+mod dock_icon;
 mod form;
 mod list_select;
 mod runtime;
@@ -53,7 +55,9 @@ fn main() {
     let settings = app::load_startup_settings(&config);
     rust_i18n::set_locale(settings.language.locale());
 
-    gpui_kit::application().with_assets(Assets).run(move |cx| {
+    application().with_assets(Assets).run(move |cx| {
+        #[cfg(target_os = "macos")]
+        dock_icon::install();
         gpui_kit::init(cx);
         // Register the SQL editing rules (bracket pairs, indentation) for the query editor's
         // gpui-kit `Editor`. The grammar itself (tree-sitter `sql`) is linked in through the
@@ -96,6 +100,31 @@ fn main() {
         )
         .expect("failed to open the main window");
     });
+}
+
+/// The GPUI application this build launches.
+///
+/// On macOS the accessibility (AccessKit) adapter is deliberately left out. GPUI installs
+/// `accesskit_macos::SubclassingAdapter` on every window: it swaps the window content view's
+/// Objective-C class at runtime and swaps it back when the window is torn down. That class restore
+/// corrupts the KVO state AppKit's Touch Bar bookkeeping (`_NSTouchBarFinderObservation`, key path
+/// `nextResponder`) holds on the view, so closing *any* window on a Mac with a Touch Bar aborts the
+/// process with an uncaught `NSRangeException` raised from `-[_NSTouchBarFinderObservation
+/// invalidate]` during a display-cycle flush. That is what made 保存并连接 crash: saving closes the
+/// connection window. Upstream knows about it (zed-industries/zed#64819, longbridge/gpui-kit#3192)
+/// and the fix — replacing the subclassing adapter, zed-industries/zed#65186 — is not merged yet,
+/// so no released `gpui-fast` carries it. Skipping `a11y_init` altogether is the only in-process way
+/// to avoid it; the cost is that VoiceOver cannot read the app. Remove this as soon as `gpui-fast`
+/// ships the fix.
+#[cfg(target_os = "macos")]
+fn application() -> gpui::Application {
+    gpui::Application::new_inaccessible(gpui_kit::platform::current_platform(false))
+}
+
+/// Everywhere else this is gpui-kit's own entry point: accessibility stays enabled.
+#[cfg(not(target_os = "macos"))]
+fn application() -> gpui::Application {
+    gpui_kit::application()
 }
 
 /// Register the SQL editing rules for gpui-kit's `Editor`. `set_language_config` replaces the

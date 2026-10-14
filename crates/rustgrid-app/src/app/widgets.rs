@@ -263,6 +263,92 @@ impl AppView {
                         }),
                     ));
             }
+            ContextTarget::TreeSelection => {
+                let indexes = self.tree_selection_connection_indexes();
+                let any_open = indexes.iter().any(|index| {
+                    matches!(
+                        self.connections.get(*index).map(|node| &node.status),
+                        Some(ConnectionStatus::Connected(_))
+                            | Some(ConnectionStatus::Connecting)
+                            | Some(ConnectionStatus::Failed(_))
+                    )
+                });
+                let any_closed = indexes.iter().any(|index| {
+                    matches!(
+                        self.connections.get(*index).map(|node| &node.status),
+                        Some(ConnectionStatus::Disconnected) | Some(ConnectionStatus::Failed(_))
+                    )
+                });
+                let deletable = !indexes.is_empty() || !self.tree_selection_group_ids().is_empty();
+                items = items.child(if any_closed {
+                    self.context_item(
+                        "tree-sel-connect",
+                        t!("connection.connect").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.connect_tree_selection(cx);
+                        }),
+                    )
+                    .into_any_element()
+                } else {
+                    self.context_item_disabled(
+                        "tree-sel-connect",
+                        t!("connection.connect").to_string(),
+                    )
+                    .into_any_element()
+                });
+                items = items.child(if any_open {
+                    self.context_item(
+                        "tree-sel-disconnect",
+                        t!("connection.disconnect").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.request_disconnect_tree_selection(cx);
+                        }),
+                    )
+                    .into_any_element()
+                } else {
+                    self.context_item_disabled(
+                        "tree-sel-disconnect",
+                        t!("connection.disconnect").to_string(),
+                    )
+                    .into_any_element()
+                });
+                items = items.child(self.import_connections_submenu_item(cx));
+                items = items.child(if deletable {
+                    self.context_item(
+                        "tree-sel-delete",
+                        t!("connection.delete_connection").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            let connections = this.tree_selection_connection_profile_ids();
+                            let groups = this.tree_selection_group_ids();
+                            this.delete_confirm = Some(DeleteConfirm::TreeSelection {
+                                connections,
+                                groups,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+                } else {
+                    self.context_item_disabled(
+                        "tree-sel-delete",
+                        t!("connection.delete_connection").to_string(),
+                    )
+                    .into_any_element()
+                });
+                items = items
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "tree-sel-refresh",
+                        t!("connection.refresh").to_string(),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.refresh_tree(cx);
+                        }),
+                    ));
+            }
             ContextTarget::TreeBlank => {
                 items = items
                     .child(self.context_item(
@@ -271,6 +357,17 @@ impl AppView {
                         cx.listener(move |this, _event, window, cx| {
                             this.context_menu = None;
                             this.add_group(window, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.import_connections_submenu_item(cx))
+                    .child(self.context_item(
+                        "tree-export-connections",
+                        t!("connection.export_connection").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.import_submenu = false;
+                            this.open_export_connections_window(cx);
                         }),
                     ))
                     .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
@@ -1193,6 +1290,10 @@ impl AppView {
                     || this
                         .color_flyout_bounds
                         .borrow()
+                        .is_some_and(|bounds| bounds.contains(&event.position))
+                    || this
+                        .import_flyout_bounds
+                        .borrow()
                         .is_some_and(|bounds| bounds.contains(&event.position));
                 if on_flyout {
                     return;
@@ -1201,6 +1302,7 @@ impl AppView {
                 this.dump_submenu = None;
                 this.move_submenu = None;
                 this.color_submenu = None;
+                this.import_submenu = false;
                 cx.notify();
             }))
             .child(items)

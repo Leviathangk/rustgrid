@@ -88,7 +88,10 @@ not a later refactor.
   catalog listing, `execute_query` and paging; other `Connection` methods report "not supported yet".
   See `docs/odbc-driver.md`.
 - `crates/rustgrid-config` — versioned settings/profiles plus encrypted secret storage in the
-  OS config dir (`connections.json`, `settings.json`, `secrets.json`).
+  OS config dir (`connections.json`, `settings.json`, `secrets.json`). Its `transfer` module owns
+  connection import/export: the RustGrid `.rgc` bundle, the Navicat `.ncx` reader (XML plus the
+  `libcckeylibcckey` AES-128-CBC password scheme DBX also reads) and the DBX plain-JSON reader,
+  all mapped onto a common `TransferConnection`.
 - `crates/rustgrid-app` — GPUI binary `RustGrid`: `src/app/` is the view/render layer, split
   by feature (`mod.rs` holds `AppView`, its state, the `Render` entry, free helpers and
   tests; the rest are `impl AppView` submodules: `tree`, `database`, `db_dialog`, `objects`,
@@ -527,6 +530,26 @@ shadcn chrome described above. Implemented today:
     (drop before/after a row, or into a group's middle) with a `deferred` insertion indicator;
     groups nest arbitrarily and a group cannot be dropped into its own descendant.
 
+15. Connection import/export (`config::transfer` + `app/transfer.rs`): the New Connection dropdown
+    and the connection tree's blank-area menu end with a separator, then 导入连接 (a submenu with
+    导入RustGrid 连接 / 导入Navicat 连接 / 导入DBX 连接) and 导出连接. Each import entry opens a
+    native picker pre-filtered by its extension (`.rgc` / `.ncx` / `.json`|`.dbx`), parses on
+    tokio's blocking pool, and adds the connections straight to the tree (deduplicated names,
+    passwords written to the encrypted store, unsupported engines and undecryptable passwords
+    counted and reported) — there is no preview step. A `.rgc` also carries the connection tree's
+    `groups` (plus each connection's profile id) so an import restores the groups and the order;
+    other formats import flat. Navicat passwords are decrypted with the right scheme for the file:
+    v2 (AES-128-CBC, `libcckeylibcckey` / `libcciv libcciv `, Navicat 12+) when the hex decodes to
+    whole 16-byte blocks, else v1 (Blowfish, Navicat 11). 导出连接 opens a separate OS window (like
+    the export/import wizards, since the save picker must not run on gpui's event thread): a
+    checkable connection list with 全选/取消全选 and 导出密码. 确定 opens the native save dialog
+    (defaulting to `rustgrid-connections.rgc` on the desktop), and the window closes once the file
+    is written. When 导出密码 is ticked the passwords are written **encrypted** (XChaCha20-Poly1305
+    under a fixed built-in key, `password_protection: "builtin"`) rather than as plaintext; unchecked
+    the file carries no password but still imports. All six engines are read (MySQL/MariaDB,
+    PostgreSQL, SQLite, SQL Server, Oracle, ODBC); Navicat/DBX Oracle service-vs-SID and SSH tunnels
+    are mapped, and an absent port falls back to the engine default.
+
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL and Oracle, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
 items are deliberate stubs — leave them disabled unless asked). The abstractions above are what
@@ -679,6 +702,27 @@ make more engines cheap later — do not build those features early.
   macOS as well: the app's ✕ goes through `request_quit`'s unsaved-work confirmation, while the
   native close button reaches `on_window_closed` and quits outright. Dragging in that top strip
   stays AppKit's — `WindowControlArea::Drag` is Windows-only hit-testing (see `win_resize.rs`).
+- **macOS builds the app *inaccessible*, on purpose.** `main.rs::application()` builds the
+  `Application` through `gpui::Application::new_inaccessible` on macOS instead of
+  `gpui_kit::application()`. GPUI installs `accesskit_macos::SubclassingAdapter` on **every**
+  window: it swaps the window content view's Objective-C class at runtime and swaps it back when
+  the window is torn down, which corrupts the KVO state AppKit's Touch Bar bookkeeping
+  (`_NSTouchBarFinderObservation`, key path `nextResponder`) holds on that view. Closing **any**
+  window on a Mac with a Touch Bar (Intel or Apple Silicon) therefore aborts the process with an
+  uncaught `NSRangeException` from `-[_NSTouchBarFinderObservation invalidate]` raised during a
+  display-cycle flush — no app frames on the stack, which is why 保存并连接 (saving closes the
+  connection window) crashed the user in issue #4. Upstream knows (zed-industries/zed#64819,
+  longbridge/gpui-kit#3192) and the fix — replacing the subclassing adapter,
+  zed-industries/zed#65186 — is **not merged yet**, so no released `gpui-fast` (0.1.7 is newest)
+  carries it. Skipping `a11y_init` is the only in-process way to avoid it; the cost is that
+  VoiceOver cannot read the app on macOS. **Remove the macOS arm of `application()` as soon as
+  `gpui-fast` ships the fix.**
+- **The macOS Dock icon is set from the embedded logo.** macOS releases are bare executables, not
+  `.app` bundles, so AppKit has no `CFBundleIconFile` and the Dock shows the generic executable
+  icon. `src/dock_icon.rs` (macOS-only, called from the launch callback) pushes
+  `assets/logo.png` into `NSApplication.setApplicationIconImage:` through the `objc2` crates, which
+  are already in the lock file via `gpui-fast-macos`. That covers the running process only — the
+  icon Finder draws for the file itself needs a real bundle plus `self_update`-aware packaging.
 - gpui-pre's Windows build script (`gpui-pre-windows`) compiles HLSL whenever `debug_assertions`
   is **off** (release); it is **not** gated by a feature, so `runtime_shaders` does not avoid it.
   On this machine the Windows SDK `fxc.exe` is absent, so a plain `cargo build --release` panics

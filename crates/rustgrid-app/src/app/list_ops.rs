@@ -220,6 +220,252 @@ impl AppView {
     }
 }
 
+/// Whether a connection-tree row key takes part in the tree's multi-selection. Only connection and
+/// group rows are selectable; databases and objects stay single-select so the content pane's
+/// scoping is unaffected.
+pub(super) fn is_tree_selectable(key: &str) -> bool {
+    key.starts_with("conn-") || key.starts_with("group-")
+}
+
+impl AppView {
+    /// The connection tree's multi-selection (connections and groups).
+    pub(super) fn tree_selection(&self) -> &ListSelection {
+        &self.tree_selection
+    }
+
+    /// Whether more than one connection/group row is selected, i.e. the tree's multi-selection
+    /// menu should replace the per-item one.
+    pub(super) fn tree_multi_selected(&self) -> bool {
+        self.tree_selection.items().len() > 1
+    }
+
+    /// Apply a click on a selectable tree row (connection/group) under the click's modifier mode.
+    /// `visible` is the tree's current order, so Shift extends from the anchor.
+    pub(super) fn tree_row_click(
+        &mut self,
+        key: &str,
+        visible: &[String],
+        mode: SelectMode,
+        shift: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if shift {
+            self.tree_selection.extend_to(visible, key);
+        } else {
+            self.tree_selection.hit(visible, key, mode);
+        }
+        cx.notify();
+    }
+
+    /// Ctrl+A over the tree: select every visible connection/group row.
+    pub(super) fn tree_select_all(&mut self, visible: &[String], cx: &mut Context<'_, Self>) {
+        self.tree_selection.select_all(visible);
+        cx.notify();
+    }
+
+    /// The connection-tree multi-selection's connection profile ids, with each selected group
+    /// expanded to every connection under it (used by 打开连接 / 关闭连接).
+    pub(super) fn tree_selection_connection_ids(&self) -> Vec<String> {
+        let mut ids = BTreeSet::new();
+        for key in self.tree_selection.items() {
+            if let Some(rest) = key.strip_prefix("conn-") {
+                if let Ok(index) = rest.parse::<usize>()
+                    && let Some(node) = self.connections.get(index)
+                {
+                    ids.insert(node.profile.id.clone());
+                }
+            } else if let Some(rest) = key.strip_prefix("group-")
+                && let Ok(group_id) = rest.parse::<u64>()
+            {
+                groups::collect_subtree_connection_ids(&self.tree_layout, group_id, &mut ids);
+            }
+        }
+        ids.into_iter().collect()
+    }
+
+    /// The connection-tree multi-selection's connection indices, in profile order, with each
+    /// selected group expanded to its connections.
+    pub(super) fn tree_selection_connection_indexes(&self) -> Vec<usize> {
+        let ids: BTreeSet<String> = self.tree_selection_connection_ids().into_iter().collect();
+        self.connections
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| ids.contains(&node.profile.id))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The selected group ids (for 删除连接, which removes groups and their connections together).
+    pub(super) fn tree_selection_group_ids(&self) -> Vec<u64> {
+        self.tree_selection
+            .items()
+            .iter()
+            .filter_map(|key| key.strip_prefix("group-"))
+            .filter_map(|rest| rest.parse::<u64>().ok())
+            .collect()
+    }
+
+    /// The selected connection profile ids (不展开分组).
+    pub(super) fn tree_selection_connection_profile_ids(&self) -> Vec<String> {
+        self.tree_selection
+            .items()
+            .iter()
+            .filter_map(|key| key.strip_prefix("conn-"))
+            .filter_map(|rest| rest.parse::<usize>().ok())
+            .filter_map(|index| {
+                self.connections
+                    .get(index)
+                    .map(|node| node.profile.id.clone())
+            })
+            .collect()
+    }
+
+    /// The tree multi-selection as drag payloads (connections by profile id, groups by id).
+    pub(super) fn tree_selection_payloads(&self) -> Vec<TreeDragPayload> {
+        self.tree_selection
+            .items()
+            .iter()
+            .filter_map(|key| {
+                if let Some(rest) = key.strip_prefix("conn-") {
+                    rest.parse::<usize>()
+                        .ok()
+                        .and_then(|index| self.connections.get(index))
+                        .map(|node| TreeDragPayload::Connection(node.profile.id.clone()))
+                } else {
+                    key.strip_prefix("group-")
+                        .and_then(|rest| rest.parse::<u64>().ok())
+                        .map(TreeDragPayload::Group)
+                }
+            })
+            .collect()
+    }
+
+    /// The payloads a press on `payload` should drag: the pressed row alone, or the whole
+    /// multi-selection when the pressed row is part of one.
+    pub(super) fn tree_drag_payloads_for(&self, payload: &TreeDragPayload) -> Vec<TreeDragPayload> {
+        if self.tree_selection.items().len() > 1 {
+            let key = match payload {
+                TreeDragPayload::Connection(id) => self
+                    .connections
+                    .iter()
+                    .position(|node| &node.profile.id == id)
+                    .map(|index| format!("conn-{index}")),
+                TreeDragPayload::Group(id) => Some(format!("group-{id}")),
+            };
+            if let Some(key) = key
+                && self.tree_selection.contains(&key)
+            {
+                return self.tree_selection_payloads();
+            }
+        }
+        vec![payload.clone()]
+    }
+
+    /// Begin a rubber-band drag over the connection tree from `position`.
+    pub(super) fn begin_tree_marquee(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mode = selection_mode(modifiers);
+        let base = self.tree_selection.items();
+        if mode == SelectMode::Replace {
+            self.tree_selection.clear();
+        }
+        self.tree_marquee = Some(MarqueeDrag::new(position, mode, base));
+        cx.notify();
+    }
+
+    /// Extend the tree's rubber band to `event`'s position and repaint the selection.
+    pub(super) fn drag_tree_marquee(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            if self.tree_marquee.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
+        let Some(drag) = self.tree_marquee.as_mut() else {
+            return;
+        };
+        drag.current = event.position;
+        let (origin, current) = drag.rect();
+        let (left, top) = (origin.x.min(current.x), origin.y.min(current.y));
+        let (right, bottom) = (origin.x.max(current.x), origin.y.max(current.y));
+        let mode = drag.mode;
+        let base = drag.base.clone();
+
+        let mut hits: Vec<(String, Bounds<Pixels>)> = self
+            .tree_row_rects
+            .iter()
+            .filter(|(key, _)| is_tree_selectable(key))
+            .filter(|(_, rect)| rects_intersect(left, top, right, bottom, **rect))
+            .map(|(key, rect)| (key.clone(), *rect))
+            .collect();
+        hits.sort_by(|a, b| {
+            (a.1.top(), a.1.left())
+                .partial_cmp(&(b.1.top(), b.1.left()))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let hit_keys: Vec<String> = hits.into_iter().map(|(key, _)| key).collect();
+        self.tree_selection.marquee(&base, &hit_keys, mode);
+        cx.notify();
+    }
+
+    /// Finish the tree's rubber-band drag.
+    pub(super) fn end_tree_marquee(&mut self, cx: &mut Context<'_, Self>) {
+        if self.tree_marquee.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Whether a press position lands on a connection/group row, which starts a drag-reorder
+    /// rather than a rubber-band selection.
+    pub(super) fn tree_press_on_reorder_row(&self, position: Point<Pixels>) -> bool {
+        self.tree_row_rects
+            .iter()
+            .any(|(key, rect)| is_tree_selectable(key) && rect.contains(&position))
+    }
+
+    /// Note the connection tree's window-space bounds (from the tree pane's paint), so the rubber
+    /// band is clamped to the pane.
+    pub(super) fn note_tree_bounds(&mut self, rect: Bounds<Pixels>) {
+        self.tree_bounds = Some(rect);
+    }
+
+    /// The rubber-band rectangle to draw over the connection tree, in window coordinates.
+    pub(super) fn tree_marquee_rect(
+        &self,
+    ) -> Option<(Point<Pixels>, Point<Pixels>, Bounds<Pixels>)> {
+        let drag = self.tree_marquee.as_ref()?;
+        let (origin, current) = drag.rect();
+        // Prefer the tree pane's own bounds; fall back to the union of the selectable rows.
+        let bounds = self.tree_bounds.or_else(|| {
+            let mut bounds: Option<Bounds<Pixels>> = None;
+            for (key, rect) in &self.tree_row_rects {
+                if !is_tree_selectable(key) {
+                    continue;
+                }
+                bounds = Some(match bounds {
+                    None => *rect,
+                    Some(bounds) => Bounds {
+                        origin: Point::new(
+                            bounds.left().min(rect.left()),
+                            bounds.top().min(rect.top()),
+                        ),
+                        size: size(
+                            bounds.right().max(rect.right()) - bounds.left().min(rect.left()),
+                            bounds.bottom().max(rect.bottom()) - bounds.top().min(rect.top()),
+                        ),
+                    },
+                });
+            }
+            bounds
+        })?;
+        Some((origin, current, bounds))
+    }
+}
+
 /// The selection mode a mouse-down's modifiers ask for.
 pub(super) fn selection_mode(modifiers: Modifiers) -> SelectMode {
     if modifiers.shift {
