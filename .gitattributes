@@ -1,0 +1,4 @@
+# Shell scripts are run on macOS/Linux (the macOS bundle's `make-icns.sh` runs on the release
+# runner), where a CRLF line ending breaks `sh` parsing: force LF in the repository and in every
+# checkout, whatever the local `core.autocrlf` is.
+*.sh text eol=lf
