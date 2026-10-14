@@ -2,9 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   The macOS app bundle's Info.plist, filled in by the release workflow (see `.github/workflows/release.yml`):
-  every `@VERSION@` below is replaced with the tag's version. `CFBundleIdentifier` is the app's stable
-  LaunchServices identity, so it must never change: macOS keys permissions, window state and the Dock's
-  "keep in Dock" entry off it.
+  every version placeholder below is replaced with the tag's version. `CFBundleIdentifier` is the app's
+  stable LaunchServices identity, so it must never change: macOS keys permissions, window state and the
+  Dock's "keep in Dock" entry off it.
 -->
 <plist version="1.0">
 <dict>
