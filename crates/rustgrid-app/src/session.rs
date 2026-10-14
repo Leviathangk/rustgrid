@@ -578,10 +578,148 @@ impl SortRule {
     }
 }
 
+/// A table grid's field layout: the order every field is displayed in, and which of them are
+/// hidden. Applied by projecting `GridState::columns`/`column_widths` out of the table's natural
+/// column order; `GridState::rows` stay in natural order, so changing the layout re-projects
+/// metadata only (no refetch and no row copy).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct GridFieldLayout {
+    /// Every field name in display order (fields the layout does not know are appended).
+    pub order: Vec<String>,
+    /// The hidden field names.
+    pub hidden: BTreeSet<String>,
+}
+
+impl GridFieldLayout {
+    /// The layout's display order resolved against the engine's natural `columns`: the layout's own
+    /// order first (restricted to fields the table actually has), then every remaining field in
+    /// table order.
+    pub fn resolved_order(&self, columns: &[ColumnInfo]) -> Vec<String> {
+        let mut order: Vec<String> = Vec::with_capacity(columns.len());
+        for name in &self.order {
+            if !order.contains(name) && columns.iter().any(|column| &column.name == name) {
+                order.push(name.clone());
+            }
+        }
+        for column in columns {
+            if !order.contains(&column.name) {
+                order.push(column.name.clone());
+            }
+        }
+        order
+    }
+
+    /// Whether the layout leaves the table exactly as the engine returns it: no field hidden and no
+    /// field out of place. Drives the toolbar icon's "configured" state.
+    pub fn is_default(&self, columns: &[ColumnInfo]) -> bool {
+        if !self.hidden.is_empty() {
+            return false;
+        }
+        if self.order.is_empty() {
+            return true;
+        }
+        self.order.len() == columns.len()
+            && self
+                .order
+                .iter()
+                .zip(columns)
+                .all(|(name, column)| *name == column.name)
+    }
+
+    /// The permutation from display position to the index into `columns` (natural order), with the
+    /// visible fields first, and how many leading entries are visible. A layout that would hide
+    /// every field falls back to the table's own order so a grid can never end up blank.
+    pub fn permutation(&self, columns: &[ColumnInfo]) -> (Vec<usize>, usize) {
+        let order = self.resolved_order(columns);
+        let mut visible: Vec<usize> = Vec::with_capacity(columns.len());
+        let mut hidden: Vec<usize> = Vec::new();
+        for name in &order {
+            let Some(index) = columns.iter().position(|column| &column.name == name) else {
+                continue;
+            };
+            if self.hidden.contains(name) {
+                hidden.push(index);
+            } else {
+                visible.push(index);
+            }
+        }
+        if visible.is_empty() {
+            return ((0..columns.len()).collect(), columns.len());
+        }
+        let visible_count = visible.len();
+        visible.extend(hidden);
+        (visible, visible_count)
+    }
+
+    /// Show or hide one field.
+    pub fn set_hidden(&mut self, name: &str, hidden: bool) {
+        if hidden {
+            self.hidden.insert(name.to_string());
+        } else {
+            self.hidden.remove(name);
+        }
+    }
+
+    /// Move the field at `from` to `to` in the resolved display order.
+    pub fn move_field(&mut self, order: &[String], from: usize, to: usize) {
+        if from == to || from >= order.len() || to >= order.len() {
+            return;
+        }
+        let mut next = order.to_vec();
+        let name = next.remove(from);
+        next.insert(to.min(next.len()), name);
+        self.order = next;
+    }
+}
+
+/// Apply `order` (the display position each element's *source* index belongs at) to `values` in
+/// place, walking the permutation's cycles so no element is copied. A non-permutation is ignored,
+/// which also keeps the cycle walk from looping forever.
+pub fn permute_in_place<T>(values: &mut [T], order: &[usize]) {
+    if values.len() != order.len() {
+        return;
+    }
+    // The cycle walk needs where each element goes, i.e. the inverse of `order`.
+    let mut dest = vec![usize::MAX; order.len()];
+    for (slot, source) in order.iter().enumerate() {
+        if *source >= order.len() || dest[*source] != usize::MAX {
+            return;
+        }
+        dest[*source] = slot;
+    }
+    for index in 0..dest.len() {
+        while dest[index] != index {
+            let other = dest[index];
+            values.swap(index, other);
+            dest.swap(index, other);
+        }
+    }
+}
+
+/// The permutation to apply to the currently displayed columns (whose display order is
+/// `current_order`, each entry indexing the table's natural columns) to put them into
+/// `next_order`. Composing through the current positions is what lets `reproject_fields` re-order
+/// `columns`/`column_widths` in place without knowing which field each entry is.
+fn field_permutation(current_order: &[usize], next_order: &[usize], count: usize) -> Vec<usize> {
+    let mut position = vec![0usize; count];
+    for (slot, source) in current_order.iter().enumerate() {
+        if *source < count {
+            position[*source] = slot;
+        }
+    }
+    next_order
+        .iter()
+        .map(|source| position.get(*source).copied().unwrap_or(*source))
+        .collect()
+}
+
 pub struct GridState {
     pub id: u64,
     pub connection: Arc<dyn Connection>,
     pub connection_name: String,
+    /// The connection profile's id, which keys the persisted field layout. Empty for a grid whose
+    /// columns are not a table's (a query result), so no field layout is applied to it.
+    pub connection_id: String,
     pub database: String,
     pub table: String,
     pub is_view: bool,
@@ -589,7 +727,19 @@ pub struct GridState {
     pub page_size: u64,
     pub loading: bool,
     pub error: Option<String>,
+    /// The displayed columns: the table's columns re-ordered by [`Self::field_layout`], with the
+    /// hidden ones kept at the tail so unhiding them needs no refetch.
     pub columns: Vec<ColumnInfo>,
+    /// The table's columns exactly as the engine returns them (natural order). The 字段筛选 popup
+    /// lists these, and a layout change is resolved against them.
+    pub all_columns: Vec<ColumnInfo>,
+    /// The applied field layout (display order plus the hidden set).
+    pub field_layout: GridFieldLayout,
+    /// Display position -> index into [`Self::all_columns`], for the whole column list (hidden
+    /// fields included).
+    pub column_order: Vec<usize>,
+    /// How many leading entries of [`Self::columns`] are visible; the rest are hidden fields.
+    pub visible_columns: usize,
     pub rows: Arc<Vec<Vec<CellValue>>>,
     pub column_widths: Vec<f32>,
     /// Set once the user drags a column edge. Keeps the widths for the rest of this grid's life
@@ -655,6 +805,31 @@ pub fn compute_column_widths(columns: &[ColumnInfo], rows: &[Vec<CellValue>]) ->
 /// Horizontal room the header reserves for its sort badge (icon + gap), so column names are
 /// not truncated when the badge is revealed.
 const SORT_BADGE_ALLOWANCE: f32 = 20.0;
+
+/// The natural-order widths for a freshly fetched page: content-fitted, unless the user has dragged
+/// column edges — then each column keeps the width it had, matched by name so paging/sorting does
+/// not snap the widths back.
+pub fn page_column_widths(
+    columns: &[ColumnInfo],
+    rows: &[Vec<CellValue>],
+    previous: &[ColumnInfo],
+    previous_widths: &[f32],
+    manual: bool,
+) -> Vec<f32> {
+    let mut widths = compute_column_widths(columns, rows);
+    if manual {
+        for (index, column) in columns.iter().enumerate() {
+            let carried = previous
+                .iter()
+                .position(|candidate| candidate.name == column.name)
+                .and_then(|slot| previous_widths.get(slot).copied());
+            if let Some(width) = carried {
+                widths[index] = width;
+            }
+        }
+    }
+    widths
+}
 
 fn display_width(text: &str) -> usize {
     text.chars()
@@ -855,5 +1030,175 @@ impl GridState {
                 descending: rule.descending,
             })
             .collect()
+    }
+
+    /// The natural (engine) column index a display column reads its cell values from.
+    pub fn source_col(&self, col: usize) -> usize {
+        self.column_order.get(col).copied().unwrap_or(col)
+    }
+
+    /// Whether the 字段筛选 popup holds a layout that differs from the table's natural columns.
+    pub fn field_layout_configured(&self) -> bool {
+        !self.field_layout.is_default(&self.all_columns)
+    }
+
+    /// Install a freshly fetched page in the table's natural order and project the field layout on
+    /// top of it. `widths` are the natural-order widths; they are re-ordered alongside the columns.
+    pub fn install_page(
+        &mut self,
+        columns: Vec<ColumnInfo>,
+        rows: Vec<Vec<CellValue>>,
+        widths: Vec<f32>,
+    ) {
+        self.all_columns = columns;
+        self.column_order = (0..self.all_columns.len()).collect();
+        self.columns = self.all_columns.clone();
+        self.column_widths = widths;
+        self.visible_columns = self.columns.len();
+        self.rows = Arc::new(rows);
+        self.reproject_fields();
+    }
+
+    /// Re-order `columns`/`column_widths` into the field layout's display order (visible fields
+    /// first). `rows` are untouched: they keep the engine's order and are read through
+    /// [`Self::source_col`].
+    pub fn reproject_fields(&mut self) {
+        if self.all_columns.is_empty() {
+            return;
+        }
+        let (permutation, visible) = self.field_layout.permutation(&self.all_columns);
+        if permutation.len() != self.columns.len() || self.column_order.len() != permutation.len() {
+            // A stale permutation (e.g. the first page after the layout changed shape): start from
+            // the natural order instead of composing with a mapping that no longer applies. The
+            // widths are dropped too — they belong to the order being discarded — so the render
+            // falls back to the default width per column.
+            self.column_order = (0..self.all_columns.len()).collect();
+            self.columns = self.all_columns.clone();
+            self.column_widths.clear();
+        }
+        let composed = field_permutation(&self.column_order, &permutation, self.all_columns.len());
+        permute_in_place(&mut self.columns, &composed);
+        permute_in_place(&mut self.column_widths, &composed);
+        self.column_order = permutation;
+        self.visible_columns = visible;
+        self.field_layout.order = self.field_layout.resolved_order(&self.all_columns);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn columns(names: &[&str]) -> Vec<ColumnInfo> {
+        names
+            .iter()
+            .map(|name| ColumnInfo {
+                name: name.to_string(),
+                data_type: "int".to_string(),
+                nullable: true,
+                primary_key: false,
+                comment: String::new(),
+            })
+            .collect()
+    }
+
+    fn hidden(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn permuting_places_each_element_at_its_sources_position() {
+        let mut values = vec!['a', 'b', 'c', 'd'];
+        permute_in_place(&mut values, &[3, 1, 0, 2]);
+        assert_eq!(values, vec!['d', 'b', 'a', 'c']);
+    }
+
+    #[test]
+    fn permuting_ignores_a_non_permutation() {
+        let mut values = vec!['a', 'b', 'c'];
+        permute_in_place(&mut values, &[1, 1, 0]);
+        assert_eq!(values, vec!['a', 'b', 'c']);
+    }
+
+    #[test]
+    fn a_layout_orders_the_visible_fields_first() {
+        let layout = GridFieldLayout {
+            order: vec!["c".to_string(), "a".to_string(), "b".to_string()],
+            hidden: hidden(&["a"]),
+        };
+        let (permutation, visible) = layout.permutation(&columns(&["a", "b", "c"]));
+        // `c` and `b` are visible and lead; the hidden `a` is kept after them.
+        assert_eq!(permutation, vec![2, 1, 0]);
+        assert_eq!(visible, 2);
+    }
+
+    #[test]
+    fn a_layout_that_hides_every_field_falls_back_to_the_table_order() {
+        let layout = GridFieldLayout {
+            order: vec!["a".to_string(), "b".to_string()],
+            hidden: hidden(&["a", "b"]),
+        };
+        let (permutation, visible) = layout.permutation(&columns(&["a", "b"]));
+        assert_eq!(permutation, vec![0, 1]);
+        assert_eq!(visible, 2);
+    }
+
+    #[test]
+    fn resolved_order_appends_fields_the_layout_does_not_know() {
+        let layout = GridFieldLayout {
+            order: vec!["b".to_string(), "gone".to_string()],
+            hidden: BTreeSet::new(),
+        };
+        assert_eq!(
+            layout.resolved_order(&columns(&["a", "b", "c"])),
+            vec!["b", "a", "c"]
+        );
+    }
+
+    #[test]
+    fn only_the_tables_own_order_is_the_default() {
+        let table = columns(&["a", "b"]);
+        assert!(GridFieldLayout::default().is_default(&table));
+        assert!(
+            GridFieldLayout {
+                order: vec!["a".to_string(), "b".to_string()],
+                hidden: BTreeSet::new(),
+            }
+            .is_default(&table)
+        );
+        assert!(
+            !GridFieldLayout {
+                order: vec!["b".to_string(), "a".to_string()],
+                hidden: BTreeSet::new(),
+            }
+            .is_default(&table)
+        );
+        assert!(
+            !GridFieldLayout {
+                order: vec!["a".to_string(), "b".to_string()],
+                hidden: hidden(&["a"]),
+            }
+            .is_default(&table)
+        );
+    }
+
+    #[test]
+    fn reprojecting_composes_with_the_order_already_on_screen() {
+        // The columns are currently displayed as `b, a, c`; the layout wants `c, b, a`.
+        let composed = field_permutation(&[1, 0, 2], &[2, 1, 0], 3);
+        let mut values = vec!["b", "a", "c"];
+        permute_in_place(&mut values, &composed);
+        assert_eq!(values, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn moving_a_field_reorders_the_working_list() {
+        let mut layout = GridFieldLayout::default();
+        let order = ["a".to_string(), "b".to_string(), "c".to_string()];
+        layout.move_field(&order, 0, 2);
+        assert_eq!(layout.order, vec!["b", "c", "a"]);
+        let moved = layout.order.clone();
+        layout.move_field(&moved, 2, 0);
+        assert_eq!(layout.order, vec!["a", "b", "c"]);
     }
 }

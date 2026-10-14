@@ -34,7 +34,7 @@ impl GridView {
     /// The edit value of a cell: a staged edit/insert value if present, otherwise the loaded
     /// `CellValue`. `None` is SQL `NULL`.
     fn cell_edit_value(&self, row: usize, col: usize) -> Option<String> {
-        if col >= self.state.columns.len() {
+        if col >= self.state.visible_columns {
             return None;
         }
         if let Some(staged) = self.staged_value(row, col) {
@@ -42,9 +42,14 @@ impl GridView {
         }
         let data_rows = self.state.rows.len();
         if row < data_rows {
-            match &self.state.rows[row][col] {
-                CellValue::Null => None,
-                cell => Some(cell.as_edit_string()),
+            match self
+                .state
+                .rows
+                .get(row)
+                .and_then(|values| values.get(self.state.source_col(col)))
+            {
+                Some(CellValue::Null) | None => None,
+                Some(cell) => Some(cell.as_edit_string()),
             }
         } else {
             None
@@ -73,7 +78,7 @@ impl GridView {
             self.finish_cell_editor(cx);
         }
         if let Some(hit) = self.grid_hit(event.position) {
-            let column_count = self.state.columns.len();
+            let column_count = self.state.visible_columns;
             let inside = match hit {
                 GridHit::Gutter(row) => self.state.selection.as_ref().is_some_and(|selection| {
                     let (start_row, end_row) = selection.rows();
@@ -142,7 +147,7 @@ impl GridView {
         };
         let (start_row, end_row) = selection.rows();
         let (start_col, end_col) = selection.cols();
-        if self.state.columns.is_empty() {
+        if self.state.visible_columns == 0 {
             return;
         }
         let database = self.state.database.clone();
@@ -186,7 +191,7 @@ impl GridView {
     /// selected records. A copied block whose row count matches the selection maps one-to-one onto
     /// the selected rows; otherwise the block is anchored at the selection's top-left cell.
     pub(super) fn paste_clipboard(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.state.editable || self.state.columns.is_empty() {
+        if !self.state.editable || self.state.visible_columns == 0 {
             return;
         }
         // Prefer the OS clipboard when it changed since our own copy (so external / other-app
@@ -241,7 +246,7 @@ impl GridView {
             }
             for (offset, value) in values.iter().enumerate() {
                 let target_col = start_col + offset;
-                if target_col >= self.state.columns.len() {
+                if target_col >= self.state.visible_columns {
                     break;
                 }
                 self.stage_paste_cell(target_row, target_col, value, &mut action);

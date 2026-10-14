@@ -3,6 +3,7 @@ use super::*;
 impl GridView {
     pub(super) fn render_grid_vscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        let header_height = self.header_height(cx);
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let viewport = f32::from(handle.bounds().size.height);
         let max = (self.display_row_count() as f32 * GRID_ROW_HEIGHT - viewport).max(0.0);
@@ -15,7 +16,7 @@ impl GridView {
         div()
             .flex_none()
             .h_full()
-            .pt(px(GRID_ROW_HEIGHT))
+            .pt(px(header_height))
             .pb(px(GRID_SCROLLBAR_THICKNESS))
             .child(
                 ui::vscrollbar_track("grid-vscrollbar", theme, thumb_top, thumb_len).on_mouse_down(

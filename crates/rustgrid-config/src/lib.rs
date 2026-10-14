@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 8;
+const SETTINGS_VERSION: u32 = 9;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -87,6 +87,20 @@ impl LanguageSetting {
     }
 }
 
+/// A table grid's remembered field layout (the 字段筛选 popup): the order its fields are shown in and
+/// which of them are hidden. Persisted per connection/database/table, so a table opens with the
+/// field set the user last chose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldLayout {
+    /// Every field name in display order. A field the saved layout does not know (a column added to
+    /// the table afterwards) is appended in the table's own order.
+    #[serde(default)]
+    pub order: Vec<String>,
+    /// The fields currently hidden from the grid.
+    #[serde(default)]
+    pub hidden: Vec<String>,
+}
+
 /// One group in the connection tree. Groups nest: a group's `children` may hold both nested groups
 /// and connections (referenced by their `ConnectionProfile::id`). Group names are not required to be
 /// unique, so the numeric `id` is what identifies a group.
@@ -147,6 +161,13 @@ struct SettingsFile {
     /// reordering/renaming. The value is a colour id (`"red"`, `"green"` or `"blue"`).
     #[serde(default)]
     connection_colors: BTreeMap<String, String>,
+    /// The remembered field layout (字段筛选) per table grid, keyed by a
+    /// `"<connection id>\u{1f}<database>\u{1f}<table>"` string.
+    #[serde(default)]
+    grid_field_layouts: BTreeMap<String, FieldLayout>,
+    /// Whether the grid header shows each column's comment under its name.
+    #[serde(default)]
+    grid_show_comments: bool,
 }
 
 /// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
@@ -181,6 +202,10 @@ pub struct AppSettings {
     /// The per-connection environment colour, keyed by connection-profile id. The value is a
     /// colour id (`"red"`, `"green"` or `"blue"`); a missing entry means no colour.
     pub connection_colors: BTreeMap<String, String>,
+    /// The remembered field layout (字段筛选) per table grid, keyed by connection/database/table.
+    pub grid_field_layouts: BTreeMap<String, FieldLayout>,
+    /// Whether the grid header shows each column's comment under its name.
+    pub grid_show_comments: bool,
 }
 
 impl Default for AppSettings {
@@ -198,6 +223,8 @@ impl Default for AppSettings {
             expanded_databases: BTreeMap::new(),
             groups: Vec::new(),
             connection_colors: BTreeMap::new(),
+            grid_field_layouts: BTreeMap::new(),
+            grid_show_comments: false,
         }
     }
 }
@@ -394,6 +421,8 @@ impl ConfigStore {
             expanded_databases: file.expanded_databases,
             groups: file.groups,
             connection_colors: file.connection_colors,
+            grid_field_layouts: file.grid_field_layouts,
+            grid_show_comments: file.grid_show_comments,
         })
     }
 
@@ -413,6 +442,8 @@ impl ConfigStore {
             expanded_databases: settings.expanded_databases.clone(),
             groups: settings.groups.clone(),
             connection_colors: settings.connection_colors.clone(),
+            grid_field_layouts: settings.grid_field_layouts.clone(),
+            grid_show_comments: settings.grid_show_comments,
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

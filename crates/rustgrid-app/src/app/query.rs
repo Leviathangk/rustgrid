@@ -1007,10 +1007,13 @@ impl AppView {
                         self.next_grid_id += 1;
                         let total = result.rows.len() as u64;
                         let column_widths = compute_column_widths(&result.columns, &result.rows);
+                        let column_count = result.columns.len();
                         let state = GridState {
                             id,
                             connection: connection.clone(),
                             connection_name: connection_name.clone(),
+                            // A query result is not a table, so there is no field layout to key on.
+                            connection_id: String::new(),
                             database,
                             table,
                             is_view: false,
@@ -1018,7 +1021,11 @@ impl AppView {
                             page_size: total.max(1),
                             loading: false,
                             error: None,
-                            columns: result.columns,
+                            columns: result.columns.clone(),
+                            all_columns: result.columns,
+                            field_layout: GridFieldLayout::default(),
+                            column_order: (0..column_count).collect(),
+                            visible_columns: column_count,
                             rows: Arc::new(result.rows),
                             column_widths,
                             manual_column_widths: false,

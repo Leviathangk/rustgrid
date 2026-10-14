@@ -1,0 +1,501 @@
+//! The grid's 字段筛选 popup: an anchored, non-modal panel under the toolbar item that shows, hides
+//! and re-orders the table's fields.
+//!
+//! The layout is applied by projecting `GridState::columns` (and their widths) out of the table's
+//! natural column order — the rows keep the engine's order and are read through
+//! `GridState::source_col` — so a change re-projects metadata only: no refetch, no row copy. The
+//! result is remembered per connection/database/table, so a table reopens with the field set the
+//! user last chose.
+
+use super::*;
+
+/// The popup's search field. Built with the grid (not on the first render) because the grid's
+/// `Context` is what the change callback updates.
+pub(super) fn make_field_filter_search_input(
+    theme: Theme,
+    weak: WeakEntity<GridView>,
+    cx: &mut Context<'_, GridView>,
+) -> Entity<TextInput> {
+    let options = TextInputOptions {
+        placeholder: t!("grid.field_filter_search").to_string().into(),
+        icon: Some("icons/search.svg"),
+        clearable: true,
+        text_size: Some(12.0),
+        size: Some(gpui_kit::component::Size::XSmall),
+        ..Default::default()
+    };
+    let change = weak.clone();
+    let cancel = weak;
+    cx.new(move |cx| {
+        TextInput::new(theme, "", options, cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |grid, cx| {
+                    grid.field_filter_search = text.to_string();
+                    cx.notify();
+                });
+            }))
+            .on_cancel(Rc::new(move |window, cx| {
+                // Escape leaves the search field and closes the popup, handing the keyboard back to
+                // the grid.
+                let _ = cancel.update(cx, |grid, cx| {
+                    grid.close_field_filter(cx);
+                    window.focus(&grid.focus, cx);
+                });
+            }))
+    })
+}
+
+/// Whether a field's name or comment matches the popup's search text.
+fn field_matches(name: &str, comment: &str, needle: &str) -> bool {
+    name.to_lowercase().contains(needle) || comment.to_lowercase().contains(needle)
+}
+
+impl GridView {
+    /// The item's colour: the accent once fields are hidden or re-ordered, and the muted chrome
+    /// colour while the grid shows the table's natural field set — so the single icon reads as
+    /// "set" or "not set" at a glance.
+    pub(super) fn field_filter_color(&self) -> u32 {
+        if self.state.field_layout_configured() {
+            self.theme.primary
+        } else {
+            self.theme.icon_views
+        }
+    }
+
+    /// Open or close the 字段筛选 popup.
+    pub(super) fn toggle_field_filter(&mut self, cx: &mut Context<'_, Self>) {
+        if self.field_filter_open {
+            self.close_field_filter(cx);
+            return;
+        }
+        if self.state.sql.is_some() || self.state.all_columns.is_empty() {
+            return;
+        }
+        self.field_filter_order = self
+            .state
+            .field_layout
+            .resolved_order(&self.state.all_columns);
+        self.field_filter_search.clear();
+        let input = self.field_filter_search_input.clone();
+        input.update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.field_filter_drag = None;
+        self.field_filter_open = true;
+        self.field_filter_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Dismiss the popup without changing the applied layout (every edit already applied live).
+    pub(super) fn close_field_filter(&mut self, cx: &mut Context<'_, Self>) {
+        self.field_filter_open = false;
+        self.field_filter_drag = None;
+        self.field_filter_focus_pending = false;
+        cx.notify();
+    }
+
+    /// How many of the fields are currently visible.
+    fn field_filter_visible_count(&self) -> usize {
+        self.field_filter_order
+            .iter()
+            .filter(|name| !self.state.field_layout.hidden.contains(*name))
+            .count()
+    }
+
+    /// Hide or show one field. The last visible field can never be hidden.
+    pub(super) fn field_filter_toggle(&mut self, name: String, cx: &mut Context<'_, Self>) {
+        let hide = !self.state.field_layout.hidden.contains(&name);
+        if hide && self.field_filter_visible_count() <= 1 {
+            return;
+        }
+        self.state.field_layout.set_hidden(&name, hide);
+        self.apply_field_filter(cx);
+    }
+
+    /// 重置: put the fields back the way the engine returns them — the table's own order with every
+    /// field shown.
+    pub(super) fn field_filter_reset(&mut self, cx: &mut Context<'_, Self>) {
+        self.field_filter_order = self
+            .state
+            .all_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        self.state.field_layout.hidden.clear();
+        self.apply_field_filter(cx);
+    }
+
+    /// 全选: show every field (keeping the current order).
+    pub(super) fn field_filter_show_all(&mut self, cx: &mut Context<'_, Self>) {
+        if self.state.field_layout.hidden.is_empty() {
+            return;
+        }
+        self.state.field_layout.hidden.clear();
+        self.apply_field_filter(cx);
+    }
+
+    /// Start dragging a field row's handle.
+    pub(super) fn field_filter_press(
+        &mut self,
+        index: usize,
+        position_y: f32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.field_filter_drag = Some(FieldFilterDrag {
+            from: index,
+            current: index,
+            start_y: position_y,
+        });
+        cx.notify();
+    }
+
+    /// Reorder the field being dragged as the pointer crosses row boundaries. The list has a fixed
+    /// row height, so the target position is where the pointer has travelled from the press.
+    pub(super) fn field_filter_drag_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(drag) = self.field_filter_drag else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.field_filter_drag = None;
+            cx.notify();
+            return;
+        }
+        let len = self.field_filter_order.len();
+        if len == 0 {
+            return;
+        }
+        let steps = ((f32::from(event.position.y) - drag.start_y) / FIELD_FILTER_ROW_HEIGHT).round()
+            as isize;
+        let target = (drag.from as isize + steps).clamp(0, len as isize - 1) as usize;
+        if target == drag.current {
+            return;
+        }
+        self.state
+            .field_layout
+            .move_field(&self.field_filter_order, drag.current, target);
+        self.field_filter_order = self.state.field_layout.order.clone();
+        self.field_filter_drag = Some(FieldFilterDrag {
+            current: target,
+            ..drag
+        });
+        // The reorder is applied live so the grid tracks the drag; the settings write waits for the
+        // drop, so dragging across several rows does not rewrite the file once per row.
+        self.apply_field_filter_working(cx);
+    }
+
+    /// Finish a drag: remember the new order, or discard a drag that never moved.
+    pub(super) fn field_filter_drag_end(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(drag) = self.field_filter_drag.take() else {
+            return;
+        };
+        if drag.current != drag.from {
+            self.persist_field_layout(cx);
+        }
+        cx.notify();
+    }
+
+    /// Apply the popup's working order/hidden set to the grid in place and remember it per table.
+    fn apply_field_filter(&mut self, cx: &mut Context<'_, Self>) {
+        self.apply_field_filter_working(cx);
+        self.persist_field_layout(cx);
+    }
+
+    /// Re-project the grid from the working order without writing settings.
+    fn apply_field_filter_working(&mut self, cx: &mut Context<'_, Self>) {
+        self.state.field_layout.order = self.field_filter_order.clone();
+        self.state.reproject_fields();
+        // `reproject_fields` resolves the order against the table's columns, so a field added to the
+        // table since the layout was saved shows up in the popup instead of disappearing.
+        self.field_filter_order = self.state.field_layout.order.clone();
+        cx.notify();
+    }
+
+    /// Write the applied layout to settings so the next open of this table restores it.
+    fn persist_field_layout(&mut self, cx: &mut Context<'_, Self>) {
+        let connection_id = self.state.connection_id.clone();
+        if connection_id.is_empty() {
+            return;
+        }
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        let database = self.state.database.clone();
+        let table = self.state.table.clone();
+        let layout = FieldLayout {
+            order: self.state.field_layout.order.clone(),
+            hidden: self.state.field_layout.hidden.iter().cloned().collect(),
+        };
+        app.update(cx, |app, cx| {
+            app.set_field_layout(&connection_id, &database, &table, layout);
+            cx.notify();
+        });
+    }
+
+    /// The full-pane backdrop behind the popup: one click anywhere outside dismisses it.
+    pub(super) fn render_field_filter_backdrop(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        deferred(
+            div()
+                .id("field-filter-backdrop")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.close_field_filter(cx);
+                    }),
+                )
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                    this.field_filter_drag_move(event, cx);
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                        this.field_filter_drag_end(cx);
+                    }),
+                ),
+        )
+        .with_priority(FIELD_FILTER_BACKDROP_PRIORITY)
+        .into_any_element()
+    }
+
+    /// The 字段筛选 panel, anchored under its toolbar item.
+    pub(super) fn render_field_filter_popup(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let pane = *self.grid_pane_bounds.borrow();
+        let anchor = *self.field_filter_anchor.borrow();
+        let max_left = (f32::from(pane.size.width) - FIELD_FILTER_POPUP_WIDTH - 8.0).max(0.0);
+        let left = (f32::from(anchor.x) - f32::from(pane.left())).clamp(0.0, max_left);
+        let top = GRID_TOOLBAR_HEIGHT + 2.0;
+        // Keep the whole panel inside the pane — the header, search box and footer take roughly
+        // this much — while letting a tall pane show as many fields as fit.
+        let list_max_height =
+            (f32::from(pane.size.height) - top - 110.0).clamp(140.0, FIELD_FILTER_LIST_MAX_HEIGHT);
+
+        let columns = self.state.all_columns.clone();
+        let order = self.field_filter_order.clone();
+        let hidden = self.state.field_layout.hidden.clone();
+        let needle = self.field_filter_search.trim().to_lowercase();
+        let dragged = self.field_filter_drag.map(|drag| drag.current);
+        let weak = self.self_weak.clone();
+        let total = order.len();
+        let visible_total = self.field_filter_visible_count();
+
+        let mut list = div()
+            .id("field-filter-list")
+            .flex()
+            .flex_col()
+            .flex_none()
+            // Keep the whole panel inside the pane: the list shrinks when the pane is short, and
+            // scrolls instead.
+            .max_h(px(list_max_height))
+            .overflow_y_scroll();
+        let mut rows = 0usize;
+        for (index, name) in order.iter().enumerate() {
+            let comment = columns
+                .iter()
+                .find(|column| &column.name == name)
+                .map(|column| single_line(&column.comment))
+                .unwrap_or_default();
+            if !needle.is_empty() && !field_matches(name, &comment, &needle) {
+                continue;
+            }
+            rows += 1;
+            let checked = !hidden.contains(name);
+            let row_name = name.clone();
+            let toggle_name = name.clone();
+            let toggle_weak = weak.clone();
+            let row = div()
+                .id(SharedString::from(format!("field-filter-row-{name}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .h(px(FIELD_FILTER_ROW_HEIGHT))
+                .px_2()
+                .flex_none()
+                .when(dragged == Some(index), move |style| {
+                    style.bg(rgb(theme.tree_selected_bg))
+                })
+                .child(
+                    // The drag handle is the only place a press starts a reorder, so clicking the
+                    // row (or its check box) still toggles the field's visibility.
+                    div()
+                        .id(SharedString::from(format!("field-filter-handle-{name}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(14.0))
+                        .h_full()
+                        .flex_none()
+                        .cursor_grab()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                this.field_filter_press(index, f32::from(event.position.y), cx);
+                            }),
+                        )
+                        .child(
+                            svg()
+                                .path("icons/drag_handle.svg")
+                                .w(px(14.0))
+                                .h(px(14.0))
+                                .flex_none()
+                                .text_color(rgb(theme.text_muted)),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("field-filter-toggle-{name}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h_full()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        .on_click(move |_event, _window, cx| {
+                            let _ = toggle_weak.update(cx, |grid, cx| {
+                                grid.field_filter_toggle(toggle_name.clone(), cx);
+                            });
+                        })
+                        .child(checkbox_box(checked, theme))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.text))
+                                .child(row_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.text_muted))
+                                .child(comment.clone()),
+                        ),
+                );
+            list = list.child(row);
+        }
+        if rows == 0 {
+            list = list.child(
+                div()
+                    .h(px(FIELD_FILTER_ROW_HEIGHT))
+                    .px_2()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("grid.field_filter_empty").to_string()),
+            );
+        }
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .h(px(24.0))
+            .flex_none()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme.text))
+                    .child(t!("grid.field_filter").to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!("{visible_total}/{total}")),
+            );
+
+        let footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .flex_none()
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .child(self.field_filter_action(
+                "field-filter-reset",
+                t!("grid.field_filter_reset").to_string(),
+                cx.listener(|this, _event, _window, cx| this.field_filter_reset(cx)),
+            ))
+            .child(self.field_filter_action(
+                "field-filter-select-all",
+                t!("grid.field_filter_select_all").to_string(),
+                cx.listener(|this, _event, _window, cx| this.field_filter_show_all(cx)),
+            ));
+
+        let panel = ui::popup_panel(theme)
+            .id("field-filter-popup")
+            .left(px(left))
+            .top(px(top))
+            .w(px(FIELD_FILTER_POPUP_WIDTH))
+            .flex()
+            .flex_col()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.field_filter_drag_move(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.field_filter_drag_end(cx);
+                }),
+            )
+            .child(header)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex_none()
+                    .child(self.field_filter_search_input.clone()),
+            )
+            .child(list)
+            .child(footer);
+
+        deferred(panel)
+            .with_priority(FIELD_FILTER_POPUP_PRIORITY)
+            .into_any_element()
+    }
+
+    /// One footer action of the 字段筛选 popup.
+    fn field_filter_action(
+        &self,
+        id: &'static str,
+        label: String,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(20.0))
+            .px_2()
+            .rounded_sm()
+            .flex_none()
+            .text_size(px(11.0))
+            .text_color(rgb(theme.text))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(on_click)
+            .child(label)
+    }
+}

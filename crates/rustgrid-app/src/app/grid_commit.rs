@@ -108,7 +108,7 @@ impl GridView {
                 .iter()
                 .filter_map(|&col| {
                     row_values
-                        .get(col)
+                        .get(self.state.source_col(col))
                         .map(|value| (self.state.columns[col].name.clone(), value.as_edit_value()))
                 })
                 .collect();
@@ -245,7 +245,7 @@ impl GridView {
                 .iter()
                 .filter_map(|&col| {
                     values
-                        .get(col)
+                        .get(self.state.source_col(col))
                         .map(|value| (self.state.columns[col].name.clone(), value.as_edit_value()))
                 })
                 .collect();

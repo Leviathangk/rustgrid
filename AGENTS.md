@@ -286,6 +286,37 @@ touching UI code.
   style them with borders or filled buttons. `win_button`/`dialog_button` are for push buttons
   inside dialogs. `ui::toolbar_item` supplies the content as explicit children (16px icon, 12px
   label) because gpui-kit's default button typography (16px) is too large for the app's chrome.
+- **The grid header can carry a second line: the field's comment.** With the 数据 option on
+  (`AppSettings::grid_show_comments`), `grid_view.rs::header_cell_text` paints each column's comment
+  under its name at 10px muted, the header grows to `GRID_HEADER_COMMENT_HEIGHT`, and either line is
+  clipped to the column with `truncate()` (an ellipsis) and shown in full in a hover tooltip when it
+  does not fit. The date/time picker positions itself from the same header height
+  (`grid_cell.rs::render_date_picker`) instead of assuming one row.
+- **The 字段筛选 popup is an anchored, click-away-dismissed panel, and it configures the grid's field
+  *layout*.** `app/grid_fields.rs` draws it as a `deferred` pair under `root`: a transparent
+  `.occlude()` backdrop (`FIELD_FILTER_BACKDROP_PRIORITY`, whose `on_mouse_down` dismisses) and the
+  `ui::popup_panel` on top (`FIELD_FILTER_POPUP_PRIORITY`), positioned from the toolbar item's
+  window rect (recorded by the `on_children_prepainted` wrapper in `render_grid_toolbar`) minus the
+  pane's (`GridView::grid_pane_bounds`). Because the backdrop covers the pane *including* the
+  trigger, a second press on the trigger dismisses rather than re-opens — the trigger keeps a plain
+  `on_click`. Rows reorder by dragging only their `drag_handle.svg` handle (never the row, which
+  would fight the visibility toggle) using the pointer's travel over fixed-height rows. The toolbar
+  item carries the **label 筛选 (the same `grid.filter` string as the WHERE panel's button) with one
+  icon**, and says everything about its state through colour: `theme.primary` once a field is hidden
+  or re-ordered (`GridState::field_layout_configured`), the muted `theme.icon_views` while the grid
+  shows the table's natural field set, and no background tint of its own (the open popup is the
+  feedback). Its footer is just 重置 (`field_filter_reset`: table order + every field shown) and 全选
+  (`field_filter_show_all`: every field shown). The popup title stays 字段筛选, which is what tells it
+  apart from the WHERE button.
+- **A field layout never touches the row data.** `GridState` keeps the engine's columns in
+  `all_columns`, the display order in `column_order` (display position -> natural index, visible
+  fields first), and `visible_columns`; `columns`/`column_widths` are the *projection* of that order
+  while `rows` stay in engine order and are read through `GridState::source_col` (see
+  `grid_view.rs::source_cell`). Hiding, re-ordering or resetting a field therefore re-projects
+  metadata only — no refetch, no row copy — and every index-based path (cell reads, commit keys,
+  selection, hit testing, sums) must map through `source_col`/`visible_columns` rather than assuming
+  `columns`/`rows` line up. `session.rs::permute_in_place` applies the re-order in place, and
+  `reproject_fields` composes the new order with the one already on screen.
 - **The object list (Tables/Views) follows Navicat's layout.** It is column-major: items are
   chunked into columns of `object_rows_per_column()` (derived from the scroll viewport height,
   `OBJECT_ROW_HEIGHT` per row) so a column fills top-to-bottom and then wraps to the next column
@@ -537,8 +568,8 @@ shadcn chrome described above. Implemented today:
     every selected table through one confirm dialog (`DeleteConfirm::Tables` → `run_drop_tables`).
 
 14. Connection-tree groups (`app/groups.rs`): the tree is a nested list of groups and connections
-    (`AppView::tree_layout`, persisted in `settings.json` as `ConnectionGroup`/`GroupEntry`, with
-    `SETTINGS_VERSION` 7). A connection is referenced by its profile id, so the layout survives
+    (`AppView::tree_layout`, persisted in `settings.json` as `ConnectionGroup`/`GroupEntry`, which
+    bumped `SETTINGS_VERSION`). A connection is referenced by its profile id, so the layout survives
     reordering/deleting profiles; `reconcile_tree` prunes removed connections and appends new ones
     at startup. Right-clicking the blank tree area offers 新建分组 / 刷新; a group's menu offers
     新建连接 / 重命名 / 删除分组 / 刷新 (F2 renames in place, a new group is named 新分组 and enters
@@ -567,6 +598,20 @@ shadcn chrome described above. Implemented today:
     the file carries no password but still imports. All six engines are read (MySQL/MariaDB,
     PostgreSQL, SQLite, SQL Server, Oracle, ODBC); Navicat/DBX Oracle service-vs-SID and SSH tunnels
     are mapped, and an absent port falls back to the engine default.
+
+16. Grid field presentation (`app/grid_fields.rs` + `app/options.rs` + `session.rs::GridFieldLayout`):
+    the table grid's toolbar ends with the 字段筛选 item (labelled 筛选, after 导出). It opens a popup
+    panel under the button (not a child window) listing every field with a visibility check box, a
+    search box, the field's comment beside its name, and 重置 / 全选; the last visible field cannot be
+    hidden and a drag on a row's handle re-orders the fields. The layout (order + hidden set) is
+    applied immediately and remembered per connection/database/table in `settings.json`
+    (`grid_field_layouts`), so the table reopens with the same field set (a field added to the table
+    afterwards is appended rather than lost). One icon serves both states, told apart by colour —
+    grey (`theme.icon_views`) for the table's own field set, `theme.primary` once a field is hidden or
+    re-ordered — and the popup's counter reads `visible/total`. The 数据 page of the Options window
+    (`OptionsSection::Data`, between 编辑器 and 关于) holds the one grid display preference,
+    表格内展示字段备注 (`AppSettings::grid_show_comments`, off by default), which paints each column's
+    comment under its name in the grid header.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL and Oracle, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
@@ -715,6 +760,15 @@ make more engines cheap later — do not build those features early.
 - DB work is tokio-based but gpui's executor is not tokio. Inside `cx.spawn`, run sqlx
   futures through `Runtime::spawn` and `.await` the returned `JoinHandle` (see
   `app.rs`). Awaiting sqlx directly in a gpui task panics with "there is no reactor running".
+  **The same rule governs what may be dropped where.** A `sqlx::PoolConnection` returns itself to
+  its pool by spawning onto the Tokio runtime and panics with "this functionality requires a Tokio
+  context" when that happens outside one — so a value that owns a pooled connection and outlives a
+  single `Runtime::spawn` call must be dropped *on the runtime*, never on gpui's executor. This bit
+  the Run SQL File feature: its pinned `ScriptSession` (MySQL/MariaDB, SQLite, PostgreSQL) was
+  dropped on the gpui thread when the run ended, aborting the app at the moment a script finished
+  (silently in a release build, which has no console). `runsql.rs::ScriptSessionGuard` now spawns
+  the release onto the runtime, so every exit path is covered; copy that shape for any future
+  long-lived session/handle.
 - Stored passwords are encrypted with XChaCha20-Poly1305 (`rustgrid-config/src/secrets.rs`);
   `secrets.json` holds ciphertext keyed by profile `id` and `secret.key` holds the key. The
   profile JSON must stay password-free (a test asserts the plaintext never hits disk).

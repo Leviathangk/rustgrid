@@ -279,15 +279,26 @@ impl GridView {
                 grid.state.loading = false;
                 match result {
                     Ok(page) => {
-                        if !grid.state.manual_column_widths
-                            || grid.state.column_widths.len() != page.columns.len()
-                        {
-                            grid.state.column_widths =
-                                compute_column_widths(&page.columns, &page.rows);
-                        }
-                        grid.state.columns = page.columns;
-                        grid.state.rows = Arc::new(page.rows);
+                        // The widths carry over by column name when the user has dragged column
+                        // edges, so paging/sorting does not snap them back.
+                        let previous_columns = grid.state.columns.clone();
+                        let previous_widths = grid.state.column_widths.clone();
+                        let manual = grid.state.manual_column_widths;
+                        let widths = page_column_widths(
+                            &page.columns,
+                            &page.rows,
+                            &previous_columns,
+                            &previous_widths,
+                            manual,
+                        );
+                        grid.state.install_page(page.columns, page.rows, widths);
                         grid.state.total_rows = page.total_rows;
+                        if grid.field_filter_open {
+                            grid.field_filter_order = grid
+                                .state
+                                .field_layout
+                                .resolved_order(&grid.state.all_columns);
+                        }
                         grid.state.error = None;
                         // An empty editable table opens with one blank insert row ready to type
                         // into. Skipped for views, later pages and filtered views.
@@ -406,14 +417,12 @@ impl GridView {
                             }
                         }
                         let total = query_result.rows.len() as u64;
-                        if !grid.state.manual_column_widths
-                            || grid.state.column_widths.len() != query_result.columns.len()
-                        {
-                            grid.state.column_widths =
-                                compute_column_widths(&query_result.columns, &query_result.rows);
-                        }
-                        grid.state.columns = query_result.columns;
-                        grid.state.rows = Arc::new(query_result.rows);
+                        // A query grid has no table to key a field layout on, so it always shows
+                        // every column in the statement's own order.
+                        let widths =
+                            compute_column_widths(&query_result.columns, &query_result.rows);
+                        grid.state
+                            .install_page(query_result.columns, query_result.rows, widths);
                         grid.state.total_rows = Some(total);
                         grid.state.page_index = 0;
                         grid.state.page_size = total.max(1);

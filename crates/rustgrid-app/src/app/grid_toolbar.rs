@@ -83,6 +83,34 @@ impl GridView {
                 false,
                 cx.listener(|this, _event, _window, cx| this.open_grid_export(cx)),
             ))
+            .child({
+                // The 字段筛选 item toggles the popup; while the popup is open its click-away
+                // backdrop covers this button too, so a second press dismisses rather than
+                // re-opening. The wrapper only reports the button's position, which anchors the
+                // popup directly under it. One icon serves both states: the colour marks a
+                // configured field set (a hidden or re-ordered field) and stays the muted chrome
+                // colour otherwise.
+                let anchor = self.field_filter_anchor.clone();
+                let configured = self.state.field_layout_configured();
+                div()
+                    .flex()
+                    .flex_none()
+                    .on_children_prepainted(move |bounds, _window, _cx| {
+                        if let Some(first) = bounds.first() {
+                            *anchor.borrow_mut() = Point::new(first.left(), first.top());
+                        }
+                    })
+                    .child(self.grid_tool_button(
+                        "grid-field-filter",
+                        "icons/field_filter.svg",
+                        t!("grid.filter").to_string(),
+                        self.field_filter_color(),
+                        self.state.sql.is_none() && !self.state.all_columns.is_empty(),
+                        configured && self.field_filter_open,
+                        false,
+                        cx.listener(|this, _event, _window, cx| this.toggle_field_filter(cx)),
+                    ))
+            })
     }
 
     /// Open the Import Wizard scoped to this grid's database, defaulting a single source table to
@@ -1164,7 +1192,7 @@ impl GridView {
                         theme.icon_connection,
                         self.state.editable
                             && !self.state.loading
-                            && !self.state.columns.is_empty(),
+                            && self.state.visible_columns > 0,
                         cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
                     ))
                     .child(self.grid_icon_button(
@@ -1418,7 +1446,7 @@ impl GridView {
         if let Some(staged) = self.staged_value(row, col) {
             return staged.as_deref().and_then(parse_numeric_text);
         }
-        match self.state.rows.get(row)?.get(col)? {
+        match self.state.rows.get(row)?.get(self.state.source_col(col))? {
             CellValue::Int(value) => Some(NumericCell::Int(i128::from(*value))),
             CellValue::Uint(value) => Some(NumericCell::Int(i128::from(*value))),
             CellValue::Float(value) if value.is_finite() => Some(NumericCell::Float(*value)),
@@ -1472,7 +1500,7 @@ impl GridView {
             range.cursor.hash(&mut hasher);
         }
         (Arc::as_ptr(&self.state.rows) as usize).hash(&mut hasher);
-        self.state.columns.len().hash(&mut hasher);
+        self.state.visible_columns.hash(&mut hasher);
         self.state.edits.hash(&mut hasher);
         self.inserts.hash(&mut hasher);
         hasher.finish()

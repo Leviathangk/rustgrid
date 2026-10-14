@@ -6,8 +6,17 @@ impl GridView {
             return div().into_any_element();
         };
         let theme = self.theme;
+        // The header is taller when the 数据 option paints the fields' comments, so the picker must
+        // clear it instead of assuming one row.
+        let header_height = self.header_height(cx);
         let width = 192.0f32;
-        let content_width: f32 = GRID_GUTTER_WIDTH + self.state.column_widths.iter().sum::<f32>();
+        let content_width: f32 = GRID_GUTTER_WIDTH
+            + self
+                .state
+                .column_widths
+                .iter()
+                .take(self.state.visible_columns)
+                .sum::<f32>();
         let cell_left: f32 = GRID_GUTTER_WIDTH
             + self
                 .state
@@ -19,10 +28,10 @@ impl GridView {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let offset_y = f32::from(handle.offset().y);
         let viewport_h = f32::from(handle.bounds().size.height);
-        let cell_top = GRID_ROW_HEIGHT + picker.row as f32 * GRID_ROW_HEIGHT + offset_y;
+        let cell_top = header_height + picker.row as f32 * GRID_ROW_HEIGHT + offset_y;
         let popup_h = if picker.has_time { 248.0 } else { 210.0 };
-        let top = if cell_top + GRID_ROW_HEIGHT + popup_h > GRID_ROW_HEIGHT + viewport_h {
-            (cell_top - popup_h).max(GRID_ROW_HEIGHT)
+        let top = if cell_top + GRID_ROW_HEIGHT + popup_h > header_height + viewport_h {
+            (cell_top - popup_h).max(header_height)
         } else {
             cell_top + GRID_ROW_HEIGHT
         };

@@ -1,3 +1,4 @@
+use super::grid_fields::make_field_filter_search_input;
 use super::*;
 use gpui::HitboxBehavior;
 
@@ -11,6 +12,8 @@ impl GridView {
     ) -> Self {
         let page_input = (state.page_index + 1).to_string();
         let page_size_input = state.page_size.to_string();
+        let weak = cx.weak_entity();
+        let field_filter_search_input = make_field_filter_search_input(theme, weak.clone(), cx);
         Self {
             state,
             app,
@@ -49,6 +52,14 @@ impl GridView {
             page_size_focus: cx.focus_handle(),
             page_size_focus_pending: false,
             page_size_focused: false,
+            field_filter_open: false,
+            field_filter_focus_pending: false,
+            field_filter_search: String::new(),
+            field_filter_search_input,
+            field_filter_order: Vec::new(),
+            field_filter_drag: None,
+            field_filter_anchor: Rc::new(RefCell::new(Point::default())),
+            grid_pane_bounds: Rc::new(RefCell::new(Bounds::default())),
             caret_visible: true,
             caret_blink_running: false,
             status_sql_focus: cx.focus_handle(),
@@ -98,6 +109,11 @@ impl GridView {
             window.focus(&self.page_size_focus, cx);
             self.page_size_focus_pending = false;
         }
+        if self.field_filter_focus_pending {
+            let focus = self.field_filter_search_input.read(cx).focus_handle();
+            window.focus(&focus, cx);
+            self.field_filter_focus_pending = false;
+        }
         self.page_input_focused = self.page_input_focus.is_focused(window);
         self.page_size_focused = self.page_size_focus.is_focused(window);
         self.update_blink(cx);
@@ -138,21 +154,50 @@ impl GridView {
     pub(super) fn caret(&self) -> bool {
         self.caret_visible
     }
+
+    /// Whether the grid header paints each field's comment under its name: the 数据 option is on
+    /// *and* this grid actually has a commented column, so a table without comments keeps the
+    /// compact single-line header.
+    pub(super) fn show_column_comments(&self, cx: &Context<'_, Self>) -> bool {
+        self.app
+            .upgrade()
+            .is_some_and(|app| app.read(cx).show_column_comments())
+            && self
+                .state
+                .columns
+                .iter()
+                .any(|column| !column.comment.is_empty())
+    }
+
+    /// The header's height: two lines while it paints the fields' comments.
+    pub(super) fn header_height(&self, cx: &Context<'_, Self>) -> f32 {
+        if self.show_column_comments(cx) {
+            GRID_HEADER_COMMENT_HEIGHT
+        } else {
+            GRID_ROW_HEIGHT
+        }
+    }
 }
 
 impl Render for GridView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.prepare_frame(window, cx);
         let theme = self.theme;
-        let widths: Vec<f32> = if self.state.column_widths.is_empty() {
+        let header_height = self.header_height(cx);
+        let show_comments = header_height > GRID_ROW_HEIGHT;
+        // The hidden fields are kept at the tail of `columns`/`column_widths`, so only the leading
+        // `visible_columns` entries are drawn.
+        let all_widths: Vec<f32> = if self.state.column_widths.len() == self.state.columns.len() {
+            self.state.column_widths.clone()
+        } else {
             self.state
                 .columns
                 .iter()
                 .map(|_| GRID_COLUMN_WIDTH)
                 .collect()
-        } else {
-            self.state.column_widths.clone()
         };
+        let visible_count = self.state.visible_columns.min(all_widths.len());
+        let widths: Vec<f32> = all_widths[..visible_count].to_vec();
         let content_width: f32 = (GRID_GUTTER_WIDTH + widths.iter().sum::<f32>()).max(1.0);
 
         let mut header = div()
@@ -165,12 +210,12 @@ impl Render for GridView {
             .child(
                 div()
                     .w(px(GRID_GUTTER_WIDTH))
-                    .h(px(GRID_ROW_HEIGHT))
+                    .h(px(header_height))
                     .flex_none()
                     .border_r_1()
                     .border_color(rgb(theme.grid_line)),
             );
-        for (index, column) in self.state.columns.iter().enumerate() {
+        for (index, column) in self.state.columns.iter().enumerate().take(visible_count) {
             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
             let sort_descending = self
                 .state
@@ -230,7 +275,7 @@ impl Render for GridView {
                 )))
                 .flex()
                 .items_center()
-                .h(px(GRID_ROW_HEIGHT))
+                .h(px(header_height))
                 .w(px(width))
                 .flex_none()
                 .pr(px(4.0))
@@ -245,20 +290,20 @@ impl Render for GridView {
                 }))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     let rows = this.state.rows.len();
-                    if rows > 0 && index < this.state.columns.len() {
+                    if rows > 0 && index < this.state.visible_columns {
                         this.state.selection =
                             Some(CellSelection::single((rows - 1, index), (0, index)));
                     }
                     this.selecting_cells = false;
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .child(column.name.clone()),
-                )
+                .child(header_cell_text(
+                    SharedString::from(format!("grid-head-text-{}-{}", self.state.id, index)),
+                    column,
+                    width,
+                    show_comments,
+                    theme,
+                ))
                 .child(slot)
                 .child(
                     div()
@@ -290,6 +335,8 @@ impl Render for GridView {
         let selection = self.state.selection.clone();
         let edits = self.state.edits.clone();
         let rows = self.state.rows.clone();
+        // Display column -> the row's own (engine-order) cell index.
+        let column_order = Arc::new(self.state.column_order.clone());
         let inserts = self.inserts.clone();
         let data_rows = rows.len();
         let column_count = widths.len();
@@ -436,7 +483,7 @@ impl Render for GridView {
                             let is_null = if insert.is_some() {
                                 !matches!(staged, Some(Some(_)))
                             } else {
-                                let cell = rows[row_index].get(index);
+                                let cell = source_cell(&rows, &column_order, row_index, index);
                                 match (edited, &previewed) {
                                     (Some(Some(_)), _) | (_, Some(_)) => false,
                                     (Some(None), _) => true,
@@ -458,7 +505,9 @@ impl Render for GridView {
                                         if is_null {
                                             "(Null)".to_string()
                                         } else {
-                                            rows[row_index][index].as_display()
+                                            source_cell(&rows, &column_order, row_index, index)
+                                                .map(|cell| cell.as_display())
+                                                .unwrap_or_default()
                                         }
                                     }
                                 }
@@ -690,6 +739,20 @@ impl Render for GridView {
                 root = root.child(self.render_sort_panel(cx));
             }
         }
+        // The 字段筛选 popup floats over the body (a panel, not a child window), anchored under its
+        // toolbar item; the backdrop behind it dismisses the popup on a click anywhere else.
+        if self.state.show_toolbar && self.field_filter_open {
+            root = root.child(self.render_field_filter_backdrop(cx));
+            root = root.child(self.render_field_filter_popup(cx));
+        }
+        // The pane's own window-space bounds, so the popup can be positioned inside it. The toolbar
+        // is the pane's first child, so its rectangle is the pane's top-left corner and width.
+        let pane_bounds = self.grid_pane_bounds.clone();
+        root = root.on_children_prepainted(move |bounds, _window, _cx| {
+            if let Some(first) = bounds.first() {
+                *pane_bounds.borrow_mut() = *first;
+            }
+        });
         // Surface the load/error state the fetch paths set; without this a slow or failed
         // refresh looked like nothing happened.
         if let Some(error) = self.state.error.clone() {
@@ -821,6 +884,7 @@ impl Render for GridView {
             this.grid_vscroll_drag(event, cx);
             this.grid_column_drag(event, cx);
             this.filter_resize_drag(event, cx);
+            this.field_filter_drag_move(event, cx);
         }))
         .on_mouse_up(
             MouseButton::Left,
@@ -829,12 +893,92 @@ impl Render for GridView {
                 let v = this.vscroll_grab.take().is_some();
                 let c = this.column_resize.take().is_some();
                 let f = this.filter_resize.take().is_some();
+                if this.field_filter_drag.is_some() {
+                    this.field_filter_drag = None;
+                    cx.notify();
+                }
                 if h || v || c || f {
                     cx.notify();
                 }
             }),
         )
     }
+}
+
+/// The cell a display column reads from. The rows keep the engine's column order (so a field-layout
+/// change never has to touch them), so the display column index is mapped back through the layout.
+fn source_cell<'a>(
+    rows: &'a [Vec<CellValue>],
+    column_order: &[usize],
+    row: usize,
+    col: usize,
+) -> Option<&'a CellValue> {
+    let source = column_order.get(col).copied().unwrap_or(col);
+    rows.get(row)?.get(source)
+}
+
+/// One grid header cell's text: the field name, with the field's comment under it when the 数据
+/// option is on. Both lines are clipped to the column, and a line that is too long to fit is shown
+/// in full in a hover tooltip.
+fn header_cell_text(
+    id: SharedString,
+    column: &rustgrid_core::ColumnInfo,
+    width: f32,
+    show_comments: bool,
+    theme: Theme,
+) -> AnyElement {
+    let name = column.name.clone();
+    let comment = column.comment.clone();
+    // The comment is only painted when the 数据 option is on, but a field name that does not fit is
+    // always worth a tooltip.
+    let text_width = (width - 12.0).max(16.0);
+    let name_cut = ui::approx_text_width(&name) > text_width;
+    let comment_shown = show_comments && !comment.is_empty();
+    let comment_cut = comment_shown && ui::approx_text_width(&comment) > text_width;
+    let tooltip = if name_cut && comment_shown {
+        Some(format!("{name}\n{comment}"))
+    } else if name_cut {
+        Some(name.clone())
+    } else if comment_cut {
+        Some(comment.clone())
+    } else {
+        None
+    };
+
+    let mut container = div()
+        .id(id)
+        .flex()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden();
+    if let Some(tooltip) = tooltip {
+        container = container.tooltip(ui::text_tooltip(tooltip));
+    }
+    let text = if show_comments {
+        div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .w_full()
+            .min_w(px(0.0))
+            .child(div().truncate().child(name))
+            .child(
+                div()
+                    .truncate()
+                    .text_size(px(10.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(comment),
+            )
+            .into_any_element()
+    } else {
+        div()
+            .w_full()
+            .min_w(px(0.0))
+            .truncate()
+            .child(name)
+            .into_any_element()
+    };
+    container.child(text).into_any_element()
 }
 
 /// The decorative body of a table with no rows: the gutter and one bordered cell per column,

@@ -50,6 +50,8 @@ impl AssetSource for Assets {
             "icons/transaction.svg" => Some(include_bytes!("../assets/icons/transaction.svg")),
             "icons/text.svg" => Some(include_bytes!("../assets/icons/text.svg")),
             "icons/filter.svg" => Some(include_bytes!("../assets/icons/filter.svg")),
+            "icons/field_filter.svg" => Some(include_bytes!("../assets/icons/field_filter.svg")),
+            "icons/drag_handle.svg" => Some(include_bytes!("../assets/icons/drag_handle.svg")),
             "icons/sort.svg" => Some(include_bytes!("../assets/icons/sort.svg")),
             "icons/refresh.svg" => Some(include_bytes!("../assets/icons/refresh.svg")),
             "icons/stop.svg" => Some(include_bytes!("../assets/icons/stop.svg")),

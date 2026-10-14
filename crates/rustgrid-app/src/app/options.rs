@@ -190,6 +190,7 @@ impl AppView {
         self.options_editor_font_size = self.editor_font_size;
         self.options_editor_line_numbers = self.editor_line_numbers;
         self.options_editor_word_wrap = self.editor_word_wrap;
+        self.options_grid_show_comments = self.grid_show_comments;
         self.ensure_language_combo(cx);
         self.ensure_editor_combos(cx);
         let weak = cx.weak_entity();
@@ -345,6 +346,7 @@ impl AppView {
         self.editor_font_size = self.options_editor_font_size;
         self.editor_line_numbers = self.options_editor_line_numbers;
         self.editor_word_wrap = self.options_editor_word_wrap;
+        self.grid_show_comments = self.options_grid_show_comments;
         let language = self.options_language;
         self.set_language(language, cx);
         self.persist_settings();
@@ -501,6 +503,18 @@ impl AppView {
             )
             .child(
                 self.options_category_row(
+                    "options-data",
+                    t!("options.data").to_string(),
+                    self.options_section == OptionsSection::Data,
+                    true,
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_section = OptionsSection::Data;
+                    cx.notify();
+                })),
+            )
+            .child(
+                self.options_category_row(
                     "options-about",
                     t!("options.about").to_string(),
                     self.options_section == OptionsSection::About,
@@ -517,8 +531,36 @@ impl AppView {
         match self.options_section {
             OptionsSection::General => self.options_general_body(cx).into_any_element(),
             OptionsSection::Editor => self.options_editor_body(cx).into_any_element(),
+            OptionsSection::Data => self.options_data_body(cx).into_any_element(),
             OptionsSection::About => self.options_about_body(cx).into_any_element(),
         }
+    }
+
+    /// The 数据 page: how the grid presents a table's data.
+    fn options_data_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .child(t!("options.data").to_string()),
+            )
+            .child(
+                toggle_row(
+                    theme,
+                    "options-grid-show-comments",
+                    t!("options.data.show_comments").to_string(),
+                    self.options_grid_show_comments,
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_grid_show_comments = !this.options_grid_show_comments;
+                    cx.notify();
+                })),
+            )
     }
 
     /// The 常规 page: just the language selector.
@@ -664,6 +706,7 @@ impl AppView {
                     this.options_editor_font_size = DEFAULT_EDITOR_FONT_SIZE;
                     this.options_editor_line_numbers = true;
                     this.options_editor_word_wrap = true;
+                    this.options_grid_show_comments = false;
                     cx.notify();
                 }),
             ))

@@ -427,12 +427,14 @@ impl AppView {
             let rows = query_result.rows.clone();
             let total = rows.len() as u64;
             let column_widths = compute_column_widths(&columns, &rows);
+            let column_count = columns.len();
             let id = self.next_grid_id;
             self.next_grid_id += 1;
             let state = GridState {
                 id,
                 connection,
                 connection_name,
+                connection_id: String::new(),
                 database,
                 table: String::new(),
                 is_view: true,
@@ -440,7 +442,11 @@ impl AppView {
                 page_size: total.max(1),
                 loading: false,
                 error: None,
-                columns,
+                columns: columns.clone(),
+                all_columns: columns,
+                field_layout: GridFieldLayout::default(),
+                column_order: (0..column_count).collect(),
+                visible_columns: column_count,
                 rows: Arc::new(rows),
                 column_widths,
                 manual_column_widths: false,

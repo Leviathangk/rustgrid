@@ -30,7 +30,7 @@ impl GridView {
             self.cell_press = None;
             return;
         };
-        let column_count = self.state.columns.len();
+        let column_count = self.state.visible_columns;
         self.cell_dragged = false;
         let ctrl = event.modifiers.control || event.modifiers.platform;
         match hit {
@@ -137,7 +137,7 @@ impl GridView {
             self.cell_dragged = true;
             changed = true;
         }
-        let column_count = self.state.columns.len();
+        let column_count = self.state.visible_columns;
         match hit {
             GridHit::Gutter(row) => {
                 let first = self
@@ -318,7 +318,13 @@ impl GridView {
             return Some(GridHit::Gutter(row));
         }
         let mut accumulated = GRID_GUTTER_WIDTH;
-        for (col, width) in self.state.column_widths.iter().enumerate() {
+        for (col, width) in self
+            .state
+            .column_widths
+            .iter()
+            .take(self.state.visible_columns)
+            .enumerate()
+        {
             if local_x < accumulated + width {
                 return Some(GridHit::Cell(row, col));
             }
@@ -410,7 +416,7 @@ impl GridView {
         match keystroke.key.as_str() {
             "up" | "down" | "left" | "right" => {
                 let row_count = self.display_row_count();
-                let col_count = self.state.columns.len();
+                let col_count = self.state.visible_columns;
                 if row_count == 0 || col_count == 0 {
                     return;
                 }
@@ -488,7 +494,7 @@ impl GridView {
     /// Select every displayed cell (Ctrl+A), like Navicat's "select all records".
     pub(super) fn select_all_cells(&mut self, cx: &mut Context<'_, Self>) {
         let rows = self.display_row_count();
-        let cols = self.state.columns.len();
+        let cols = self.state.visible_columns;
         if rows == 0 || cols == 0 {
             return;
         }
@@ -511,7 +517,7 @@ impl GridView {
         let data_rows = self.state.rows.len();
         let mut action = Vec::new();
         for (row, col) in cells {
-            if col >= self.state.columns.len() {
+            if col >= self.state.visible_columns {
                 continue;
             }
             if row >= data_rows {
@@ -524,7 +530,12 @@ impl GridView {
                 continue;
             }
             if !self.state.edits.contains_key(&(row, col))
-                && matches!(self.state.rows[row][col], CellValue::Null)
+                && self
+                    .state
+                    .rows
+                    .get(row)
+                    .and_then(|values| values.get(self.state.source_col(col)))
+                    .is_some_and(|cell| matches!(cell, CellValue::Null))
             {
                 continue;
             }
@@ -555,7 +566,7 @@ impl GridView {
         let (row, col) = cell;
         if !self.state.editable
             || row >= self.display_row_count()
-            || col >= self.state.columns.len()
+            || col >= self.state.visible_columns
         {
             return;
         }
@@ -565,7 +576,10 @@ impl GridView {
             .flatten()
             .unwrap_or_else(|| {
                 if row < self.state.rows.len() {
-                    self.state.rows[row][col].as_edit_string()
+                    self.state.rows[row]
+                        .get(self.state.source_col(col))
+                        .map(|cell| cell.as_edit_string())
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 }
@@ -779,7 +793,7 @@ impl GridView {
         let data_rows = self.state.rows.len();
         let mut action = Vec::new();
         for (row, col) in editor.cells {
-            if col >= self.state.columns.len() {
+            if col >= self.state.visible_columns {
                 continue;
             }
             if row >= data_rows {
@@ -811,9 +825,14 @@ impl GridView {
             let previous = self.state.edits.get(&(row, col)).cloned();
             let original = match &previous {
                 Some(value) => value.clone(),
-                None => match &self.state.rows[row][col] {
-                    CellValue::Null => None,
-                    cell => Some(cell.as_edit_string()),
+                None => match self
+                    .state
+                    .rows
+                    .get(row)
+                    .and_then(|values| values.get(self.state.source_col(col)))
+                {
+                    Some(CellValue::Null) | None => None,
+                    Some(cell) => Some(cell.as_edit_string()),
                 },
             };
             let desired = if editor.value.is_empty() && original.is_none() {
@@ -852,7 +871,7 @@ impl GridView {
         let (row, col) = (editor.row, editor.col);
         self.commit_editor(cx);
 
-        let column_count = self.state.columns.len();
+        let column_count = self.state.visible_columns;
         let row_count = self.display_row_count();
         if column_count == 0 || row_count == 0 {
             return;
@@ -905,7 +924,7 @@ impl GridView {
         let (row, col) = (editor.row, editor.col);
         self.commit_editor(cx);
 
-        let column_count = self.state.columns.len();
+        let column_count = self.state.visible_columns;
         let row_count = self.display_row_count();
         if column_count == 0 || row_count == 0 {
             return;

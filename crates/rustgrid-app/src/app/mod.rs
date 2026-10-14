@@ -17,7 +17,7 @@ use gpui::{
     canvas, deferred, div, img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{
-    AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, GroupEntry,
+    AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,
     LanguageSetting, ThemeSetting,
 };
 use rustgrid_core::{
@@ -39,9 +39,9 @@ use crate::list_select::{ListSelection, MarqueeDrag, SelectMode, rects_intersect
 use crate::runtime::Runtime;
 use crate::session::{
     Category, CategoryExpansion, CellRange, CellSelection, ConnectionNode, ConnectionStatus,
-    DatabaseNode, EditAction, GridState, Loadable, QueryResultPlan, QueryResultSummary, QueryTab,
-    RoutineTab, RoutineTabState, SortRule, ViewExplainTab, ViewTab, ViewTabState,
-    compute_column_widths,
+    DatabaseNode, EditAction, GridFieldLayout, GridState, Loadable, QueryResultPlan,
+    QueryResultSummary, QueryTab, RoutineTab, RoutineTabState, SortRule, ViewExplainTab, ViewTab,
+    ViewTabState, compute_column_widths, page_column_widths,
 };
 use crate::sql::{self, SqlToken};
 use crate::theme::{ConnectionColor, Theme};
@@ -1447,6 +1447,22 @@ struct GridView {
     page_size_focus_pending: bool,
     page_size_focused: bool,
 
+    /// Whether the 字段筛选 popup is open.
+    field_filter_open: bool,
+    /// Focus the popup's search field on the next frame, once it is on screen.
+    field_filter_focus_pending: bool,
+    /// The popup's search text and its shared field.
+    field_filter_search: String,
+    field_filter_search_input: Entity<TextInput>,
+    /// The working display order while the popup is open (every field, hidden ones included).
+    field_filter_order: Vec<String>,
+    /// The field being dragged to a new position, with the pointer y captured on mouse-down.
+    field_filter_drag: Option<FieldFilterDrag>,
+    /// Where the 字段筛选 trigger sits (window space), so its popup can be anchored under it.
+    field_filter_anchor: Rc<RefCell<Point<Pixels>>>,
+    /// The grid pane's own window-space bounds, so the popup can be clamped inside it.
+    grid_pane_bounds: Rc<RefCell<Bounds<Pixels>>>,
+
     caret_visible: bool,
     caret_blink_running: bool,
 
@@ -1519,6 +1535,18 @@ struct ColumnResize {
     /// Pointer x and column width when the drag started.
     start_x: f32,
     start_width: f32,
+}
+
+/// An in-progress drag of a 字段筛选 row, reordering the grid's fields. The list is a fixed row
+/// height, so the target position comes from how many rows the pointer has travelled from where
+/// the drag began — no row rectangles are needed.
+#[derive(Clone, Copy)]
+struct FieldFilterDrag {
+    /// Where the dragged field started, in the working order.
+    from: usize,
+    /// Where it currently sits.
+    current: usize,
+    start_y: f32,
 }
 
 /// Pending destructive action that needs confirmation before it runs.
@@ -1756,8 +1784,25 @@ const NO_LIMIT_PAGE_SIZE: u64 = 200_000;
 enum OptionsSection {
     General,
     Editor,
+    /// The 数据 page: grid display preferences (the field-comment toggle).
+    Data,
     About,
 }
+
+/// The height of the grid header when it shows each column's comment under its name.
+const GRID_HEADER_COMMENT_HEIGHT: f32 = 38.0;
+/// The height of the grid's toolbar row.
+const GRID_TOOLBAR_HEIGHT: f32 = 28.0;
+/// The deferred paint priority of the 字段筛选 popup and its click-away backdrop. Both are painted
+/// above the grid body; the panel sits above its backdrop.
+const FIELD_FILTER_BACKDROP_PRIORITY: usize = 98;
+const FIELD_FILTER_POPUP_PRIORITY: usize = 99;
+/// The width of the 字段筛选 popup panel.
+const FIELD_FILTER_POPUP_WIDTH: f32 = 252.0;
+/// The height of one row of the 字段筛选 popup's field list.
+const FIELD_FILTER_ROW_HEIGHT: f32 = 24.0;
+/// The tallest the 字段筛选 popup's field list grows before it scrolls.
+const FIELD_FILTER_LIST_MAX_HEIGHT: f32 = 460.0;
 
 pub struct AppView {
     registry: Arc<DriverRegistry>,
@@ -1965,6 +2010,12 @@ pub struct AppView {
     rename_focus_pending: bool,
     page_size: u64,
     limit_records: bool,
+    /// Whether the grid header shows each column's comment under its name. Set from the 数据 page
+    /// of the Options window; off by default.
+    grid_show_comments: bool,
+    /// The remembered field layout (字段筛选) per table grid, keyed by connection/database/table,
+    /// persisted in settings.
+    grid_field_layouts: BTreeMap<String, FieldLayout>,
     object_search: String,
     object_search_input: Entity<TextInput>,
     /// Scroll position of the backup/restore object picker, so it can show a vertical scrollbar.
@@ -2017,6 +2068,8 @@ pub struct AppView {
     options_editor_font_size: u32,
     options_editor_line_numbers: bool,
     options_editor_word_wrap: bool,
+    /// The staged 数据 page toggle (grid field comments), applied on OK.
+    options_grid_show_comments: bool,
     editor_font_combo: Option<Entity<ComboBox>>,
     editor_size_combo: Option<Entity<ComboBox>>,
     /// The OS window hosting the Options dialog, if open.
@@ -2237,6 +2290,7 @@ mod form;
 mod grid;
 mod grid_cell;
 mod grid_commit;
+mod grid_fields;
 mod grid_ime;
 mod grid_input;
 mod grid_menu;
@@ -2544,6 +2598,8 @@ impl AppView {
             rename_focus_pending: false,
             page_size: 1000,
             limit_records: true,
+            grid_show_comments: settings.grid_show_comments,
+            grid_field_layouts: settings.grid_field_layouts.clone(),
             object_search: String::new(),
             backup_objects_scroll: ScrollHandle::new(),
             object_search_input: {
@@ -2594,6 +2650,7 @@ impl AppView {
             options_editor_font_size: settings.editor_font_size,
             options_editor_line_numbers: settings.editor_line_numbers,
             options_editor_word_wrap: settings.editor_word_wrap,
+            options_grid_show_comments: settings.grid_show_comments,
             editor_font_combo: None,
             editor_size_combo: None,
             options_window: None,
@@ -2879,10 +2936,53 @@ impl AppView {
             expanded_databases,
             groups: self.tree_layout.clone(),
             connection_colors: self.connection_colors.clone(),
+            grid_field_layouts: self.grid_field_layouts.clone(),
+            grid_show_comments: self.grid_show_comments,
         }) {
             // Preferences failing to persist is not worth a modal; note it in the log line only.
             let _ = error;
         }
+    }
+
+    /// Whether the grid header shows each column's comment under its name.
+    pub(super) fn show_column_comments(&self) -> bool {
+        self.grid_show_comments
+    }
+
+    /// The persisted field layout for one table grid, if the user has configured one.
+    pub(super) fn field_layout(
+        &self,
+        connection_id: &str,
+        database: &str,
+        table: &str,
+    ) -> FieldLayout {
+        self.grid_field_layouts
+            .get(&field_layout_key(connection_id, database, table))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Remember (or, when the layout is back to default, forget) one table grid's field layout.
+    /// Returns `true` when the stored value changed, so the caller can skip a redundant write.
+    pub(super) fn set_field_layout(
+        &mut self,
+        connection_id: &str,
+        database: &str,
+        table: &str,
+        layout: FieldLayout,
+    ) -> bool {
+        let key = field_layout_key(connection_id, database, table);
+        let current = self.grid_field_layouts.get(&key);
+        if current == Some(&layout) {
+            return false;
+        }
+        if layout.order.is_empty() && layout.hidden.is_empty() {
+            self.grid_field_layouts.remove(&key);
+        } else {
+            self.grid_field_layouts.insert(key, layout);
+        }
+        self.persist_settings();
+        true
     }
 
     /// The SQL editor's font family (the built-in default when the setting is empty).
@@ -3869,6 +3969,12 @@ pub(super) fn human_size(bytes: u64) -> String {
 pub(super) fn format_file_time(time: std::time::SystemTime) -> String {
     let time: chrono::DateTime<chrono::Local> = time.into();
     time.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// The settings key of one table grid's remembered field layout. The unit separator cannot appear in
+/// an identifier, so it keeps the three parts apart even when a name contains the others' characters.
+fn field_layout_key(connection_id: &str, database: &str, table: &str) -> String {
+    format!("{connection_id}\u{1f}{database}\u{1f}{table}")
 }
 
 /// Collapse free text (routine/table comments, which may contain newlines) into one line for a

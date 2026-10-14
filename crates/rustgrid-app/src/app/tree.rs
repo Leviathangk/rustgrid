@@ -1344,6 +1344,12 @@ impl AppView {
             .get(connection_index)
             .map(|node| node.profile.name.clone())
             .unwrap_or_default();
+        let connection_id = self
+            .connections
+            .get(connection_index)
+            .map(|node| node.profile.id.clone())
+            .unwrap_or_default();
+        let layout = self.field_layout(&connection_id, &database, &table);
         let id = self.next_grid_id;
         self.next_grid_id += 1;
 
@@ -1351,6 +1357,7 @@ impl AppView {
             id,
             connection,
             connection_name,
+            connection_id,
             database,
             table,
             is_view,
@@ -1359,6 +1366,13 @@ impl AppView {
             loading: false,
             error: None,
             columns: Vec::new(),
+            all_columns: Vec::new(),
+            field_layout: GridFieldLayout {
+                order: layout.order,
+                hidden: layout.hidden.into_iter().collect(),
+            },
+            column_order: Vec::new(),
+            visible_columns: 0,
             rows: Arc::new(Vec::new()),
             column_widths: Vec::new(),
             manual_column_widths: false,
