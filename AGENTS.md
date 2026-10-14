@@ -703,6 +703,15 @@ make more engines cheap later — do not build those features early.
   — those panels follow the tree selection themselves. Without this click path a database whose pane
   had been replaced by another connection (or cleared when its connection was closed — `disconnect`
   clears a pane still scoped to it) looked empty until it was double-clicked.
+- **The tree's 刷新 (connection / group / blank area / database row) also re-fetches the objects
+  behind it.** `load_databases` takes the loaded list out and merges it back so open/expanded
+  databases and the table cache survive a refresh — which by itself made 刷新 a no-op when a table
+  had been dropped outside the app. It now records every database whose `tables`/`routines` were
+  already `Loaded` (or `Failed`) and, once the merged node is in place, re-runs `load_tables` /
+  `load_routines` for them **by their new list position**, so the tree and the object list show the
+  server's current state. Keep that pairing if the merge (or the object cache) changes: reloading
+  before the merge would be discarded by it, and reloading only the tables leaves the Functions tab
+  stale.
 - `rustgrid-mysql::map_connect_error` flags authentication failures as
   `rustgrid_core::Error::Authentication` by checking `MySqlDatabaseError::number()`
   (1044/1045/1698) — **not** `DatabaseError::code()`, which returns the SQLSTATE (e.g.

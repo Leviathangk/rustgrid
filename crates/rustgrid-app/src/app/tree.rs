@@ -538,7 +538,23 @@ impl AppView {
             None => Vec::new(),
         };
 
+        // 刷新 must re-fetch the objects of every database whose tables/routines were already
+        // loaded: the merge below keeps `existing.tables`/`existing.routines`, so without this a
+        // table dropped outside the app would stay in the tree and in the object list forever (the
+        // node would simply look unchanged). Databases that were never opened keep their `Idle`
+        // cache and load lazily.
+        let reload_objects: Vec<(String, bool, bool)> = previous
+            .iter()
+            .filter_map(|database| {
+                let tables = matches!(database.tables, Loadable::Loaded(_) | Loadable::Failed(_));
+                let routines =
+                    matches!(database.routines, Loadable::Loaded(_) | Loadable::Failed(_));
+                (tables || routines).then(|| (database.name.clone(), tables, routines))
+            })
+            .collect();
+
         let runtime = self.runtime.clone();
+        let objects_connection = connection.clone();
         cx.spawn(async move |this, cx| {
             let result = match runtime
                 .spawn(async move { connection.list_databases().await })
@@ -559,6 +575,10 @@ impl AppView {
                     .get(&profile_id)
                     .cloned()
                     .unwrap_or_default();
+                // The object lists to re-fetch once the merged node is in place (see
+                // `reload_objects`): the database's position in the new list, its name, and which
+                // of its lists were loaded before.
+                let mut reload: Vec<(usize, String, bool, bool)> = Vec::new();
                 if let Some(node) = view.connections.get_mut(index) {
                     // `previous` was taken before the node went `Loading`, so the databases that
                     // survive the refresh keep their open/expanded state and loaded tables.
@@ -567,8 +587,8 @@ impl AppView {
                     // every database is shown.
                     let visible = node.profile.settings.visible_databases.clone();
                     node.databases = match result {
-                        Ok(databases) => Loadable::Loaded(
-                            databases
+                        Ok(databases) => {
+                            let merged: Vec<DatabaseNode> = databases
                                 .into_iter()
                                 .filter(|database| {
                                     visible.is_empty()
@@ -608,8 +628,25 @@ impl AppView {
                                         }
                                     }
                                 })
-                                .collect(),
-                        ),
+                                .collect();
+                            // Re-fetch the objects of the databases this refresh kept from
+                            // `previous`, so 刷新 actually reloads what the tree and the object
+                            // list show instead of replaying the stale cache.
+                            for (position, database) in merged.iter().enumerate() {
+                                if let Some((_, tables, routines)) = reload_objects
+                                    .iter()
+                                    .find(|(name, _, _)| name == &database.name)
+                                {
+                                    reload.push((
+                                        position,
+                                        database.name.clone(),
+                                        *tables,
+                                        *routines,
+                                    ));
+                                }
+                            }
+                            Loadable::Loaded(merged)
+                        }
                         Err(error) => Loadable::Failed(error.to_string()),
                     };
                 }
@@ -617,6 +654,26 @@ impl AppView {
                 view.remember_databases(index);
                 view.notify_object_pane(cx);
                 cx.notify();
+                for (database_index, database_name, tables, routines) in reload {
+                    if tables {
+                        view.load_tables(
+                            index,
+                            database_index,
+                            objects_connection.clone(),
+                            database_name.clone(),
+                            cx,
+                        );
+                    }
+                    if routines {
+                        view.load_routines(
+                            index,
+                            database_index,
+                            objects_connection.clone(),
+                            database_name,
+                            cx,
+                        );
+                    }
+                }
             });
         })
         .detach();
