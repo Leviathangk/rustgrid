@@ -272,7 +272,8 @@ impl AppView {
             // Open a pinned session so a session-scoped statement (MySQL's
             // `SET FOREIGN_KEY_CHECKS`, PostgreSQL's `SET`, …) applies to every later statement.
             // Drivers that cannot pin a connection return `None` and we fall back to
-            // `execute_query` per statement.
+            // `execute_query` per statement. The guard releases the session on the runtime (see
+            // [`ScriptSessionGuard`]), which is what keeps finishing a run from aborting the app.
             let session = {
                 let connection = connection.clone();
                 let database = database.clone();
@@ -280,9 +281,12 @@ impl AppView {
                     .spawn(async move { connection.script_session(database.as_deref()).await })
                     .await
             };
-            let mut session = match session {
-                Ok(Ok(session)) => session,
-                _ => None,
+            let mut session = ScriptSessionGuard {
+                runtime: runtime.clone(),
+                session: match session {
+                    Ok(Ok(session)) => session,
+                    _ => None,
+                },
             };
 
             for (index, statement) in statements.into_iter().enumerate() {
@@ -300,7 +304,7 @@ impl AppView {
                         .await
                     {
                         Ok((result, returned)) => {
-                            session = Some(returned);
+                            session.restore(returned);
                             result
                         }
                         Err(error) => Err(Error::other(error)),
@@ -331,6 +335,10 @@ impl AppView {
                     break;
                 }
             }
+
+            // The session is released by the guard's `Drop` (on the runtime), so every exit path —
+            // the loop ending, a stop, or the whole task being dropped — is covered.
+            drop(session);
 
             let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
             let _ = this.update(cx, |app, cx| {
@@ -798,6 +806,41 @@ fn readonly_combo_field(
         row = row.child(combo);
     }
     row
+}
+
+/// Keeps a running script's pinned session alive and releases it **on the Tokio runtime**.
+///
+/// A session owns a pooled connection (MySQL/MariaDB, SQLite, PostgreSQL), and sqlx hands a
+/// connection back to its pool by spawning onto the Tokio runtime: outside one it panics with "this
+/// functionality requires a Tokio context". The run's future executes on gpui's executor, so a
+/// session dropped there aborted the whole app (silently — a release build has no console) the
+/// moment the script finished. Routing every release through this guard covers the run ending, a
+/// stop/abort, and the task itself being dropped.
+struct ScriptSessionGuard {
+    runtime: Arc<Runtime>,
+    session: Option<Box<dyn rustgrid_core::ScriptSession>>,
+}
+
+impl ScriptSessionGuard {
+    /// Take the session out to run one statement on it.
+    fn take(&mut self) -> Option<Box<dyn rustgrid_core::ScriptSession>> {
+        self.session.take()
+    }
+
+    /// Put the session back after a statement ran.
+    fn restore(&mut self, session: Box<dyn rustgrid_core::ScriptSession>) {
+        self.session = Some(session);
+    }
+}
+
+impl Drop for ScriptSessionGuard {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            // Spawn the drop onto the runtime, where the connection is released. Dropping the
+            // `JoinHandle` only detaches the task, so it still runs.
+            drop(self.runtime.spawn(async move { drop(session) }));
+        }
+    }
 }
 
 /// A bounded one-line preview of a statement for the failure log.
