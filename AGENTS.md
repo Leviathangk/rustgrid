@@ -117,12 +117,15 @@ not a later refactor.
 
 - Rust **stable**, **edition 2024** (`rust-toolchain.toml` pins `stable`; workspace
   `rust-version = "1.94"`).
-- UI: **`gpui-kit = "0.7"`** (crates.io). It is the facade over `gpui-pre` (a published
-  snapshot of Zed's GPUI) plus `gpui-base` and the shadcn-styled `gpui-component`; it also
-  re-exports GPUI itself. The workspace additionally depends on the same engine under the
-  name the app imports: `gpui = { package = "gpui-pre", version = "0.3.7" }`, so the ~40 view
-  files keep `use gpui::…`. **These two must move in lockstep** — see "Upgrading gpui-kit".
-  Do **not** switch either to a git dependency on the Zed monorepo.
+- UI: **`gpui-kit = "0.7"`** (crates.io). It is the facade over a published GPUI snapshot plus
+  `gpui-base` and the shadcn-styled `gpui-component`, and it re-exports the engine itself. The
+  workspace enables its **`gpui-fast`** feature, so the engine is **`gpui-fast = "0.1.7"`** —
+  Longbridge's rendering/layout-optimised fork of `gpui-pre` — and the alias the ~40 view files
+  import is `gpui = { package = "gpui-fast", version = "0.1.7" }`. **The two lines must move in
+  lockstep**: the kit re-exports whichever engine the feature selects, so a mismatch is two GPUI
+  cores with incompatible element types. `gpui-kit` still depends on `gpui-pre` unconditionally, so
+  that crate (and `gpui-pre-windows`' build script) is compiled too — see Gotchas. Do **not**
+  switch either line to a git dependency on the Zed monorepo.
 - MySQL: **sqlx 0.9**, `default-features = false`, only features
   `runtime-tokio`, `mysql`, `tls-rustls-ring`, `chrono`.
 - SQLite: the same **sqlx 0.9** with its `sqlite` feature added by `rustgrid-sqlite` (this
@@ -334,14 +337,17 @@ touching UI code.
 
 ## Upgrading gpui-kit
 
-`gpui-kit` and the workspace's `gpui` (= `gpui-pre`) alias are the same engine and **must be
-bumped together** in the root `Cargo.toml`; a mismatch gives two GPUI copies and incompatible
-element types. Two kinds of upgrade:
+`gpui-kit` and the workspace's `gpui` alias are the same engine and **must be bumped together** in
+the root `Cargo.toml`; a mismatch gives two GPUI copies and incompatible element types. The alias is
+`gpui = { package = "gpui-fast", … }` while the kit's own engine line is `gpui-kit`, and the kit's
+`gpui-fast` feature is what makes the two agree — bump both, and re-check that the feature is still
+called that. Two kinds of upgrade:
 
-- **`0.7.x` → `0.7.y` (no code):** `cargo update -p gpui-kit -p gpui-pre`. The `"0.7"`/`"0.3.7"`
-  ranges in the root `Cargo.toml` keep this in-family.
-- **A breaking bump (e.g. `gpui-kit 0.8`, a new `gpui-pre` snapshot):** edit both lines in the
-  root `Cargo.toml`, then fix the fallout. It is localized by design:
+- **A patch bump (no code):** `cargo update -p gpui-fast -p gpui-kit -p gpui-pre`. The `"0.1.7"` /
+  `"0.7"` ranges in the root `Cargo.toml` keep this in-family (the `-p gpui-pre` is only there
+  because the kit pins it too).
+- **A breaking bump (e.g. `gpui-kit 0.8`, a new `gpui-fast` snapshot):** edit both lines in the root
+  `Cargo.toml`, then fix the fallout. It is localized by design:
   - `ui/text_input.rs`, `ui/combo.rs` (the wrappers) and the dialog builders
     (`dialogs.rs`, `db_dialog.rs`, `options.rs`) absorb gpui-kit component API changes; the
     40+ call sites behind them do not move.
@@ -717,19 +723,35 @@ make more engines cheap later — do not build those features early.
   carries it. Skipping `a11y_init` is the only in-process way to avoid it; the cost is that
   VoiceOver cannot read the app on macOS. **Remove the macOS arm of `application()` as soon as
   `gpui-fast` ships the fix.**
-- **The macOS Dock icon is set from the embedded logo.** macOS releases are bare executables, not
-  `.app` bundles, so AppKit has no `CFBundleIconFile` and the Dock shows the generic executable
-  icon. `src/dock_icon.rs` (macOS-only, called from the launch callback) pushes
-  `assets/logo.png` into `NSApplication.setApplicationIconImage:` through the `objc2` crates, which
-  are already in the lock file via `gpui-fast-macos`. That covers the running process only — the
-  icon Finder draws for the file itself needs a real bundle plus `self_update`-aware packaging.
-- gpui-pre's Windows build script (`gpui-pre-windows`) compiles HLSL whenever `debug_assertions`
-  is **off** (release); it is **not** gated by a feature, so `runtime_shaders` does not avoid it.
-  On this machine the Windows SDK `fxc.exe` is absent, so a plain `cargo build --release` panics
-  in `gpui-pre-windows/build.rs` with `Failed to find fxc.exe`. The fallback is `tools/fxc-shim`
-  (speaks the fxc subset gpui invokes; drives the system `d3dcompiler_47.dll`) built once with
-  `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`. The shim binary is gitignored, and the
-  gitignored `.cargo/config.toml` wires it up automatically:
+- **The Dock icon is also set at runtime from the embedded logo.** `src/dock_icon.rs` (macOS-only,
+  called from the launch callback) pushes `assets/logo.png` into
+  `NSApplication.setApplicationIconImage:` through the `objc2` crates, which are already in the lock
+  file via `gpui-fast-macos`. A real bundle takes its icon from `AppIcon.icns` (next bullet), so this
+  is the fallback that keeps a bundle-less run — an install the updater left bare, or the executable
+  copied out of `Contents/MacOS` — from showing the generic executable icon.
+- **The macOS release is a `.app` bundle, and the updater swaps it as one.** `.github/workflows/
+  release.yml` assembles `RustGrid.app` from `packaging/macos/` (an `Info.plist` template plus
+  `make-icns.sh`, which turns `assets/logo.png` into `Contents/Resources/AppIcon.icns` with
+  `sips`/`iconutil`) and ad-hoc signs it, so Finder, the menu bar and the Dock read their icon and
+  app name from the bundle. `update.rs::configure_macos_layout` mirrors that layout: inside a bundle
+  it uses `self_update`'s **bundle mode** (`bundle_path_in_archive("RustGrid.app")`, which swaps the
+  whole directory in one rename and defaults its install path to the nearest `.app` ancestor of the
+  running exe), and a bare-executable install instead extracts `RustGrid.app/Contents/MacOS/RustGrid`
+  via `bin_path_in_archive` so updating from an older release layout still works (it just stays bare).
+  The two modes are mutually exclusive in one config (`Error::ConflictingConfig`), so never set both.
+  The bundle is **unsigned** (no Developer ID, no notarization), so a quarantined download shows the
+  "unidentified developer" prompt, and a quarantined app runs translocated — from a read-only
+  randomized mount, where `self_update` fails with `Error::AppTranslocated` naming the fix (move the
+  app out of quarantine) rather than corrupting the install.
+- **Windows release builds need `fxc.exe` for *both* GPUI copies.** `gpui-pre-windows` (pulled in by
+  `gpui-kit`) and `gpui-fast-windows` (the engine the app actually renders with) each have a build
+  script that compiles HLSL whenever `debug_assertions` is **off** (release); it is **not** gated by
+  a feature, so `runtime_shaders` does not avoid it. On this machine the Windows SDK `fxc.exe` is
+  absent, so a plain `cargo build --release` panics with `Failed to find fxc.exe`. The fallback is
+  `tools/fxc-shim` (speaks the fxc subset gpui invokes; drives the system `d3dcompiler_47.dll`) built
+  once with `gcc -O2 -o fxc.exe tools/fxc-shim/fxc.c -lkernel32`. The shim binary is gitignored, and
+  the gitignored `.cargo/config.toml` wires it up automatically (`GPUI_FXC_PATH`, which both build
+  scripts read):
   ```toml
   [env]
   GPUI_FXC_PATH = { value = "fxc.exe", relative = true }
