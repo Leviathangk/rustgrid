@@ -282,11 +282,23 @@ impl AppView {
             return div().into_any_element();
         };
         if let Some(error) = &query.result_error {
+            // The error is a driver/SQL message the user needs to read and copy, so it renders as
+            // selectable text (mouse-drag select + Ctrl+C) rather than a plain label.
             return div()
+                .id("query-error")
+                .flex()
+                .flex_col()
                 .flex_1()
+                .min_h(px(0.0))
+                .w_full()
                 .p_2()
+                .overflow_y_scroll()
+                .text_size(px(12.0))
                 .text_color(rgb(theme.danger))
-                .child(error.clone())
+                .child(gpui_kit::base::SelectableText::new(
+                    "query-error-text",
+                    error.clone(),
+                ))
                 .into_any_element();
         }
         let mut body = div().flex().flex_col().gap_2().p_2().w_full();

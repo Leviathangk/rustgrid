@@ -34,9 +34,7 @@ impl GridView {
             sort_field_combos: BTreeMap::new(),
             clipboard: None,
             clipboard_text: None,
-            filter_value_focus: Vec::new(),
-            filter_value2_focus: Vec::new(),
-            filter_active: None,
+            filter_value_inputs: BTreeMap::new(),
             filter_field_combos: BTreeMap::new(),
             filter_operator_combos: BTreeMap::new(),
             filter_width: None,
@@ -53,6 +51,13 @@ impl GridView {
             page_size_focused: false,
             caret_visible: true,
             caret_blink_running: false,
+            status_sql_focus: cx.focus_handle(),
+            status_sql_layout: TextLayout::default(),
+            status_sql_text: String::new(),
+            status_sql_anchor: 0,
+            status_sql_cursor: 0,
+            status_sql_selecting: false,
+            empty_grid_height: 0.0,
             self_weak: cx.weak_entity(),
             ime_field: None,
             ime_marked: None,
@@ -288,6 +293,9 @@ impl Render for GridView {
         let inserts = self.inserts.clone();
         let data_rows = rows.len();
         let column_count = widths.len();
+        // Whether the grid has nothing to paint, captured before `inserts` moves into the list
+        // closure below (the empty body is drawn instead of an empty list).
+        let empty_page = data_rows + inserts.len() == 0;
         // A plain press is about to open the in-place editor on release, so paint that cell as an
         // input right away instead of flashing the blue selection fill. A drag switches to a cell
         // selection (`cell_dragged`), which then paints normally.
@@ -318,6 +326,8 @@ impl Render for GridView {
             .filter(|editor| editor.cells.len() > 1)
             .map(|editor| (editor.cells.clone(), editor.value.clone()));
         let widths = Arc::new(widths);
+        // The empty-table filler needs the widths after the list closure below has taken the Arc.
+        let filler_widths = Arc::clone(&widths);
         let list = uniform_list(
             SharedString::from(format!("grid-rows-{}", self.state.id)),
             data_rows + inserts.len(),
@@ -584,6 +594,55 @@ impl Render for GridView {
             this.grid_key(event, window, cx);
         }));
 
+        // With no rows to paint, keep the table visible: draw the empty body (gutter + one bordered
+        // cell per column, alternating row bands) tall enough to fill the area, instead of leaving a
+        // blank pane under the header. It is decorative — no hit-testing — so nothing can be
+        // selected; clicking it just focuses the grid.
+        let list_body: AnyElement =
+            if empty_page && !self.state.loading && !self.state.columns.is_empty() {
+                let rows_to_fill =
+                    ((self.empty_grid_height / GRID_ROW_HEIGHT).ceil() as usize).max(1) + 1;
+                let measure = cx.weak_entity();
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .track_focus(&self.focus)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, window, cx| {
+                            window.focus(&this.focus, cx);
+                        }),
+                    )
+                    // The body area's height, measured from this flex-sized child (its rows are
+                    // clipped by it), so the next frame draws exactly enough rows to fill it.
+                    .on_children_prepainted(move |bounds, _window, cx| {
+                        let Some(rect) = bounds.first().copied() else {
+                            return;
+                        };
+                        let height = f32::from(rect.size.height);
+                        let _ = measure.update(cx, |grid, cx| {
+                            if (grid.empty_grid_height - height).abs() > 0.5 {
+                                grid.empty_grid_height = height;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .w_full()
+                            .overflow_hidden()
+                            .child(empty_grid_rows(&filler_widths, rows_to_fill, theme)),
+                    )
+                    .into_any_element()
+            } else {
+                list.into_any_element()
+            };
+
         let table = div()
             .id("grid-hscroll")
             .flex_1()
@@ -617,7 +676,7 @@ impl Render for GridView {
                         }),
                     )
                     .child(header)
-                    .child(list)
+                    .child(list_body)
                     .child(self.render_date_picker(cx)),
             );
 
@@ -754,7 +813,7 @@ impl Render for GridView {
         if self.state.show_footer {
             root = root
                 .child(self.render_grid_controls(cx))
-                .child(self.render_grid_status());
+                .child(self.render_grid_status(cx));
         }
 
         root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -776,4 +835,45 @@ impl Render for GridView {
             }),
         )
     }
+}
+
+/// The decorative body of a table with no rows: the gutter and one bordered cell per column,
+/// repeated `rows` times with the same alternating bands as real rows, so an empty page still reads
+/// as an empty table rather than a blank pane under the header. The rows carry no hit-testing.
+fn empty_grid_rows(widths: &[f32], rows: usize, theme: Theme) -> impl IntoElement {
+    let mut column = div().flex().flex_col().w_full();
+    for row in 0..rows {
+        let background = if row % 2 == 1 {
+            theme.row_alt_bg
+        } else {
+            theme.editor_bg
+        };
+        let mut row_element = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .h(px(GRID_ROW_HEIGHT))
+            .bg(rgb(background))
+            .child(
+                div()
+                    .w(px(GRID_GUTTER_WIDTH))
+                    .h(px(GRID_ROW_HEIGHT))
+                    .flex_none()
+                    .border_r_1()
+                    .border_color(rgb(theme.grid_line)),
+            );
+        for width in widths {
+            row_element = row_element.child(
+                div()
+                    .w(px(*width))
+                    .h(px(GRID_ROW_HEIGHT))
+                    .flex_none()
+                    .border_r_1()
+                    .border_b_1()
+                    .border_color(rgb(theme.grid_line)),
+            );
+        }
+        column = column.child(row_element);
+    }
+    column
 }

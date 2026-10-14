@@ -570,16 +570,47 @@ make more engines cheap later — do not build those features early.
   **path** (`Vec<usize>`, indices from the root) — keep that in sync when adding node operations.
   `rustgrid-mysql::filter_clause` and `session.rs::filter_display_clause` recurse over the tree,
   skip disabled/incomplete nodes, drop groups left empty, and must keep bind order identical to the
-  rendered `?` placeholders. The filter builder is a compact take on the reference design: 28px
-  controls, an 84px left rail holding the in-group `并且/或者` pill beside each condition after the
-  first, and 26px `−`/`+` row actions. Each group is a bordered card (12px radius/padding, 8px
-  gaps); between cards runs a 36px connector — a full-width hairline with the floating `并且/或者`
-  pill centred on it, bound to the **next** group's conjunction, and 22px `−`/`+` actions revealed
-  on hover to its right (in a balanced slot so the pill never shifts). The connector after the last
-  group has no next group to join, so its pill stays hidden until hovered; condition-row actions are
-  always visible. The condition block fills the pane (responsive) up to 700px; the hover-only
+  rendered `?` placeholders. The filter builder is a compact take on the reference design: 24px
+  controls, a 66px left rail, and 22px `−`/`+` row actions. Every in-group condition row leads with
+  its **enable checkbox** in a fixed left column (so the boxes line up down the panel, at the card's
+  left edge), followed by the row's `并且/或者` pill when it has one; the pill is a **single-label**
+  toggle that shows the node's current conjunction and flips it on click (no two-segment switch).
+  The checkbox turns the node — and, for a group, its whole subtree — off. Each group is a
+  bordered card (10px radius, 8px padding/gaps); between cards runs a 24px connector — a full-width
+  hairline with the floating conjunction control (checkbox + pill) centred on it, bound to the
+  **next** group's conjunction, and 18px `−`/`+` actions revealed on hover to its right (in a
+  balanced slot so the pill never shifts). The connector after the last group has no next group to
+  join, so its control stays hidden until hovered; condition-row actions are always visible. The
+  condition block fills the pane (responsive) up to 700px; the hover-only
   divider on its right edge (so it does not read as a scrollbar) drags a manual width (min 520,
   max 700) and double-clicking it restores auto-fit (`filter_resize_drag`).
+
+- **An empty grid still shows an empty table.** With no rows to paint, `GridView::render` swaps the
+  `uniform_list` for a decorative body (`grid_view.rs::empty_grid_rows`): the gutter plus one bordered
+  cell per column, repeated with the same alternating bands, tall enough to fill the body area, so
+  the page reads as an empty table instead of a blank pane under the header. The row count comes from
+  `empty_grid_height`, measured from the body's flex-sized child each frame (`on_children_prepainted`)
+  — never from the filler's own height, which would feed back and grow. The filler carries no
+  hitboxes, so nothing in it is selectable; a click just focuses the grid.
+
+- **Read-only text the user must copy is selectable.** The query result panel's 信息 error
+  (`query_editor.rs::render_query_info`) renders through `gpui_kit::base::SelectableText`, so a
+  mouse drag selects and Ctrl+C copies; the main window is opened with `gpui_kit::open_window`,
+  whose `gpui_base::Root` renders the one `TextSelectionLayer` selection needs — a plain `div`
+  opened with `cx.open_window` does not, so wrap such a window in `gpui_kit::component::Root` (as
+  the wizards do) before relying on it. The grid status bar's SQL line
+  (`grid_toolbar.rs::render_status_sql`) instead owns its selection, because it must treat
+  **double-click as select-all** (base multi-click would pick a word): it keeps the laid-out
+  `StyledText`, paints the selected range with a `HighlightStyle`, and exposes copy / select-all
+  through its own `"GridStatus"` key context (`CopyStatusSql` / `SelectAllStatusSql`) — the `Root`
+  context's `ctrl-c`/`ctrl-a` would otherwise swallow the keystroke before it reached the line.
+
+- **The filter builder's value fields are ordinary `ui::TextInput`s** (caret, mouse selection,
+  clipboard and IME from gpui-kit), one entity per `(node path, slot)` in
+  `GridView::filter_value_inputs` and dropped on any structural change (like the field/operator
+  combos). Only the page / page-size boxes remain bespoke append-only editors routed through
+  `GridView`'s `EntityInputHandler` (`grid_ime.rs`, `GridTextField`); do not add a new `GridTextField`
+  variant for a field that can be a `TextInput`.
 
 - **SQL Server (tiberius) is not sqlx.** `tiberius::Client` drives one request at a time and is
   `Send` but **not `Sync`**, so `SqlServerConnection` holds a `bb8::Pool` and checks a client out per
@@ -604,6 +635,17 @@ make more engines cheap later — do not build those features early.
   schema-less engines (MySQL/SQLite) keep the flat database → category tree. Queries and backups are
   stored per database, so they appear (duplicated) under every schema node. The object pane is scoped
   to the clicked schema for tables/views/functions; queries/backups stay database-scoped.
+- **A plain click on an already-open database (or schema) shows its objects; opening stays on the
+  double-click.** Double-click / Enter / 打开数据库 keep their original semantics
+  (`open_database` opens a closed database and toggles an open one's expansion; the schema
+  equivalent is `select_schema`). A *plain* click additionally calls
+  `AppView::show_database_objects` (schema rows: `show_schema_objects`): a closed node is only
+  highlighted, an open one shows its objects for the active main tab (表/视图/函数) through
+  `show_objects_for_scope`, which reuses an object pane already on that scope (its scroll/selection
+  survive) and just re-targets its category, or rebuilds it otherwise. 用户/查询/备份 are left alone
+  — those panels follow the tree selection themselves. Without this click path a database whose pane
+  had been replaced by another connection (or cleared when its connection was closed — `disconnect`
+  clears a pane still scoped to it) looked empty until it was double-clicked.
 - `rustgrid-mysql::map_connect_error` flags authentication failures as
   `rustgrid_core::Error::Authentication` by checking `MySqlDatabaseError::number()`
   (1044/1045/1698) — **not** `DatabaseError::code()`, which returns the SQLSTATE (e.g.

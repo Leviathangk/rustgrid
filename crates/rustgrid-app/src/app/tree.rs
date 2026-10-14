@@ -497,6 +497,16 @@ impl AppView {
             node.expanded = false;
         }
 
+        // The object pane is scoped to one connection's database; a pane left pointing at this now
+        // closed connection is stale, so clear it instead of rendering an empty list.
+        if self
+            .object_pane
+            .as_ref()
+            .is_some_and(|pane| pane.read(cx).connection_index == index)
+        {
+            self.object_pane = None;
+        }
+
         if let Some(connection) = connection {
             self.close_connection_grids(&connection, cx);
             self.close_connection_designs(&connection, cx);
@@ -516,9 +526,17 @@ impl AppView {
             return;
         };
 
-        if let Some(node) = self.connections.get_mut(index) {
-            node.databases = Loadable::Loading;
-        }
+        // Take the loaded list out *before* marking the node as `Loading`. The merge below keeps the
+        // open/expanded state (and the already-loaded tables) of the databases that survive the
+        // refresh; overwriting the list with `Loading` first would discard it and close every
+        // database the user had open.
+        let previous = match self.connections.get_mut(index) {
+            Some(node) => match std::mem::replace(&mut node.databases, Loadable::Loading) {
+                Loadable::Loaded(databases) => databases,
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
 
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -530,7 +548,7 @@ impl AppView {
                 Err(error) => Err(Error::other(error)),
             };
 
-            let _ = this.update(cx, |view, cx| {
+            let _ = this.update(cx, move |view, cx| {
                 let profile_id = view
                     .connections
                     .get(index)
@@ -542,62 +560,56 @@ impl AppView {
                     .cloned()
                     .unwrap_or_default();
                 if let Some(node) = view.connections.get_mut(index) {
-                    // Keep databases that were already open/expanded (and their loaded tables)
-                    // so refreshing the list does not close the user's databases.
-                    let previous = match std::mem::replace(&mut node.databases, Loadable::Idle) {
-                        Loadable::Loaded(databases) => databases,
-                        _ => Vec::new(),
-                    };
+                    // `previous` was taken before the node went `Loading`, so the databases that
+                    // survive the refresh keep their open/expanded state and loaded tables.
+                    let mut previous = previous;
                     // A connection may be limited to a subset of its databases; an empty list means
                     // every database is shown.
                     let visible = node.profile.settings.visible_databases.clone();
                     node.databases = match result {
-                        Ok(databases) => {
-                            let mut previous = previous;
-                            Loadable::Loaded(
-                                databases
-                                    .into_iter()
-                                    .filter(|database| {
-                                        visible.is_empty()
-                                            || visible.iter().any(|name| name == &database.name)
-                                    })
-                                    .map(|database| {
-                                        if let Some(position) = previous
-                                            .iter()
-                                            .position(|existing| existing.name == database.name)
-                                        {
-                                            let existing = previous.remove(position);
-                                            DatabaseNode {
-                                                name: database.name,
-                                                tables: existing.tables,
-                                                table_statuses: existing.table_statuses,
-                                                routines: existing.routines,
-                                                opened: existing.opened,
-                                                expanded: existing.expanded,
-                                                categories: existing.categories,
-                                                expanded_schemas: existing.expanded_schemas,
-                                                opened_schemas: existing.opened_schemas,
-                                                schemas: existing.schemas,
-                                            }
-                                        } else {
-                                            let expanded = remembered.contains(&database.name);
-                                            DatabaseNode {
-                                                name: database.name,
-                                                tables: Loadable::Idle,
-                                                table_statuses: Loadable::Idle,
-                                                routines: Loadable::Idle,
-                                                opened: false,
-                                                expanded,
-                                                categories: Default::default(),
-                                                expanded_schemas: Default::default(),
-                                                opened_schemas: Default::default(),
-                                                schemas: None,
-                                            }
+                        Ok(databases) => Loadable::Loaded(
+                            databases
+                                .into_iter()
+                                .filter(|database| {
+                                    visible.is_empty()
+                                        || visible.iter().any(|name| name == &database.name)
+                                })
+                                .map(|database| {
+                                    if let Some(position) = previous
+                                        .iter()
+                                        .position(|existing| existing.name == database.name)
+                                    {
+                                        let existing = previous.remove(position);
+                                        DatabaseNode {
+                                            name: database.name,
+                                            tables: existing.tables,
+                                            table_statuses: existing.table_statuses,
+                                            routines: existing.routines,
+                                            opened: existing.opened,
+                                            expanded: existing.expanded,
+                                            categories: existing.categories,
+                                            expanded_schemas: existing.expanded_schemas,
+                                            opened_schemas: existing.opened_schemas,
+                                            schemas: existing.schemas,
                                         }
-                                    })
-                                    .collect(),
-                            )
-                        }
+                                    } else {
+                                        let expanded = remembered.contains(&database.name);
+                                        DatabaseNode {
+                                            name: database.name,
+                                            tables: Loadable::Idle,
+                                            table_statuses: Loadable::Idle,
+                                            routines: Loadable::Idle,
+                                            opened: false,
+                                            expanded,
+                                            categories: Default::default(),
+                                            expanded_schemas: Default::default(),
+                                            opened_schemas: Default::default(),
+                                            schemas: None,
+                                        }
+                                    }
+                                })
+                                .collect(),
+                        ),
                         Err(error) => Loadable::Failed(error.to_string()),
                     };
                 }
@@ -610,6 +622,10 @@ impl AppView {
         .detach();
     }
 
+    /// Open a database (double-click on its row, Enter, or the tree's 打开数据库 action): load its
+    /// tables/routines/schemas and show its object browser; an already-open database toggles its
+    /// expansion, exactly as before. A plain click that only selects the row goes through
+    /// [`Self::show_database_objects`] instead, so it never loads or re-expands anything.
     pub(super) fn open_database(
         &mut self,
         connection_index: usize,
@@ -731,6 +747,117 @@ impl AppView {
         }
 
         self.persist_settings();
+        cx.notify();
+    }
+
+    /// A plain click on a database row. An already-open database shows its objects in the content
+    /// pane, scoped to the active main tab (表/视图/函数); a closed database is only highlighted —
+    /// opening stays on the double-click ([`Self::open_database`]).
+    pub(super) fn show_database_objects(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let opened = matches!(
+            self.connections
+                .get(connection_index)
+                .and_then(|node| match &node.databases {
+                    Loadable::Loaded(databases) => databases.get(database_index),
+                    _ => None,
+                }),
+            Some(database) if database.opened
+        );
+        if opened {
+            self.show_objects_for_scope(connection_index, database_index, None, cx);
+        }
+    }
+
+    /// A plain click on a schema row: an already-open schema shows its objects for the active main
+    /// tab; a closed one is only highlighted (the double-click opens it).
+    pub(super) fn show_schema_objects(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let opened = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .is_some_and(|database| database.opened_schemas.contains(&schema));
+        if opened {
+            self.show_objects_for_scope(connection_index, database_index, Some(schema), cx);
+        }
+    }
+
+    /// Show a database's (or schema's) objects in the content pane, scoped to the active main tab.
+    /// Only the object-list tabs (表/视图/函数) do this — 用户/查询/备份 own the pane themselves and
+    /// are re-scoped by the tree selection, so they are left alone here. An object pane already
+    /// showing the same scope is reused (its scroll and selection survive) and just re-targeted to
+    /// the new category; otherwise the pane is rebuilt for the scope.
+    fn show_objects_for_scope(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut category = match self.main_tab {
+            MainTab::Tables => Category::Tables,
+            MainTab::Views => Category::Views,
+            MainTab::Functions => Category::Functions,
+            _ => return,
+        };
+        // Never leave the pane on a category the engine does not have.
+        if category == Category::Functions
+            && !self.driver_supports(connection_index, DriverCapability::Routines)
+        {
+            category = Category::Tables;
+        }
+        let existing = self.object_pane.as_ref().map(|pane| {
+            let pane = pane.read(cx);
+            (
+                pane.connection_index,
+                pane.database_index,
+                pane.schema.clone(),
+                pane.category,
+            )
+        });
+        match existing {
+            Some((pane_connection, pane_database, pane_schema, pane_category))
+                if pane_connection == connection_index
+                    && pane_database == database_index
+                    && pane_schema == schema =>
+            {
+                if pane_category != category
+                    && let Some(pane) = self.object_pane.as_ref()
+                {
+                    pane.update(cx, |pane, cx| {
+                        pane.category = category;
+                        pane.selected = None;
+                        pane.selected_routine = None;
+                        cx.notify();
+                    });
+                    self.objects_selection.clear();
+                    self.objects_row_rects.clear();
+                }
+            }
+            _ => {
+                self.open_object_pane(connection_index, database_index, schema, category, cx);
+                self.clear_object_search(cx);
+            }
+        }
+        if category == Category::Functions {
+            self.ensure_routines_loaded(connection_index, database_index, cx);
+        }
+        self.active_grid = None;
+        self.active_query = None;
+        self.active_design = None;
         cx.notify();
     }
 
@@ -859,6 +986,28 @@ impl AppView {
         cx.notify();
     }
 
+    /// Handle a double-click on a schema tree row: open the schema (highlight it, expand it and show
+    /// its objects) when it is not already showing, otherwise collapse/expand it like a plain node.
+    pub(super) fn select_schema(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let already_open = self.object_pane.as_ref().is_some_and(|pane| {
+            let pane = pane.read(cx);
+            pane.connection_index == connection_index
+                && pane.database_index == database_index
+                && pane.schema.as_deref() == Some(schema.as_str())
+        });
+        if already_open {
+            self.toggle_schema(connection_index, database_index, schema, cx);
+        } else {
+            self.open_schema(connection_index, database_index, schema, cx);
+        }
+    }
+
     /// Open a schema (SQL Server): highlight its tree node, load the database's objects if needed
     /// and show the schema's objects in the content pane.
     pub(super) fn open_schema(
@@ -947,28 +1096,6 @@ impl AppView {
         self.active_query = None;
         self.active_design = None;
         cx.notify();
-    }
-
-    /// Handle a click on a schema tree row: open the schema (highlight it, expand it and show its
-    /// objects) when it is not already showing, otherwise collapse/expand it like a plain node.
-    pub(super) fn select_schema(
-        &mut self,
-        connection_index: usize,
-        database_index: usize,
-        schema: String,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let already_open = self.object_pane.as_ref().is_some_and(|pane| {
-            let pane = pane.read(cx);
-            pane.connection_index == connection_index
-                && pane.database_index == database_index
-                && pane.schema.as_deref() == Some(schema.as_str())
-        });
-        if already_open {
-            self.toggle_schema(connection_index, database_index, schema, cx);
-        } else {
-            self.open_schema(connection_index, database_index, schema, cx);
-        }
     }
 
     /// Close a schema (SQL Server): un-highlight it, collapse it and clear the content pane when it

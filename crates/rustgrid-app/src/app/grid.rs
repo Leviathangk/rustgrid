@@ -40,22 +40,6 @@ fn filter_children_mut<'a>(
     }
 }
 
-/// Every condition node's path, depth-first (used to key the per-field value focus handles).
-fn collect_condition_paths(
-    nodes: &[FilterNode],
-    prefix: &mut Vec<usize>,
-    out: &mut Vec<Vec<usize>>,
-) {
-    for (index, node) in nodes.iter().enumerate() {
-        prefix.push(index);
-        match node {
-            FilterNode::Condition(_) => out.push(prefix.clone()),
-            FilterNode::Group(group) => collect_condition_paths(&group.children, prefix, out),
-        }
-        prefix.pop();
-    }
-}
-
 fn collect_condition_columns<'a>(nodes: &'a [FilterNode], out: &mut Vec<&'a str>) {
     for node in nodes {
         match node {
@@ -774,10 +758,8 @@ impl GridView {
     pub(super) fn toggle_filter_panel(&mut self, cx: &mut Context<'_, Self>) {
         if self.state.filter_open {
             self.state.filter_open = false;
-            self.filter_active = None;
             self.state.filter_draft.clear();
-            self.filter_value_focus.clear();
-            self.filter_value2_focus.clear();
+            self.filter_value_inputs.clear();
             self.filter_field_combos.clear();
             self.filter_operator_combos.clear();
         } else {
@@ -785,14 +767,13 @@ impl GridView {
                 return;
             }
             self.state.filter_open = true;
-            self.filter_active = None;
+            self.filter_value_inputs.clear();
             self.filter_field_combos.clear();
             self.filter_operator_combos.clear();
             self.state.filter_draft = self.state.filters.clone();
             if self.state.filter_draft.is_empty() {
                 self.filter_draft_start();
             }
-            self.rebuild_filter_focus(cx);
         }
         cx.notify();
     }
@@ -802,20 +783,6 @@ impl GridView {
         if let Some(group) = self.new_filter_group() {
             self.state.filter_draft.push(group);
         }
-    }
-
-    /// One value focus handle per condition node, keyed by the node's path in the draft tree.
-    fn rebuild_filter_focus(&mut self, cx: &mut Context<'_, Self>) {
-        let mut paths = Vec::new();
-        collect_condition_paths(&self.state.filter_draft, &mut Vec::new(), &mut paths);
-        self.filter_value_focus = paths
-            .iter()
-            .map(|path| (path.clone(), cx.focus_handle()))
-            .collect();
-        self.filter_value2_focus = paths
-            .into_iter()
-            .map(|path| (path, cx.focus_handle()))
-            .collect();
     }
 
     fn next_filter_column(&self) -> String {
@@ -909,14 +876,13 @@ impl GridView {
         self.after_filter_change(cx);
     }
 
-    /// Reset the popups/active field and refresh focus handles after a structural change. Groups
-    /// left without conditions are dropped (the boundary rows hide them from edits anyway).
+    /// Reset the popups/editors after a structural change. Groups left without conditions are
+    /// dropped (the boundary rows hide them from edits anyway).
     fn after_filter_change(&mut self, cx: &mut Context<'_, Self>) {
         prune_filter_groups(&mut self.state.filter_draft);
-        self.filter_active = None;
+        self.filter_value_inputs.clear();
         self.filter_field_combos.clear();
         self.filter_operator_combos.clear();
-        self.rebuild_filter_focus(cx);
         cx.notify();
     }
 
@@ -928,6 +894,16 @@ impl GridView {
         if let Some(node) = filter_node_mut(&mut self.state.filter_draft, &path) {
             let conjunction = node.conjunction().toggled();
             node.set_conjunction(conjunction);
+        }
+        cx.notify();
+    }
+
+    /// Toggle the enable checkbox beside a filter node's `并且/或者` control: a disabled condition
+    /// (or group, with its whole subtree) is skipped when the filter is applied.
+    pub(super) fn filter_toggle_enabled(&mut self, path: Vec<usize>, cx: &mut Context<'_, Self>) {
+        if let Some(node) = filter_node_mut(&mut self.state.filter_draft, &path) {
+            let enabled = !node.enabled();
+            node.set_enabled(enabled);
         }
         cx.notify();
     }
@@ -1057,67 +1033,72 @@ impl GridView {
         cx.notify();
     }
 
-    pub(super) fn filter_focus_value(
+    /// The single-line editor for one filter value slot, created on first use and cached by
+    /// `(path, slot)`. A structural change clears the cache, so the paths it is keyed by stay valid.
+    /// Using the shared [`TextInput`] means the field gets a caret, mouse selection, clipboard and
+    /// IME from gpui-kit instead of the bespoke append-only handling the page boxes still use.
+    pub(super) fn filter_value_input(
         &mut self,
-        path: Vec<usize>,
+        path: &[usize],
         slot: u8,
-        window: &mut Window,
+        value: String,
         cx: &mut Context<'_, Self>,
-    ) {
-        self.filter_active = Some((path.clone(), slot));
-        let handles = if slot == 0 {
-            &self.filter_value_focus
-        } else {
-            &self.filter_value2_focus
-        };
-        let handle = handles
-            .iter()
-            .find(|(candidate, _)| *candidate == path)
-            .map(|(_, handle)| handle.clone());
-        if let Some(handle) = handle {
-            window.focus(&handle, cx);
+    ) -> Entity<TextInput> {
+        let key = (path.to_vec(), slot);
+        if let Some(input) = self.filter_value_inputs.get(&key) {
+            return input.clone();
         }
-        cx.notify();
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let change_path = key.0.clone();
+        let submit_weak = weak.clone();
+        let cancel_weak = weak.clone();
+        let input = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                value,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.0),
+                    placeholder: t!("filter.value_placeholder").to_string().into(),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |grid, cx| {
+                    grid.filter_value_changed(change_path.clone(), slot, text, cx);
+                });
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit_weak.update(cx, |grid, cx| grid.filter_apply(cx));
+            }))
+            .on_cancel(Rc::new(move |window, cx| {
+                // Escape leaves the field (keeping whatever was typed) and returns focus to the
+                // grid, matching the old append-only field.
+                let _ = cancel_weak.update(cx, |grid, cx| window.focus(&grid.focus, cx));
+            }))
+        });
+        self.filter_value_inputs.insert(key, input.clone());
+        input
     }
 
-    pub(super) fn filter_value_key(
+    /// Mirror a filter value field's text into the draft condition.
+    fn filter_value_changed(
         &mut self,
         path: Vec<usize>,
         slot: u8,
-        event: &KeyDownEvent,
+        text: &str,
         cx: &mut Context<'_, Self>,
     ) {
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform {
-            return;
-        }
-        let mut apply = false;
-        let mut unfocus = false;
         if let Some(FilterNode::Condition(condition)) =
             filter_node_mut(&mut self.state.filter_draft, &path)
         {
-            let buffer = if slot == 0 {
-                &mut condition.value
+            if slot == 0 {
+                condition.value = text.to_string();
             } else {
-                &mut condition.value2
-            };
-            match keystroke.key.as_str() {
-                "backspace" => {
-                    buffer.pop();
-                }
-                "escape" => unfocus = true,
-                "enter" => apply = true,
-                _ => {
-                    // Text characters (including IME) arrive through the grid's input handler.
-                }
+                condition.value2 = text.to_string();
             }
-        }
-        if unfocus {
-            self.filter_active = None;
-        }
-        if apply {
-            self.filter_apply(cx);
-            return;
         }
         cx.notify();
     }
@@ -1131,7 +1112,6 @@ impl GridView {
 
     pub(super) fn filter_apply_now(&mut self, cx: &mut Context<'_, Self>) {
         self.state.filters = self.state.filter_draft.clone();
-        self.filter_active = None;
         self.state.page_index = 0;
         self.sync_page_input();
         self.load_page(cx);

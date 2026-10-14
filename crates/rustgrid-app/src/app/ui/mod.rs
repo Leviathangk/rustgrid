@@ -241,15 +241,13 @@ pub(super) fn icon_button(
         )
 }
 
-/// The chrome of a `并且/或者` pill rendered by [`segmented_toggle`]. Two presets cover the filter
+/// The chrome of a `并且/或者` pill rendered by [`toggle_pill`]. Two presets cover the filter
 /// builder's in-group rail pill and the floating between-groups boundary pill.
 #[derive(Clone, Copy)]
 pub(super) struct TogglePillStyle {
-    pub container_pad: f32,
     pub button_pad_x: f32,
     pub button_pad_y: f32,
     pub container_radius: f32,
-    pub button_radius: f32,
     pub container_bg: u32,
     pub container_border: u32,
     pub shadow: bool,
@@ -260,11 +258,9 @@ impl TogglePillStyle {
     /// The compact in-group rail pill (`bg-slate-100`, tight padding, no shadow).
     pub(super) fn in_group(theme: Theme) -> Self {
         Self {
-            container_pad: 2.0,
             button_pad_x: 7.0,
             button_pad_y: 2.0,
             container_radius: 5.0,
-            button_radius: 4.0,
             container_bg: theme.button_bg,
             container_border: theme.button_border,
             shadow: false,
@@ -275,11 +271,9 @@ impl TogglePillStyle {
     /// The floating between-groups pill (`bg-white`, looser padding, soft shadow).
     pub(super) fn boundary(theme: Theme) -> Self {
         Self {
-            container_pad: 2.0,
             button_pad_x: 8.0,
             button_pad_y: 2.0,
             container_radius: 6.0,
-            button_radius: 5.0,
             container_bg: theme.dialog_bg,
             container_border: theme.border,
             shadow: true,
@@ -288,52 +282,36 @@ impl TogglePillStyle {
     }
 }
 
-/// A two-option segmented toggle (the filter builder's `并且 | 或者`). The whole widget is a single
-/// click target, so `on_click` toggles between the two options.
-pub(super) fn segmented_toggle(
+/// A single-label pill toggle (the filter builder's `并且`/`或者`). One slot shows the current
+/// conjunction; clicking flips it, so the panel no longer spends two segments on `并且 | 或者`.
+pub(super) fn toggle_pill(
     id: impl Into<SharedString>,
-    first: String,
-    second: String,
-    second_active: bool,
+    label: String,
     style: TogglePillStyle,
     theme: Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let mut toggle = div()
+    div()
         .id(id.into())
         .flex()
         .flex_row()
         .items_center()
-        .p(px(style.container_pad))
+        .justify_center()
         .flex_none()
+        .px(px(style.button_pad_x))
+        .py(px(style.button_pad_y))
         .rounded(px(style.container_radius))
         .border_1()
         .border_color(rgb(style.container_border))
         .bg(rgb(style.container_bg))
         .when(style.shadow, |this| this.shadow(soft_shadow()))
         .cursor_pointer()
-        .on_click(on_click);
-    for (label, active) in [(first, !second_active), (second, second_active)] {
-        toggle = toggle.child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .px(px(style.button_pad_x))
-                .py(px(style.button_pad_y))
-                .rounded(px(style.button_radius))
-                .text_size(px(style.text_size))
-                .font_weight(FontWeight::BOLD)
-                .when(active, move |style| {
-                    style.bg(rgb(theme.primary)).text_color(rgb(0xffffff))
-                })
-                .when(!active, move |style| {
-                    style.text_color(rgb(theme.text_muted))
-                })
-                .child(label),
-        );
-    }
-    toggle
+        .text_size(px(style.text_size))
+        .font_weight(FontWeight::BOLD)
+        .text_color(rgb(theme.text))
+        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+        .on_click(on_click)
+        .child(label)
 }
 
 fn separator(theme: Theme, height: f32) -> impl IntoElement {

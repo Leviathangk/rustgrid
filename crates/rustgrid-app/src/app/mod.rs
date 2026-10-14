@@ -104,6 +104,11 @@ gpui::actions!(
     [RunSelectedQuery, SaveQuery, SelectAllOccurrences]
 );
 
+// The grid status bar's selectable SQL line. `Root` binds `ctrl-c` (copy) and `ctrl-a`
+// (select-all), which would otherwise consume the keystroke before the line sees it; binding our
+// own actions in a deeper context takes precedence, like the backup list above.
+gpui::actions!(gridstatus, [CopyStatusSql, SelectAllStatusSql]);
+
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
 
@@ -116,6 +121,10 @@ const BACKUP_LIST_CONTEXT: &str = "BackupList";
 
 /// Key context applied to the saved-query file list.
 const QUERY_LIST_CONTEXT: &str = "QueryList";
+
+/// Key context applied to the grid status bar's selectable SQL line, so Ctrl+C / Ctrl+A reach it
+/// instead of the `Root` context's copy/select-all.
+const GRID_STATUS_CONTEXT: &str = "GridStatus";
 
 /// Key context applied to the SQL query editor, so Ctrl+Z / Ctrl+Y / Ctrl+S reach it.
 const QUERY_EDITOR_CONTEXT: &str = "QueryEditor";
@@ -1321,16 +1330,14 @@ struct TreePane {
     selection: BTreeSet<String>,
 }
 
-/// Which text field of a grid owns the platform text input (IME / `WM_CHAR`). Grids keep several
-/// bespoke single-line editors whose focus handles are dynamic (filter values in particular), so
-/// rather than wrapping each in `TextInput`, `GridView` implements `EntityInputHandler` itself
-/// and routes input to whichever field is focused.
+/// Which bespoke text field of a grid owns the platform text input (IME / `WM_CHAR`). The page /
+/// page-size boxes are append-only single-line editors with static focus handles, so `GridView`
+/// implements `EntityInputHandler` itself and routes input to whichever of them is focused. (The
+/// filter builder's value fields are ordinary [`TextInput`]s, so they handle their own input.)
 #[derive(Clone, PartialEq, Eq)]
 enum GridTextField {
     PageInput,
     PageSize,
-    /// A filter value input, addressed by its node path in the filter tree and which value slot.
-    Filter(Vec<usize>, u8),
 }
 
 /// A single open grid (a table page or a SQL result) as an isolated child view. Owns the grid
@@ -1380,9 +1387,10 @@ struct GridView {
     /// external clipboard change from our own and fall back to `clipboard` (which keeps NULLs).
     clipboard_text: Option<String>,
 
-    filter_value_focus: Vec<(Vec<usize>, FocusHandle)>,
-    filter_value2_focus: Vec<(Vec<usize>, FocusHandle)>,
-    filter_active: Option<(Vec<usize>, u8)>,
+    /// The single-line editors of the filter builder's value fields, keyed by `(node path, slot)`.
+    /// Rebuilt after any structural change so the paths stay valid. A real [`TextInput`] gives the
+    /// value fields caret/mouse selection and clipboard support for free.
+    filter_value_inputs: BTreeMap<(Vec<usize>, u8), Entity<TextInput>>,
     /// The shared dropdown entities for each condition row, keyed by the node path. Rebuilt after
     /// any structural change so the paths stay valid.
     filter_field_combos: BTreeMap<Vec<usize>, Entity<ComboBox>>,
@@ -1409,6 +1417,20 @@ struct GridView {
 
     caret_visible: bool,
     caret_blink_running: bool,
+
+    /// The status bar's SQL line is hand-selectable (drag, double-click to select all, Ctrl+C),
+    /// mirroring the database dialog's SQL preview: the laid-out text is kept so a pointer
+    /// position maps to a byte offset.
+    status_sql_focus: FocusHandle,
+    status_sql_layout: TextLayout,
+    status_sql_text: String,
+    status_sql_anchor: usize,
+    status_sql_cursor: usize,
+    status_sql_selecting: bool,
+
+    /// Height of the body area left for rows, measured each frame. When the page has no rows the
+    /// grid paints an empty table (gutter + column separators) tall enough to fill it.
+    empty_grid_height: f32,
 
     /// A weak handle to this view, used to register the input handler from a paint callback
     /// without forming an `Entity` reference cycle.
@@ -1661,24 +1683,24 @@ pub(super) const QUERY_RESULT_MAX_HEIGHT: f32 = 1000.0;
 pub(super) const QUERY_EDITOR_MIN_HEIGHT: f32 = 80.0;
 const GRID_ROW_HEIGHT: f32 = 24.0;
 const GRID_COLUMN_WIDTH: f32 = 120.0;
-/// Filter-builder metrics, a compact take on the reference design: 24px controls, an 80px left
-/// rail for the in-group `并且/或者` pill, 22px row actions, and a 30px between-groups bar carrying
-/// the floating pill with 20px actions in a balanced slot.
+/// Filter-builder metrics, a compact take on the reference design: 24px controls, a 66px left
+/// rail for the in-group conjunction control, 22px row actions, and a 24px between-groups bar
+/// carrying the floating control with 18px actions in a balanced slot.
 const FILTER_CONTROL_HEIGHT: f32 = 24.0;
 const FILTER_CONTROL_TEXT_SIZE: f32 = 12.0;
 const FILTER_CONTROL_RADIUS: f32 = 6.0;
-const FILTER_RAIL_WIDTH: f32 = 80.0;
-const FILTER_FIELD_WIDTH: f32 = 120.0;
-const FILTER_OPERATOR_WIDTH: f32 = 90.0;
+const FILTER_RAIL_WIDTH: f32 = 66.0;
+const FILTER_FIELD_WIDTH: f32 = 112.0;
+const FILTER_OPERATOR_WIDTH: f32 = 84.0;
 /// Minimum width of the value field (it stretches to fill the rest of the row).
 const FILTER_VALUE_WIDTH: f32 = 110.0;
 const FILTER_ROW_ACTION_SIZE: f32 = 22.0;
 const FILTER_ROW_ACTION_RADIUS: f32 = 6.0;
-const FILTER_BOUNDARY_BAR_HEIGHT: f32 = 30.0;
-const FILTER_BOUNDARY_ACTION_SIZE: f32 = 20.0;
+const FILTER_BOUNDARY_BAR_HEIGHT: f32 = 24.0;
+const FILTER_BOUNDARY_ACTION_SIZE: f32 = 18.0;
 const FILTER_BOUNDARY_ACTION_RADIUS: f32 = 4.0;
-/// One side of the boundary bar's balanced slot (two 20px actions + their 4px gap).
-const FILTER_BOUNDARY_ACTION_SLOT: f32 = 44.0;
+/// One side of the boundary bar's balanced slot (two 18px actions + their 4px gap).
+const FILTER_BOUNDARY_ACTION_SLOT: f32 = 40.0;
 /// The filter content fills the pane (responsive) up to this cap so a very wide window does not
 /// stretch the value field and fling the row actions to the far edge. The divider on the block's
 /// right edge drags a manual width between the min and max; double-clicking it restores auto-fit.
@@ -2306,6 +2328,11 @@ impl AppView {
             KeyBinding::new("cmd-enter", RunSelectedQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("ctrl-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("cmd-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
+            // The status bar's SQL line: copy the selection (or select the whole statement).
+            KeyBinding::new("ctrl-c", CopyStatusSql, Some(GRID_STATUS_CONTEXT)),
+            KeyBinding::new("cmd-c", CopyStatusSql, Some(GRID_STATUS_CONTEXT)),
+            KeyBinding::new("ctrl-a", SelectAllStatusSql, Some(GRID_STATUS_CONTEXT)),
+            KeyBinding::new("cmd-a", SelectAllStatusSql, Some(GRID_STATUS_CONTEXT)),
             // Ask for the completion menu without typing (gpui-kit 0.7.3); the editor leaves it
             // unbound by default. Ctrl+Shift+L selects every occurrence of the current word or
             // selection, giving the editor a programmatic multi-cursor.

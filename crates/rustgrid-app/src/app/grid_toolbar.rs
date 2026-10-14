@@ -403,12 +403,12 @@ impl GridView {
             .id("filter-condition-list")
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
             .flex_none()
-            .min_h(px(46.0))
-            .max_h(px(300.0))
-            .px_4()
-            .py_2()
+            .min_h(px(40.0))
+            .max_h(px(260.0))
+            .px_3()
+            .py_1()
             .overflow_y_scroll();
 
         let content: AnyElement = if self.state.filter_draft.is_empty() {
@@ -418,11 +418,11 @@ impl GridView {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .px_4()
-                .h(px(36.0))
+                .px_3()
+                .h(px(30.0))
                 .w_full()
                 .flex_none()
-                .rounded(px(12.0))
+                .rounded(px(8.0))
                 .bg(rgb(theme.dialog_bg))
                 .border_1()
                 .border_color(rgb(theme.border))
@@ -515,8 +515,8 @@ impl GridView {
             .flex_row()
             .items_center()
             .gap_2()
-            .px_4()
-            .h(px(30.0))
+            .px_3()
+            .h(px(26.0))
             .flex_none()
             .child(self.filter_apply_button(cx));
 
@@ -624,7 +624,7 @@ impl GridView {
             None => (path.clone(), FilterConjunction::And, false),
         };
         let hover_group = SharedString::from(format!("filter-boundary-hover-{key}"));
-        let toggle = self.filter_conjunction_toggle(
+        let control = self.filter_conjunction_control(
             SharedString::from(format!("filter-boundary-toggle-{key}")),
             &toggle_path,
             toggle_conjunction,
@@ -632,14 +632,17 @@ impl GridView {
             toggle_enabled,
             cx,
         );
-        // The trailing connector (no next group yet) keeps its pill out of the way until hovered,
+        // The trailing connector (no next group yet) keeps its control out of the way until hovered,
         // so the panel does not end on a dangling `并且/或者`.
-        let toggle = if toggle_enabled {
-            toggle.into_any_element()
+        let toggle: AnyElement = if toggle_enabled {
+            control
         } else {
-            toggle
+            div()
+                .flex()
+                .items_center()
                 .opacity(0.0)
                 .group_hover(hover_group.clone(), |style| style.opacity(1.0))
+                .child(control)
                 .into_any_element()
         };
         let actions = div()
@@ -720,7 +723,7 @@ impl GridView {
             .w_full()
             .py_1()
             .flex_none()
-            .child(self.filter_conjunction_toggle(
+            .child(self.filter_conjunction_control(
                 SharedString::from(format!("filter-conjunction-{}", filter_path_key(path))),
                 path,
                 conjunction,
@@ -774,31 +777,37 @@ impl GridView {
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap_2()
             .w_full();
         match rail {
             FilterRail::None => {}
-            FilterRail::Spacer => {
-                row = row.child(div().w(px(FILTER_RAIL_WIDTH)).flex_none());
-            }
-            FilterRail::Toggle(conjunction) => {
-                row = row.child(
-                    div()
-                        .w(px(FILTER_RAIL_WIDTH))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_end()
-                        .child(self.filter_conjunction_toggle(
-                            SharedString::from(format!("filter-conjunction-{key}")),
-                            &path,
-                            conjunction,
-                            ui::TogglePillStyle::in_group(theme),
-                            true,
-                            cx,
-                        )),
-                );
+            FilterRail::Spacer | FilterRail::Toggle(_) => {
+                // Every in-group condition row leads with its enable checkbox in a fixed left-hand
+                // column, so the boxes line up down the panel (and sit at the card's left edge); the
+                // `并且/或者` pill, when the row has one, follows it in the same rail.
+                let mut rail_cell = div()
+                    .w(px(FILTER_RAIL_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(self.filter_enable_checkbox(
+                        SharedString::from(format!("filter-enabled-{key}")),
+                        &path,
+                        node.enabled(),
+                        cx,
+                    ));
+                if let FilterRail::Toggle(conjunction) = rail {
+                    rail_cell = rail_cell.child(self.filter_conjunction_pill(
+                        SharedString::from(format!("filter-conjunction-{key}")),
+                        &path,
+                        conjunction,
+                        ui::TogglePillStyle::in_group(theme),
+                        cx,
+                    ));
+                }
+                row = row.child(rail_cell);
             }
         }
         row = row
@@ -858,10 +867,10 @@ impl GridView {
             .id(SharedString::from(format!("filter-group-{key}")))
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
             .w_full()
-            .p_3()
-            .rounded(px(12.0))
+            .p_2()
+            .rounded(px(10.0))
             .bg(rgb(theme.dialog_bg))
             .border_1()
             .border_color(rgb(theme.border))
@@ -870,10 +879,13 @@ impl GridView {
             .into_any_element()
     }
 
-    /// A `并且/或者` segmented toggle. `id` must be unique within the panel (the same node can be
-    /// targeted by both its own rail row and a group's boundary footer). `enabled` is false for the
-    /// last group's boundary, where there is no next group to join yet.
-    fn filter_conjunction_toggle(
+    /// The `并且/或者` control of a filter node: a small enable checkbox followed by a single-label
+    /// pill. The pill shows the node's current conjunction and flips it on click, so one slot
+    /// replaces the old two-segment `并且 | 或者` switch; the checkbox turns the node (and, for a
+    /// group, its whole subtree) on or off. `id` must be unique within the panel (the same node can
+    /// be targeted by both its own rail row and a group's boundary footer). `enabled` is false for
+    /// the trailing group boundary, where there is no next node to join yet.
+    fn filter_conjunction_control(
         &self,
         id: SharedString,
         path: &[usize],
@@ -881,41 +893,107 @@ impl GridView {
         style: ui::TogglePillStyle,
         enabled: bool,
         cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let node_enabled = filter_node(&self.state.filter_draft, path)
+            .map(FilterNode::enabled)
+            .unwrap_or(true);
+        let path = path.to_vec();
+        let mut control = div().flex().flex_row().items_center().gap_1().flex_none();
+        if enabled {
+            control = control.child(self.filter_enable_checkbox(
+                SharedString::from(format!("{id}-enabled")),
+                &path,
+                node_enabled,
+                cx,
+            ));
+        } else {
+            // Keep the slot (the boundary bar must not shift) but leave it inert and invisible.
+            control = control.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .opacity(0.0)
+                    .child(ui::checkbox_box(node_enabled, theme)),
+            );
+        }
+        let mut pill = if enabled {
+            self.filter_conjunction_pill(id, &path, conjunction, style, cx)
+        } else {
+            ui::toggle_pill(
+                id,
+                t!(conjunction.label_key()).to_string(),
+                style,
+                theme,
+                |_, _, _| {},
+            )
+        };
+        if !enabled {
+            pill = pill.opacity(0.45);
+        }
+        control.child(pill).into_any_element()
+    }
+
+    /// The single-label `并且/或者` pill by itself (no enable checkbox). The in-group rail pairs it
+    /// with a checkbox in its own fixed column; the boundary row uses
+    /// [`Self::filter_conjunction_control`], which carries both.
+    fn filter_conjunction_pill(
+        &self,
+        id: SharedString,
+        path: &[usize],
+        conjunction: FilterConjunction,
+        style: ui::TogglePillStyle,
+        cx: &mut Context<'_, Self>,
     ) -> Stateful<Div> {
         let theme = self.theme;
         let path = path.to_vec();
-        let and = t!(FilterConjunction::And.label_key()).to_string();
-        let or = t!(FilterConjunction::Or.label_key()).to_string();
-        let second_active = conjunction == FilterConjunction::Or;
-        let mut toggle = if enabled {
-            ui::segmented_toggle(
-                id,
-                and,
-                or,
-                second_active,
-                style,
-                theme,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.filter_toggle_conjunction(path.clone(), cx);
-                }),
-            )
-        } else {
-            ui::segmented_toggle(id, and, or, second_active, style, theme, |_, _, _| {})
-        };
-        if !enabled {
-            toggle = toggle.opacity(0.45);
-        }
-        toggle
+        let label = t!(conjunction.label_key()).to_string();
+        ui::toggle_pill(
+            id,
+            label,
+            style,
+            theme,
+            cx.listener(move |this, _event, _window, cx| {
+                this.filter_toggle_conjunction(path.clone(), cx);
+            }),
+        )
     }
 
-    fn render_filter_value(
+    /// The small enable checkbox of a filter node. It sits beside the `并且/或者` pill, or on its own
+    /// for a group's first condition (which has no pill); toggling it enables/disables that node.
+    fn filter_enable_checkbox(
         &self,
+        id: SharedString,
+        path: &[usize],
+        checked: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> Stateful<Div> {
+        let theme = self.theme;
+        let path = path.to_vec();
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .flex_none()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                cx.stop_propagation();
+                this.filter_toggle_enabled(path.clone(), cx);
+            }))
+            .child(ui::checkbox_box(checked, theme))
+    }
+
+    /// One value field of a condition row. An enabled slot hosts a real [`TextInput`] (caret,
+    /// mouse selection, clipboard and IME come from gpui-kit); a slot the operator does not use
+    /// shows an inert placeholder instead.
+    fn render_filter_value(
+        &mut self,
         path: &[usize],
         slot: u8,
         cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let theme = self.theme;
-        let key = filter_path_key(path);
         let path = path.to_vec();
         let condition = filter_node(&self.state.filter_draft, &path);
         let operator = condition
@@ -939,20 +1017,8 @@ impl GridView {
             }
             _ => String::new(),
         };
-        let focused = enabled && self.filter_active.as_ref() == Some(&(path.clone(), slot));
-        let handles = if slot == 0 {
-            &self.filter_value_focus
-        } else {
-            &self.filter_value2_focus
-        };
-        let handle = handles
-            .iter()
-            .find(|(candidate, _)| *candidate == path)
-            .map(|(_, handle)| handle.clone());
 
-        let mut field = ui::text_field(theme)
-            .id(SharedString::from(format!("filter-value-{key}-{slot}")))
-            .relative()
+        let field = ui::text_field(theme)
             .flex()
             .flex_row()
             .items_center()
@@ -960,47 +1026,23 @@ impl GridView {
             .min_w(px(FILTER_VALUE_WIDTH))
             .h(px(FILTER_CONTROL_HEIGHT))
             .px_2()
-            .text_size(px(12.0))
             .rounded(px(FILTER_CONTROL_RADIUS))
             .overflow_hidden();
-        if enabled {
-            if let Some(handle) = handle {
-                let key_target = path.clone();
-                let click_target = path.clone();
-                field = field
-                    .track_focus(&handle)
-                    .cursor_text()
-                    .on_key_down(cx.listener(move |this, event, _window, cx| {
-                        this.filter_value_key(key_target.clone(), slot, event, cx);
-                    }))
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.filter_focus_value(click_target.clone(), slot, window, cx);
-                    }))
-                    .child(self.ime_probe(&handle));
-            }
-        } else {
-            field = field
+        if !enabled {
+            return field
                 .bg(rgb(theme.dialog_face))
-                .text_color(rgb(theme.text_muted));
+                .text_size(px(12.0))
+                .child(
+                    div()
+                        .text_color(rgb(theme.text_null))
+                        .child(t!("filter.value_placeholder").to_string()),
+                )
+                .into_any_element();
         }
-        let placeholder = enabled && value.is_empty() && !focused;
-        let content = if placeholder {
-            div()
-                .text_color(rgb(theme.text_null))
-                .child(t!("filter.value_placeholder").to_string())
-        } else {
-            div().child(value)
-        };
-        field.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .child(content)
-                .when(focused, move |style| {
-                    style.child(div().w(px(1.5)).h(px(13.0)).flex_none().bg(rgb(theme.text)))
-                }),
-        )
+        let input = self.filter_value_input(&path, slot, value, cx);
+        field
+            .child(div().flex_1().min_w(px(0.0)).h_full().child(input))
+            .into_any_element()
     }
 
     /// One `−` / `+` action of the filter builder, drawn in the design's flat outlined style.
@@ -1469,7 +1511,7 @@ impl GridView {
         total.render()
     }
 
-    pub(super) fn render_grid_status(&self) -> impl IntoElement {
+    pub(super) fn render_grid_status(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let end = self
             .state
@@ -1500,11 +1542,11 @@ impl GridView {
             )
             .to_string()
         });
-        let message = match self.state.selection.as_ref() {
+        let message: AnyElement = match self.state.selection.as_ref() {
             Some(selection) => {
                 let (start_row, end_row) = selection.rows();
                 let (start_col, end_col) = selection.cols();
-                if selection.ranges.len() > 1 {
+                let text = if selection.ranges.len() > 1 {
                     t!(
                         "grid.selection_info",
                         rows = selection.row_indices().len(),
@@ -1518,9 +1560,12 @@ impl GridView {
                         cols = end_col - start_col + 1
                     )
                     .to_string()
-                }
+                };
+                div().child(text).into_any_element()
             }
-            None => flatten_status_sql(&self.state.sql()),
+            // The SQL the grid ran: a hand-selectable line (drag, double-click to select all,
+            // Ctrl+C) so the user can copy the exact statement from the status bar.
+            None => self.render_status_sql(flatten_status_sql(&self.state.sql()), cx),
         };
         // Excel-style aggregate: a multi-cell selection that holds numbers also reports their
         // sum, right after the selection text.
@@ -1571,6 +1616,118 @@ impl GridView {
                     })
                     .child(info),
             )
+    }
+
+    /// The status bar's SQL line, hand-selectable: drag to select, double-click to select the whole
+    /// statement, Ctrl+A / Ctrl+C as usual. The layout is cached so a pointer position maps back to
+    /// a byte offset in the flattened text.
+    fn render_status_sql(&mut self, sql: String, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        // A different statement (a reload) invalidates any previous selection.
+        if self.status_sql_text != sql {
+            self.status_sql_text = sql.clone();
+            self.status_sql_anchor = 0;
+            self.status_sql_cursor = 0;
+            self.status_sql_selecting = false;
+        }
+        let (start, end) = self.status_sql_range();
+        let mut styled = StyledText::new(sql);
+        if start < end {
+            styled = styled.with_highlights(vec![(
+                start..end,
+                HighlightStyle {
+                    background_color: Some(rgb(theme.grid_selection_bg).into()),
+                    ..Default::default()
+                },
+            )]);
+        }
+        self.status_sql_layout = styled.layout().clone();
+        div()
+            .id("grid-status-sql")
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .track_focus(&self.status_sql_focus)
+            .cursor_text()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    window.focus(&this.status_sql_focus, cx);
+                    if event.click_count >= 2 {
+                        this.status_sql_anchor = 0;
+                        this.status_sql_cursor = this.status_sql_text.len();
+                        this.status_sql_selecting = false;
+                    } else {
+                        let index = this.status_sql_index_for_position(event.position);
+                        this.status_sql_anchor = index;
+                        this.status_sql_cursor = index;
+                        this.status_sql_selecting = true;
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if !this.status_sql_selecting {
+                    return;
+                }
+                let index = this.status_sql_index_for_position(event.position);
+                if index != this.status_sql_cursor {
+                    this.status_sql_cursor = index;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.status_sql_selecting {
+                        this.status_sql_selecting = false;
+                        cx.notify();
+                    }
+                }),
+            )
+            .key_context(GRID_STATUS_CONTEXT)
+            .on_action(cx.listener(|this, _: &CopyStatusSql, _window, cx| this.status_sql_copy(cx)))
+            .on_action(cx.listener(|this, _: &SelectAllStatusSql, _window, cx| {
+                this.status_sql_select_all(cx);
+            }))
+            .child(styled)
+            .into_any_element()
+    }
+
+    fn status_sql_index_for_position(&self, position: Point<Pixels>) -> usize {
+        match self.status_sql_layout.index_for_position(position) {
+            Ok(index) | Err(index) => index,
+        }
+    }
+
+    /// The selected byte range of the status SQL, clamped to the text and snapped to character
+    /// boundaries (a stale selection from a longer previous statement must not panic the layout).
+    fn status_sql_range(&self) -> (usize, usize) {
+        let len = self.status_sql_text.len();
+        let mut start = self.status_sql_anchor.min(self.status_sql_cursor).min(len);
+        let mut end = self.status_sql_anchor.max(self.status_sql_cursor).min(len);
+        while start > 0 && !self.status_sql_text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end > 0 && !self.status_sql_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        (start, end)
+    }
+
+    fn status_sql_copy(&mut self, cx: &mut Context<'_, Self>) {
+        let (start, end) = self.status_sql_range();
+        if start < end {
+            let selected = self.status_sql_text[start..end].to_string();
+            cx.write_to_clipboard(ClipboardItem::new_string(selected));
+        }
+    }
+
+    fn status_sql_select_all(&mut self, cx: &mut Context<'_, Self>) {
+        self.status_sql_anchor = 0;
+        self.status_sql_cursor = self.status_sql_text.len();
+        cx.notify();
     }
 
     pub(super) fn limit_records(&self, cx: &Context<'_, Self>) -> bool {

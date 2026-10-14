@@ -1,6 +1,5 @@
 use std::ops::Range;
 
-use super::grid::{filter_node, filter_node_mut};
 use super::*;
 
 impl GridView {
@@ -11,16 +10,6 @@ impl GridView {
         }
         if self.page_size_focus.is_focused(window) {
             return Some(GridTextField::PageSize);
-        }
-        for (path, handle) in &self.filter_value_focus {
-            if handle.is_focused(window) {
-                return Some(GridTextField::Filter(path.clone(), 0));
-            }
-        }
-        for (path, handle) in &self.filter_value2_focus {
-            if handle.is_focused(window) {
-                return Some(GridTextField::Filter(path.clone(), 1));
-            }
         }
         None
     }
@@ -47,18 +36,6 @@ impl GridView {
         match field {
             GridTextField::PageInput => self.page_input.clone(),
             GridTextField::PageSize => self.page_size_input.clone(),
-            GridTextField::Filter(path, slot) => {
-                match filter_node(&self.state.filter_draft, path) {
-                    Some(FilterNode::Condition(condition)) => {
-                        if *slot == 0 {
-                            condition.value.clone()
-                        } else {
-                            condition.value2.clone()
-                        }
-                    }
-                    _ => String::new(),
-                }
-            }
         }
     }
 
@@ -66,17 +43,6 @@ impl GridView {
         match field {
             GridTextField::PageInput => self.page_input = value,
             GridTextField::PageSize => self.page_size_input = value,
-            GridTextField::Filter(path, slot) => {
-                if let Some(FilterNode::Condition(condition)) =
-                    filter_node_mut(&mut self.state.filter_draft, path)
-                {
-                    if *slot == 0 {
-                        condition.value = value;
-                    } else {
-                        condition.value2 = value;
-                    }
-                }
-            }
         }
     }
 
@@ -91,10 +57,7 @@ impl GridView {
         matches!(field, GridTextField::PageInput | GridTextField::PageSize)
     }
 
-    fn field_changed(&mut self, field: &GridTextField, cx: &mut Context<'_, Self>) {
-        if let GridTextField::Filter(path, slot) = field {
-            self.filter_active = Some((path.clone(), *slot));
-        }
+    fn field_changed(&mut self, _field: &GridTextField, cx: &mut Context<'_, Self>) {
         self.caret_visible = true;
         cx.notify();
     }
