@@ -14,7 +14,7 @@ use gpui::{
     ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, StyledText,
     Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection, UniformListScrollHandle,
     WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowId, WindowOptions,
-    canvas, deferred, div, img, prelude::*, px, rgb, rgba, size, svg, uniform_list,
+    canvas, deferred, div, img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{
     AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, GroupEntry,
@@ -1193,6 +1193,38 @@ struct TabMenu {
     position: Point<Pixels>,
 }
 
+/// The window-space rectangles that keep an open submenu flyout (颜色, 管理分组, 转储 SQL 文件,
+/// 导入连接) alive: the row that opened it and the flyout drawn beside that row.
+///
+/// A `popup_panel` occludes what is behind it, so the moment the pointer crosses from the trigger
+/// row onto the flyout the row reports `hovered = false` — the row alone therefore cannot tell
+/// "the pointer is on my flyout" from "the pointer left the menu", and the flyout used to stay up
+/// until the whole menu was dismissed. Both rectangles together answer that question:
+/// [`SubmenuZone::stays_open`] keeps the flyout up while the pointer is inside either one — they
+/// abut, so the pair is one contiguous zone — and it closes as soon as the pointer leaves both.
+#[derive(Clone, Copy, Default)]
+struct SubmenuZone {
+    /// The trigger row, recorded by a wrapper around it (a row's own bounds are not observable).
+    row: Option<Bounds<Pixels>>,
+    /// The flyout, the trigger row's last child, so its bounds are the ones that overflow the menu.
+    flyout: Option<Bounds<Pixels>>,
+}
+
+impl SubmenuZone {
+    /// Whether `position` is inside the trigger row or the flyout.
+    fn contains(&self, position: &Point<Pixels>) -> bool {
+        self.row.is_some_and(|bounds| bounds.contains(position))
+            || self.flyout.is_some_and(|bounds| bounds.contains(position))
+    }
+
+    /// Whether the submenu stays open after its trigger row or its flyout reported `hovered`.
+    /// Either element reports `false` while the pointer is on the other one (the flyout occludes
+    /// the row), so the zone is what decides.
+    fn stays_open(&self, hovered: bool, window: &Window) -> bool {
+        hovered || self.contains(&window.mouse_position())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DbTab {
     General,
@@ -1778,14 +1810,15 @@ pub struct AppView {
     run_sql_dialog: Option<RunSqlDialog>,
     /// The database context menu's 转储 SQL 文件 flyout target `(connection, database)`, while open.
     dump_submenu: Option<(usize, usize)>,
-    /// Window-space bounds of that flyout while it is shown. The flyout overflows past the menu
+    /// The 转储 SQL 文件 flyout's zone while it is shown. The flyout overflows past the menu
     /// panel, so the panel's `on_mouse_down_out` would otherwise close the menu on a click that
-    /// actually lands on the flyout (before the item's click can complete).
-    dump_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// actually lands on the flyout (before the item's click can complete); it also keeps the
+    /// flyout up while the pointer moves between the trigger row and the flyout.
+    dump_zone: Rc<RefCell<SubmenuZone>>,
     /// Whether the 导入连接 submenu (in the New Connection dropdown and the tree's blank menu) is
-    /// open, and the window-space bounds of its flyout (mirrors `dump_flyout_bounds`).
+    /// open, and the zone of its flyout (mirrors `dump_zone`).
     import_submenu: bool,
-    import_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    import_zone: Rc<RefCell<SubmenuZone>>,
     /// The configuration-name field of the "new backup" dialog.
     backup_name_input: Option<Entity<TextInput>>,
     backup_name_focus_pending: bool,
@@ -2018,13 +2051,13 @@ pub struct AppView {
     pending_group: Option<u64>,
     /// The connection whose 管理分组 flyout is open, if any.
     move_submenu: Option<usize>,
-    /// Window-space bounds of that flyout while it is shown, so an outside click is not mistaken
-    /// for a click on the flyout (mirrors `dump_flyout_bounds`).
-    move_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// The 管理分组 flyout's zone while it is shown, so an outside click is not mistaken for a
+    /// click on the flyout (mirrors `dump_zone`).
+    move_zone: Rc<RefCell<SubmenuZone>>,
     /// The connection whose 颜色 flyout is open, if any.
     color_submenu: Option<usize>,
-    /// Window-space bounds of the 颜色 flyout while it is shown (mirrors `move_flyout_bounds`).
-    color_flyout_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// The 颜色 flyout's zone while it is shown (mirrors `move_zone`).
+    color_zone: Rc<RefCell<SubmenuZone>>,
     /// When the New Connection engine picker was opened from a group, the group the new connection
     /// should be filed under. `None` when opened from the toolbar.
     connect_menu_group: Option<u64>,
@@ -2394,9 +2427,9 @@ impl AppView {
             dump_dialog: None,
             run_sql_dialog: None,
             dump_submenu: None,
-            dump_flyout_bounds: Rc::new(RefCell::new(None)),
+            dump_zone: Rc::new(RefCell::new(SubmenuZone::default())),
             import_submenu: false,
-            import_flyout_bounds: Rc::new(RefCell::new(None)),
+            import_zone: Rc::new(RefCell::new(SubmenuZone::default())),
             backup_name_input: None,
             backup_name_focus_pending: false,
             backup_clipboard: None,
@@ -2577,9 +2610,9 @@ impl AppView {
             group_rename_focus_pending: false,
             pending_group: None,
             move_submenu: None,
-            move_flyout_bounds: Rc::new(RefCell::new(None)),
+            move_zone: Rc::new(RefCell::new(SubmenuZone::default())),
             color_submenu: None,
-            color_flyout_bounds: Rc::new(RefCell::new(None)),
+            color_zone: Rc::new(RefCell::new(SubmenuZone::default())),
             connect_menu_group: None,
             tree_press: None,
             tree_drag: None,

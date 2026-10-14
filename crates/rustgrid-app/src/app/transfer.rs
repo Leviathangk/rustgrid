@@ -706,11 +706,11 @@ impl AppView {
     pub(super) fn import_connections_submenu_item(
         &self,
         cx: &mut Context<'_, Self>,
-    ) -> Stateful<Div> {
+    ) -> impl IntoElement {
         let theme = self.theme;
         let open = self.import_submenu;
-        let bounds_slot = self.import_flyout_bounds.clone();
-        let clear_slot = self.import_flyout_bounds.clone();
+        let zone = self.import_zone.clone();
+        let bounds_slot = self.import_zone.clone();
         let mut base = div()
             .relative()
             .flex()
@@ -722,10 +722,10 @@ impl AppView {
             .text_size(px(12.5));
         if open {
             base = base.on_children_prepainted(move |bounds, _window, _cx| {
-                *bounds_slot.borrow_mut() = bounds.last().copied();
+                bounds_slot.borrow_mut().flyout = bounds.last().copied();
             });
         } else {
-            *clear_slot.borrow_mut() = None;
+            bounds_slot.borrow_mut().flyout = None;
         }
         let row = base
             .id("import-connections")
@@ -735,9 +735,15 @@ impl AppView {
                     .bg(rgb(theme.tree_hover_bg))
                     .text_color(rgb(theme.tree_selected_text))
             })
-            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                if *hovered && !this.import_submenu {
-                    this.import_submenu = true;
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                // Open on hover, and close again once the pointer leaves the row and its flyout.
+                if zone.borrow().stays_open(*hovered, window) {
+                    if !this.import_submenu {
+                        this.import_submenu = true;
+                        cx.notify();
+                    }
+                } else if this.import_submenu {
+                    this.import_submenu = false;
                     cx.notify();
                 }
             }))
@@ -760,11 +766,12 @@ impl AppView {
                     .flex_none()
                     .text_color(rgb(theme.text_muted)),
             );
-        if open {
+        let row = if open {
             row.child(self.import_connections_flyout(theme, cx))
         } else {
             row
-        }
+        };
+        self.submenu_row(row, self.import_zone.clone())
     }
 
     fn import_connections_flyout(&self, theme: Theme, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -776,11 +783,20 @@ impl AppView {
             ("import-connections-navicat", ConnectionImportKind::Navicat),
             ("import-connections-dbx", ConnectionImportKind::Dbx),
         ];
+        let zone = self.import_zone.clone();
         let mut flyout = ui::popup_panel(theme)
-            .left(px(166.0))
+            // Abut the trigger row so the pointer never crosses a gap on its way to the flyout.
+            .left(relative(1.0))
             .top(px(0.0))
             .w(px(200.0))
-            .p_0p5();
+            .p_0p5()
+            .id("import-connections-flyout")
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                if !zone.borrow().stays_open(*hovered, window) && this.import_submenu {
+                    this.import_submenu = false;
+                    cx.notify();
+                }
+            }));
         for (id, kind) in entries {
             flyout = flyout.child(
                 div()

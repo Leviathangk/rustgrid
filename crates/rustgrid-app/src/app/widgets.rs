@@ -1277,24 +1277,17 @@ impl AppView {
             .left(menu.position.x)
             .top(menu.position.y)
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                // The 转储 SQL 文件 and 管理分组 flyouts overflow past this panel, so a click on one
-                // also reads as "outside" here. Keep the menu alive when the click is on a flyout.
-                let on_flyout = this
-                    .dump_flyout_bounds
-                    .borrow()
-                    .is_some_and(|bounds| bounds.contains(&event.position))
-                    || this
-                        .move_flyout_bounds
-                        .borrow()
-                        .is_some_and(|bounds| bounds.contains(&event.position))
-                    || this
-                        .color_flyout_bounds
-                        .borrow()
-                        .is_some_and(|bounds| bounds.contains(&event.position))
-                    || this
-                        .import_flyout_bounds
-                        .borrow()
-                        .is_some_and(|bounds| bounds.contains(&event.position));
+                // The 转储 SQL 文件, 管理分组, 颜色 and 导入连接 flyouts overflow past this panel, so
+                // a click on one also reads as "outside" here. Keep the menu alive when the click is
+                // on a flyout (their zones are only populated while they are shown).
+                let on_flyout = [
+                    &this.dump_zone,
+                    &this.move_zone,
+                    &this.color_zone,
+                    &this.import_zone,
+                ]
+                .iter()
+                .any(|zone| zone.borrow().contains(&event.position));
                 if on_flyout {
                     return;
                 }
@@ -1344,6 +1337,25 @@ impl AppView {
                 cx.notify();
             }))
             .child(items)
+    }
+
+    /// Wraps a submenu trigger row so its window-space rectangle can be recorded into the
+    /// submenu's [`SubmenuZone`]. `on_children_prepainted` reports an element's *children*, so only
+    /// a wrapper whose sole child is the row yields the row's own bounds — which the flyout's hover
+    /// handling needs, because the flyout occludes the row's hover state.
+    pub(super) fn submenu_row(
+        &self,
+        row: impl IntoElement,
+        zone: Rc<RefCell<SubmenuZone>>,
+    ) -> impl IntoElement {
+        div()
+            .w_full()
+            .on_children_prepainted(move |bounds, _window, _cx| {
+                if let Some(row) = bounds.first() {
+                    zone.borrow_mut().row = Some(*row);
+                }
+            })
+            .child(row)
     }
 
     pub(super) fn context_item(
@@ -1399,11 +1411,11 @@ impl AppView {
         connection_index: usize,
         database_index: usize,
         cx: &mut Context<'_, Self>,
-    ) -> Stateful<Div> {
+    ) -> impl IntoElement {
         let theme = self.theme;
         let open = self.dump_submenu == Some((connection_index, database_index));
-        let bounds_slot = self.dump_flyout_bounds.clone();
-        let clear_slot = self.dump_flyout_bounds.clone();
+        let zone = self.dump_zone.clone();
+        let bounds_slot = self.dump_zone.clone();
         let mut base = div()
             .relative()
             .flex()
@@ -1417,11 +1429,11 @@ impl AppView {
             // The flyout panel is this row's last child; its rectangle is what an outside click
             // must be tested against (the flyout overflows the menu panel).
             base = base.on_children_prepainted(move |bounds, _window, _cx| {
-                *bounds_slot.borrow_mut() = bounds.last().copied();
+                bounds_slot.borrow_mut().flyout = bounds.last().copied();
             });
         } else {
             // Drop the stale flyout rectangle so a later outside click closes the menu normally.
-            *clear_slot.borrow_mut() = None;
+            bounds_slot.borrow_mut().flyout = None;
         }
         let row = base
             .id("db-dump-sql")
@@ -1431,11 +1443,16 @@ impl AppView {
                     .bg(rgb(theme.tree_hover_bg))
                     .text_color(rgb(theme.tree_selected_text))
             })
-            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                // Open the flyout when the row is hovered (Navicat's submenu behaviour). It stays
-                // open until the context menu closes, so moving the pointer onto it is safe.
-                if *hovered && this.dump_submenu != Some((connection_index, database_index)) {
-                    this.dump_submenu = Some((connection_index, database_index));
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                // Open the flyout when the row is hovered (Navicat's submenu behaviour), and close
+                // it again once the pointer leaves the row and the flyout beside it.
+                if zone.borrow().stays_open(*hovered, window) {
+                    if this.dump_submenu != Some((connection_index, database_index)) {
+                        this.dump_submenu = Some((connection_index, database_index));
+                        cx.notify();
+                    }
+                } else if this.dump_submenu == Some((connection_index, database_index)) {
+                    this.dump_submenu = None;
                     cx.notify();
                 }
             }))
@@ -1458,20 +1475,31 @@ impl AppView {
                     .flex_none()
                     .text_color(rgb(theme.text_muted)),
             );
-        if open {
-            row.child(dump_sql_flyout(connection_index, database_index, theme, cx))
+        let row = if open {
+            row.child(dump_sql_flyout(
+                connection_index,
+                database_index,
+                theme,
+                self.dump_zone.clone(),
+                cx,
+            ))
         } else {
             row
-        }
+        };
+        self.submenu_row(row, self.dump_zone.clone())
     }
 
     /// The connection context menu's 管理分组 row: a submenu trigger that reveals a right-hand
     /// flyout listing 移动到 (every group, nested by indentation) and 从分组内排除.
-    fn manage_group_submenu_item(&self, index: usize, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+    fn manage_group_submenu_item(
+        &self,
+        index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let theme = self.theme;
         let open = self.move_submenu == Some(index);
-        let bounds_slot = self.move_flyout_bounds.clone();
-        let clear_slot = self.move_flyout_bounds.clone();
+        let zone = self.move_zone.clone();
+        let bounds_slot = self.move_zone.clone();
         let mut base = div()
             .relative()
             .flex()
@@ -1483,10 +1511,10 @@ impl AppView {
             .text_size(px(12.5));
         if open {
             base = base.on_children_prepainted(move |bounds, _window, _cx| {
-                *bounds_slot.borrow_mut() = bounds.last().copied();
+                bounds_slot.borrow_mut().flyout = bounds.last().copied();
             });
         } else {
-            *clear_slot.borrow_mut() = None;
+            bounds_slot.borrow_mut().flyout = None;
         }
         let row = base
             .id("ctx-manage-group")
@@ -1496,11 +1524,17 @@ impl AppView {
                     .bg(rgb(theme.tree_hover_bg))
                     .text_color(rgb(theme.tree_selected_text))
             })
-            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                if *hovered && this.move_submenu != Some(index) {
-                    this.dump_submenu = None;
-                    this.color_submenu = None;
-                    this.move_submenu = Some(index);
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                // Open on hover, and close again once the pointer leaves the row and its flyout.
+                if zone.borrow().stays_open(*hovered, window) {
+                    if this.move_submenu != Some(index) {
+                        this.dump_submenu = None;
+                        this.color_submenu = None;
+                        this.move_submenu = Some(index);
+                        cx.notify();
+                    }
+                } else if this.move_submenu == Some(index) {
+                    this.move_submenu = None;
                     cx.notify();
                 }
             }))
@@ -1525,11 +1559,12 @@ impl AppView {
                     .flex_none()
                     .text_color(rgb(theme.text_muted)),
             );
-        if open {
+        let row = if open {
             row.child(self.manage_group_flyout(index, theme, cx))
         } else {
             row
-        }
+        };
+        self.submenu_row(row, self.move_zone.clone())
     }
 
     /// The 管理分组 flyout: a 移动到 header, the nested group list, and 从分组内排除 (enabled only
@@ -1540,11 +1575,20 @@ impl AppView {
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        let zone = self.move_zone.clone();
         let mut flyout = ui::popup_panel(theme)
-            .left(px(168.0))
+            // Abut the trigger row so the pointer never crosses a gap on its way to the flyout.
+            .left(relative(1.0))
             .top(px(0.0))
             .w(px(190.0))
-            .p_0p5();
+            .p_0p5()
+            .id("ctx-manage-group-flyout")
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                if !zone.borrow().stays_open(*hovered, window) && this.move_submenu == Some(index) {
+                    this.move_submenu = None;
+                    cx.notify();
+                }
+            }));
         flyout = flyout.child(
             div()
                 .px_3()
@@ -1635,11 +1679,11 @@ impl AppView {
 
     /// The connection context menu's 颜色 row: a submenu trigger opening the red/green/blue
     /// environment picker. Mirrors [`AppView::manage_group_submenu_item`].
-    fn color_submenu_item(&self, index: usize, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+    fn color_submenu_item(&self, index: usize, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let open = self.color_submenu == Some(index);
-        let bounds_slot = self.color_flyout_bounds.clone();
-        let clear_slot = self.color_flyout_bounds.clone();
+        let zone = self.color_zone.clone();
+        let bounds_slot = self.color_zone.clone();
         let mut base = div()
             .relative()
             .flex()
@@ -1650,11 +1694,13 @@ impl AppView {
             .gap_1()
             .text_size(px(12.5));
         if open {
+            // The flyout panel is this row's last child; its rectangle is what an outside click
+            // must be tested against (the flyout overflows the menu panel).
             base = base.on_children_prepainted(move |bounds, _window, _cx| {
-                *bounds_slot.borrow_mut() = bounds.last().copied();
+                bounds_slot.borrow_mut().flyout = bounds.last().copied();
             });
         } else {
-            *clear_slot.borrow_mut() = None;
+            bounds_slot.borrow_mut().flyout = None;
         }
         let row = base
             .id("ctx-connection-color")
@@ -1664,11 +1710,18 @@ impl AppView {
                     .bg(rgb(theme.tree_hover_bg))
                     .text_color(rgb(theme.tree_selected_text))
             })
-            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                if *hovered && this.color_submenu != Some(index) {
-                    this.dump_submenu = None;
-                    this.move_submenu = None;
-                    this.color_submenu = Some(index);
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                // Open on hover (Navicat's behaviour), and close again once the pointer leaves the
+                // row and the flyout beside it.
+                if zone.borrow().stays_open(*hovered, window) {
+                    if this.color_submenu != Some(index) {
+                        this.dump_submenu = None;
+                        this.move_submenu = None;
+                        this.color_submenu = Some(index);
+                        cx.notify();
+                    }
+                } else if this.color_submenu == Some(index) {
+                    this.color_submenu = None;
                     cx.notify();
                 }
             }))
@@ -1693,22 +1746,37 @@ impl AppView {
                     .flex_none()
                     .text_color(rgb(theme.text_muted)),
             );
-        if open {
+        let row = if open {
             row.child(self.color_flyout(index, theme, cx))
         } else {
             row
-        }
+        };
+        self.submenu_row(row, self.color_zone.clone())
     }
 
     /// The 颜色 flyout: one row per colour, with a coloured dot on the left and a check on the
     /// active one. Clicking the active colour clears it.
     fn color_flyout(&self, index: usize, theme: Theme, cx: &mut Context<'_, Self>) -> AnyElement {
         let current = self.connection_color(index);
+        let zone = self.color_zone.clone();
         let mut flyout = ui::popup_panel(theme)
-            .left(px(168.0))
+            // Abut the trigger row (100% of the row's padding box) so the pointer never crosses a
+            // dead gap between the row and the flyout, which would close the submenu on the way in.
+            .left(relative(1.0))
             .top(px(0.0))
             .w(px(150.0))
-            .p_0p5();
+            .p_0p5()
+            // Leaving the flyout closes the submenu unless the pointer moved onto its trigger row
+            // (which re-opens it); together with the row's own handler this keeps the flyout up
+            // exactly while the pointer is inside the row-and-flyout zone.
+            .id("ctx-connection-color-flyout")
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                if !zone.borrow().stays_open(*hovered, window) && this.color_submenu == Some(index)
+                {
+                    this.color_submenu = None;
+                    cx.notify();
+                }
+            }));
         for color in ConnectionColor::ALL {
             let selected = current == Some(color);
             flyout = flyout.child(
@@ -1772,6 +1840,7 @@ fn dump_sql_flyout(
     connection_index: usize,
     database_index: usize,
     theme: Theme,
+    zone: Rc<RefCell<SubmenuZone>>,
     cx: &mut Context<'_, AppView>,
 ) -> AnyElement {
     let modes = [
@@ -1792,10 +1861,20 @@ fn dump_sql_flyout(
         ),
     ];
     let mut flyout = ui::popup_panel(theme)
-        .left(px(168.0))
+        // Abut the trigger row so the pointer never crosses a gap on its way to the flyout.
+        .left(relative(1.0))
         .top(px(0.0))
         .w(px(150.0))
-        .p_0p5();
+        .p_0p5()
+        .id("db-dump-sql-flyout")
+        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+            if !zone.borrow().stays_open(*hovered, window)
+                && this.dump_submenu == Some((connection_index, database_index))
+            {
+                this.dump_submenu = None;
+                cx.notify();
+            }
+        }));
     for (id, label, mode) in modes {
         flyout = flyout.child(
             div()

@@ -364,10 +364,7 @@ impl AppView {
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                 // The 导入连接 flyout overflows past this panel, so a click on it also reads as
                 // "outside" here; keep the menu alive when the click is on the flyout.
-                let on_flyout = this
-                    .import_flyout_bounds
-                    .borrow()
-                    .is_some_and(|bounds| bounds.contains(&event.position));
+                let on_flyout = this.import_zone.borrow().contains(&event.position);
                 if on_flyout {
                     return;
                 }

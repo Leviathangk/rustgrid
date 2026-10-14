@@ -304,6 +304,18 @@ touching UI code.
   `absolute` + `.occlude()` + the dialog face/border/shadow, so scrolling inside a popup never
   scrolls the view underneath. Never hand-roll a `div().absolute()` popup; build it on
   `popup_panel`. gpui-kit's own `Combobox`/`Select`/`Popover` already occlude, so they are fine.
+- **A hover-opened submenu flyout closes through a two-rectangle zone, not through its trigger
+  row's hover alone.** The menu's flyouts (颜色, 管理分组, 转储 SQL 文件, 导入连接) open while the
+  pointer is on their row, but a flyout built on `popup_panel` occludes the row behind it, so the
+  row immediately reports `hovered = false` once the pointer crosses onto the flyout — a row-only
+  `on_hover(false)` therefore cannot tell that from "the pointer left the menu" (the flyout used to
+  stay up until the whole menu was dismissed). Each flyout's `SubmenuZone` keeps the flyout's rect
+  (recorded by the row's `on_children_prepainted`) *and* the row's, recorded by wrapping the row in
+  `AppView::submenu_row`, and the row **and** the flyout both close/open from
+  `SubmenuZone::stays_open`, which consults the pointer position: the flyout stays up while the
+  pointer is inside either rectangle and closes as soon as it leaves both. Keep the two flyout
+  positions (`left(relative(1.0))`, i.e. 100% of the row's padding box) abutting the row: a gap
+  between them would be inside neither rectangle, so crossing it would close the submenu.
 - **Dropdowns share one style: search on top, a check mark on the selected row.** gpui-kit's
   `Combobox` (via `ui::ComboBox`) already renders a searchable list and a right-aligned check that
   is invisible when unselected (so rows never shift). `ui::ComboBox` defaults to the kit's
