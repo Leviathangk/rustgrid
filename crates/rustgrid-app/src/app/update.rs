@@ -7,7 +7,9 @@
 //! 选项 → 关于 offers the same check plus a manual install.
 //!
 //! The asset names produced by the release workflow must contain the running platform tag (see
-//! [`PLATFORM`]), otherwise `self_update` cannot pick the right download.
+//! [`PLATFORM`]), otherwise `self_update` cannot pick the right download. The macOS archives carry an
+//! app bundle rather than a bare executable, so installing one picks between `self_update`'s two
+//! layouts — see [`configure_macos_layout`].
 
 use super::*;
 
@@ -18,6 +20,10 @@ const REPO_NAME: &str = "rustgrid";
 /// The executable's base name. `self_update` appends the platform suffix (`.exe` on Windows) and
 /// uses the result both to select the asset and to find the binary inside the archive.
 const BIN_NAME: &str = "RustGrid";
+
+/// The macOS app bundle inside the macOS archives (see `packaging/macos`).
+#[cfg(target_os = "macos")]
+const APP_BUNDLE: &str = "RustGrid.app";
 
 /// This build's version, from the workspace `Cargo.toml`. It is compared against the release tag
 /// (with its leading `v` stripped) to decide whether an update exists.
@@ -43,6 +49,38 @@ pub(super) const PLATFORM: &str = if cfg!(target_os = "windows") {
 } else {
     "linux-arm64"
 };
+
+/// macOS only: point the updater at the right member of the macOS archive.
+///
+/// macOS releases ship `RustGrid.app` (see `packaging/macos`), while the Windows/Linux archives hold
+/// the bare executable at their root. Running from inside a bundle, the **whole bundle** is swapped
+/// through `self_update`'s bundle mode, so the Info.plist and the icon are replaced together with
+/// the binary instead of going stale against it. An install that predates the bundle — a bare
+/// `RustGrid` file, i.e. anyone updating from an older release layout — has no `.app` to swap, so it
+/// extracts the executable from inside the archive instead; the update still lands, the install just
+/// stays bundle-less.
+#[cfg(target_os = "macos")]
+fn configure_macos_layout(builder: &mut self_update::backends::github::UpdateBuilder) {
+    if running_from_app_bundle() {
+        builder.bundle_path_in_archive(APP_BUNDLE);
+    } else {
+        builder.bin_path_in_archive(format!("{APP_BUNDLE}/Contents/MacOS/{BIN_NAME}"));
+    }
+}
+
+/// Whether this executable lives inside a `.app` bundle. Bundle mode resolves its install path from
+/// the nearest `.app` ancestor of `current_exe()`, so this is exactly the condition under which it
+/// can be used.
+#[cfg(target_os = "macos")]
+fn running_from_app_bundle() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    exe.ancestors().any(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    })
+}
 
 /// The state of the update check / install, driving the titlebar button and the 关于 page.
 #[derive(Clone, Default)]
@@ -102,7 +140,8 @@ fn check_latest() -> Result<Option<String>, String> {
 fn install_latest(
     progress: tokio::sync::mpsc::UnboundedSender<(u64, Option<u64>)>,
 ) -> Result<String, String> {
-    let status = self_update::backends::github::Update::configure()
+    let mut builder = self_update::backends::github::Update::configure();
+    builder
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name(BIN_NAME)
@@ -115,11 +154,13 @@ fn install_latest(
         .progress_callback(move |downloaded, total| {
             // A closed receiver (the About window / app is gone) just drops the sample.
             let _ = progress.send((downloaded, total));
-        })
-        .build()
-        .map_err(|error| error.to_string())?
-        .update()
-        .map_err(|error| error.to_string())?;
+        });
+    // Only the install path cares about the archive's shape: detection just matches the asset name.
+    #[cfg(target_os = "macos")]
+    configure_macos_layout(&mut builder);
+
+    let updater = builder.build().map_err(|error| error.to_string())?;
+    let status = updater.update().map_err(|error| error.to_string())?;
     Ok(status.version().to_string())
 }
 

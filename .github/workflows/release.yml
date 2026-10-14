@@ -16,12 +16,23 @@
 # pins the minimum OS to macOS 12 (Monterey) — without it cc-rs stamps every C dependency with the
 # runner's SDK version, which would raise the whole binary's floor.
 #
-# Each archive holds the single self-contained executable at its root (`RustGrid.exe` on Windows,
-# `RustGrid` elsewhere). Only the Windows x64 executable is UPX-compressed: UPX would break macOS
-# code signing, has no win64/arm64 support, and Linux binaries are left as shipped. The tag's
-# version must equal the workspace `Cargo.toml` version, otherwise the release job fails — the app
-# reports its own `CARGO_PKG_VERSION` to the updater, so a mismatch would make it miss or mis-install
-# updates.
+# Each archive holds the app at its root: `RustGrid.exe` on Windows, `RustGrid` on Linux, and
+# `RustGrid.app` (an app bundle: `Contents/MacOS/RustGrid` plus the Info.plist and `AppIcon.icns`
+# from `packaging/macos/`) on macOS — a raw Mach-O has no `CFBundleIconFile`, so Finder and the Dock
+# would only ever draw the generic executable icon. The in-app updater mirrors this split: on macOS
+# it swaps the whole bundle when it runs from one, and extracts the inner executable otherwise (see
+# `crates/rustgrid-app/src/app/update.rs`).
+#
+# The macOS bundle is ad-hoc signed only (no Developer ID, no notarization), so Gatekeeper still
+# shows "unidentified developer" on first launch of a quarantined download; users dismiss it with
+# right-click -> Open or `xattr -dr com.apple.quarantine RustGrid.app`. A quarantined bundle also
+# runs translocated (from a read-only randomized mount), where self_update refuses to swap it and
+# reports that the app must be moved first — that is the crate's `Error::AppTranslocated`.
+#
+# Only the Windows x64 executable is UPX-compressed: UPX would break macOS code signing, has no
+# win64/arm64 support, and Linux binaries are left as shipped. The tag's version must equal the
+# workspace `Cargo.toml` version, otherwise the release job fails — the app reports its own
+# `CARGO_PKG_VERSION` to the updater, so a mismatch would make it miss or mis-install updates.
 name: Release
 
 on:
@@ -146,8 +157,32 @@ jobs:
           $name = "RustGrid-$ver-${{ matrix.platform }}.zip"
           Compress-Archive -Path "target/${{ matrix.target }}/release/RustGrid.exe" -DestinationPath $name
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          ver="${GITHUB_REF_NAME#v}"
+          name="RustGrid-${ver}-${{ matrix.platform }}.tar.gz"
+          app="dist/RustGrid.app"
+          rm -rf dist
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/RustGrid" "$app/Contents/MacOS/RustGrid"
+          sed "s/@VERSION@/${ver}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          sh packaging/macos/make-icns.sh crates/rustgrid-app/assets/logo.png \
+            "$app/Contents/Resources/AppIcon.icns"
+          # Fail on a malformed property list or a missing icon rather than shipping a bundle
+          # macOS cannot read its name/icon/version from.
+          plutil -lint "$app/Contents/Info.plist"
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          # Ad-hoc signing keeps the bundle's seal consistent after Contents/ was assembled (arm64
+          # binaries must carry a signature to launch at all). No Developer ID exists, so this does
+          # not satisfy Gatekeeper — see the header note.
+          codesign --force --sign - "$app"
+          tar -czf "$name" -C dist RustGrid.app
+          ls -lh "$name"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         run: |
           ver="${GITHUB_REF_NAME#v}"
           name="RustGrid-${ver}-${{ matrix.platform }}.tar.gz"
