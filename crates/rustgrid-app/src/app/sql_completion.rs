@@ -169,10 +169,33 @@ impl CompletionProvider for SqlCompletionProvider {
     }
 }
 
-/// Build the completion items for a caret context, ordering columns → tables → functions →
-/// keywords and de-duplicating by `(label, detail)`. Under a selected schema a table/function is
-/// offered by its bare name, so the typed prefix matches and accepting it does not append the
-/// schema.
+/// The completion groups, in the order the popup lists them: the fields of the statement at hand,
+/// then the language's everyday words, then the user's own tables — Navicat's order, where the most
+/// used keyword leads the table names — then the rest of the language.
+const GROUP_COLUMNS: u8 = 0;
+const GROUP_COMMON_KEYWORDS: u8 = 1;
+const GROUP_TABLES: u8 = 2;
+const GROUP_KEYWORDS: u8 = 3;
+const GROUP_FUNCTIONS: u8 = 4;
+
+/// Whether a group's candidates keep the order they were built in instead of being re-sorted by
+/// length and then alphabetically: the table's own field order for columns, and the curated usage
+/// order of [`sql::COMMON_KEYWORDS`] for the everyday keywords.
+fn keeps_build_order(group: u8) -> bool {
+    matches!(group, GROUP_COLUMNS | GROUP_COMMON_KEYWORDS)
+}
+
+/// Build the completion items for a caret context, ordering columns → everyday keywords → tables →
+/// other keywords → functions and de-duplicating by `(label, detail)`.
+///
+/// A candidate matches by what the user typed anywhere in its name — exactly, as a prefix, inside
+/// it or as a loose subsequence ([`match_quality`]) — so `as` finds the table `wms_asn` and `wsn`
+/// still does. The closest matches lead; at equal quality the order above holds, which is Navicat's:
+/// the everyday keyword the caret is most likely asking for (`SELECT` for `se`) leads the user's
+/// table names, unless a field of the statement's own tables matches.
+///
+/// Under a selected schema a table/function is offered by its bare name, so the typed fragment
+/// matches and accepting it does not append the schema.
 fn build_items(
     source: &CompletionSource,
     context: &sql::SqlCompletionContext,
@@ -219,7 +242,7 @@ fn build_items(
                     } else {
                         format!("{table} [{data_type}]  {comment}")
                     };
-                    items.push((0, completion_item(name, &detail, kind)));
+                    items.push((GROUP_COLUMNS, completion_item(name, &detail, kind)));
                 }
             }
         }
@@ -253,15 +276,33 @@ fn build_items(
         tables.dedup();
         for (name, database) in tables {
             let label = display_name(&name, scope.schema.as_deref());
-            items.push((1, completion_item(&label, &database, table_kind)));
+            items.push((GROUP_TABLES, completion_item(&label, &database, table_kind)));
         }
     }
 
-    // 3. Functions: built-ins plus the connection's stored functions.
+    // 3. Keywords and 4. functions: built-ins plus the connection's stored functions. The everyday
+    // keywords are offered first, in their curated (most-typed first) order, so a shared prefix
+    // leads with the word in every statement; the rest of the language's keywords follow, and
+    // functions last.
     if qualifier.is_none() {
+        for keyword in sql::COMMON_KEYWORDS {
+            items.push((
+                GROUP_COMMON_KEYWORDS,
+                completion_item(keyword, "keyword", CompletionItemKind::KEYWORD),
+            ));
+        }
+        for keyword in sql::keywords() {
+            if sql::is_common_keyword(keyword) {
+                continue;
+            }
+            items.push((
+                GROUP_KEYWORDS,
+                completion_item(keyword, "keyword", CompletionItemKind::KEYWORD),
+            ));
+        }
         for function in sql::functions_for(scope.dialect).iter().copied() {
             items.push((
-                2,
+                GROUP_FUNCTIONS,
                 completion_item(function, "function", CompletionItemKind::FUNCTION),
             ));
         }
@@ -276,26 +317,19 @@ fn build_items(
                 }
                 let label = display_name(function, scope.schema.as_deref());
                 items.push((
-                    2,
+                    GROUP_FUNCTIONS,
                     completion_item(&label, "function", CompletionItemKind::FUNCTION),
                 ));
             }
-        }
-        // 4. Keywords.
-        for keyword in sql::keywords() {
-            items.push((
-                3,
-                completion_item(keyword, "keyword", CompletionItemKind::KEYWORD),
-            ));
         }
     }
 
     let prefix = context.prefix.as_str();
     let mut seen = std::collections::HashSet::new();
-    let mut filtered: Vec<(u8, CompletionItem)> = items
+    let mut filtered: Vec<(Match, u8, CompletionItem)> = items
         .into_iter()
-        .filter(|(_, item)| prefix.is_empty() || item.label.to_lowercase().starts_with(prefix))
-        .filter(|(_, item)| {
+        .filter_map(|(group, item)| Some((match_quality(&item.label, prefix)?, group, item)))
+        .filter(|(_, _, item)| {
             seen.insert((
                 item.label.to_lowercase(),
                 item.detail.clone().unwrap_or_default(),
@@ -303,24 +337,68 @@ fn build_items(
         })
         .collect();
     filtered.sort_by(|a, b| {
-        let a_exact = a.1.label.eq_ignore_ascii_case(prefix);
-        let b_exact = b.1.label.eq_ignore_ascii_case(prefix);
-        // An item whose label is exactly what was typed is the most likely pick, so it sorts first
-        // regardless of category (the `FROM` keyword before `FROM_BASE64`, a table before
-        // keywords).
-        b_exact
-            .cmp(&a_exact)
-            .then_with(|| a.0.cmp(&b.0))
+        // The closest match leads, and at equal quality the group above decides — the everyday
+        // keyword before the table names (Navicat's order).
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            // Within a group the candidate closest to what was typed leads: `fr` offers `FREE`
+            // before `FREEZE` before `FRAME_ROW`. Columns keep the table's own field order and the
+            // everyday keywords their curated usage order, so those two groups are left as built.
             .then_with(|| {
-                if a.0 == 0 {
+                if keeps_build_order(a.1) {
                     std::cmp::Ordering::Equal
                 } else {
-                    a.1.label.to_lowercase().cmp(&b.1.label.to_lowercase())
+                    a.2.label.chars().count().cmp(&b.2.label.chars().count())
+                }
+            })
+            .then_with(|| {
+                if keeps_build_order(a.1) {
+                    std::cmp::Ordering::Equal
+                } else {
+                    a.2.label.to_lowercase().cmp(&b.2.label.to_lowercase())
                 }
             })
     });
     filtered.truncate(64);
-    filtered.into_iter().map(|(_, item)| item).collect()
+    filtered.into_iter().map(|(_, _, item)| item).collect()
+}
+
+/// How a candidate's label matched the typed fragment, best first: the popup lists the closest
+/// matches above the loosest ones.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Match {
+    /// The label is exactly what was typed.
+    Exact,
+    /// The label starts with what was typed (`users` for `use`).
+    Prefix,
+    /// The typed fragment appears inside the label (`wms_asn` for `as`).
+    Substring,
+    /// The typed characters appear in order but apart (`wms_asn` for `wsn`).
+    Subsequence,
+}
+
+/// How `label` matches the already-lowercased `fragment`, or `None` when it does not match at all.
+/// Table and column names rarely start with what the user remembers about them (`wms_asn` for
+/// `asn`), so anything but the first fragment character may also appear inside the name.
+fn match_quality(label: &str, fragment: &str) -> Option<Match> {
+    let label = label.to_lowercase();
+    if fragment.is_empty() {
+        return Some(Match::Prefix);
+    }
+    if label == fragment {
+        return Some(Match::Exact);
+    }
+    if label.starts_with(fragment) {
+        return Some(Match::Prefix);
+    }
+    if label.contains(fragment) {
+        return Some(Match::Substring);
+    }
+    let mut label = label.chars();
+    fragment
+        .chars()
+        .all(|wanted| label.by_ref().any(|found| found == wanted))
+        .then_some(Match::Subsequence)
 }
 
 /// The completion label for a possibly schema-qualified object name. Under a selected schema the
@@ -479,5 +557,168 @@ mod tests {
         // Without a selected schema (or for an unqualified name) the name is unchanged.
         assert_eq!(display_name("dbo.users", None), "dbo.users");
         assert_eq!(display_name("users", Some("dbo")), "users");
+    }
+
+    /// A source with an empty catalog: only the built-in keywords and functions are offered, which
+    /// is all the ordering test needs.
+    fn empty_catalog_source() -> CompletionSource {
+        CompletionSource::new(Arc::new(std::sync::RwLock::new(
+            CompletionCatalog::default(),
+        )))
+        .with_scope(
+            Some(0),
+            Some("appdb".into()),
+            None,
+            false,
+            DriverDialect::Mysql,
+        )
+    }
+
+    /// A source whose catalog holds `tables`, and `columns` of `table`, in `appdb`.
+    fn catalog_source(tables: &[&str], columns: &[(&str, &[&str])]) -> CompletionSource {
+        let mut catalog = CompletionCatalog::default();
+        catalog.tables.insert(
+            (0, "appdb".to_string()),
+            tables.iter().map(|table| table.to_string()).collect(),
+        );
+        for (table, names) in columns {
+            catalog.columns.insert(
+                (0, "appdb".to_string(), table.to_string()),
+                names
+                    .iter()
+                    .map(|name| (name.to_string(), "int".to_string(), String::new()))
+                    .collect(),
+            );
+        }
+        CompletionSource::new(Arc::new(std::sync::RwLock::new(catalog))).with_scope(
+            Some(0),
+            Some("appdb".into()),
+            None,
+            false,
+            DriverDialect::Mysql,
+        )
+    }
+
+    fn labels_for(source: &CompletionSource, sql: &str) -> Vec<String> {
+        let context = crate::sql::completion_context(sql, sql.len(), DriverDialect::Mysql);
+        build_items(source, &context)
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    }
+
+    #[test]
+    fn a_table_is_found_by_any_part_of_its_name() {
+        let source = catalog_source(&["wms_asn", "users"], &[]);
+        // `as` is inside `wms_asn`, so the table is offered rather than filtered away...
+        let labels = labels_for(&source, "SELECT * FROM as");
+        assert!(labels.iter().any(|label| label == "wms_asn"), "{labels:?}");
+
+        // ...and a loose subsequence still finds it (w…s…n).
+        let labels = labels_for(&source, "SELECT * FROM wsn");
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("wms_asn"),
+            "{labels:?}"
+        );
+
+        // An identifier that shares nothing with the name is not offered.
+        let labels = labels_for(&source, "SELECT * FROM zzz");
+        assert!(!labels.iter().any(|label| label == "wms_asn"), "{labels:?}");
+    }
+
+    #[test]
+    fn the_everyday_keyword_leads_the_table_names() {
+        // Navicat's order: what the user is writing leads the objects.
+        let source = catalog_source(&["sequence", "user_search"], &[]);
+        let labels = labels_for(&source, "SELECT * FROM se");
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("SELECT"),
+            "`se` must lead with SELECT, not the `sequence` table: {labels:?}"
+        );
+        let table = labels.iter().position(|label| label == "sequence");
+        let keyword = labels.iter().position(|label| label == "SEED");
+        assert!(
+            matches!((table, keyword), (Some(table), Some(keyword)) if table < keyword),
+            "the table names follow the everyday keywords: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_field_of_the_statements_own_table_leads_the_keywords() {
+        // `WHERE orde` on an `orders` table: the column is what the caret is asking for, so the
+        // `ORDER` keyword must not take its place.
+        let source = catalog_source(&["orders"], &[("orders", &["order_no", "status"])]);
+        let labels = labels_for(&source, "SELECT * FROM orders WHERE orde");
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("order_no"),
+            "{labels:?}"
+        );
+        let column = labels.iter().position(|label| label == "order_no");
+        let keyword = labels.iter().position(|label| label == "ORDER");
+        assert!(
+            matches!((column, keyword), (Some(column), Some(keyword)) if column < keyword),
+            "the statement's own fields lead the keywords: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_keyword_outranks_a_function_family_sharing_its_prefix() {
+        let source = empty_catalog_source();
+        let sql = "SELECT * FROM fro";
+        let context = crate::sql::completion_context(sql, sql.len(), DriverDialect::Mysql);
+        let labels: Vec<String> = build_items(&source, &context)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        let from = labels.iter().position(|label| label == "FROM");
+        let base64 = labels.iter().position(|label| label == "FROM_BASE64");
+        assert!(
+            matches!(from, Some(from) if matches!(base64, Some(base64) if from < base64)),
+            "the FROM keyword must sort before FROM_BASE64: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_common_keyword_leads_the_words_that_share_its_prefix() {
+        let source = empty_catalog_source();
+        // The curated list's order decides between two everyday keywords...
+        let sql = "SELECT * se";
+        let context = crate::sql::completion_context(sql, sql.len(), DriverDialect::Mysql);
+        let labels: Vec<String> = build_items(&source, &context)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("SELECT"),
+            "`se` must lead with SELECT, not SET: {labels:?}"
+        );
+
+        // ...and between an everyday keyword and the rest of the language.
+        let sql = "SELECT * fr";
+        let context = crate::sql::completion_context(sql, sql.len(), DriverDialect::Mysql);
+        let labels: Vec<String> = build_items(&source, &context)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some("FROM"),
+            "`fr` must lead with FROM, not FRAME_ROW/FREE/FREEZE: {labels:?}"
+        );
+        // The rest of the family follows, closest first: the fewest extra characters to type.
+        let position = |label: &str| {
+            labels
+                .iter()
+                .position(|candidate| candidate == label)
+                .unwrap_or_else(|| panic!("{label} is offered for `fr`: {labels:?}"))
+        };
+        assert!(
+            position("FREE") < position("FREEZE") && position("FREEZE") < position("FRAME_ROW"),
+            "the closer match leads within the group: {labels:?}"
+        );
     }
 }

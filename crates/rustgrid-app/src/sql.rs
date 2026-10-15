@@ -97,6 +97,80 @@ pub fn keywords() -> &'static [&'static str] {
     sqlparser::keywords::ALL_KEYWORDS
 }
 
+/// The keywords SQL is actually written with, **in the order completion offers them**: the list is
+/// the priority, most-typed first, so `se` leads with `SELECT` (not `SET`) and `fr` with `FROM`
+/// (not `FRAME_ROW`/`FREE`/`FREEZE`). Keywords outside this list follow, closest match first.
+pub const COMMON_KEYWORDS: &[&str] = &[
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "AS",
+    "ON",
+    "JOIN",
+    "IN",
+    "IS",
+    "NOT",
+    "NULL",
+    "LIKE",
+    "BETWEEN",
+    "ORDER",
+    "BY",
+    "GROUP",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "DISTINCT",
+    "UNION",
+    "ALL",
+    "EXISTS",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "TABLE",
+    "ALTER",
+    "DROP",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "OUTER",
+    "FULL",
+    "CROSS",
+    "USING",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "DEFAULT",
+    "ASC",
+    "DESC",
+    "WITH",
+    "CAST",
+    "INDEX",
+    "VIEW",
+    "DATABASE",
+    "USE",
+];
+
+/// Whether `keyword` is one of [`COMMON_KEYWORDS`]. The comparison ignores case: `sqlparser`'s
+/// list is upper-case while dialects differ in how they spell the same word.
+pub fn is_common_keyword(keyword: &str) -> bool {
+    COMMON_KEYWORDS
+        .iter()
+        .any(|common| common.eq_ignore_ascii_case(keyword))
+}
+
 /// If `sql` is a simple `SELECT ... FROM <one table>` with no joins, return the table's
 /// optional schema and name. Used to decide whether a query result can be edited in place.
 pub fn infer_single_table_for(
