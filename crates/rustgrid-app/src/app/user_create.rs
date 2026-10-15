@@ -1841,6 +1841,33 @@ impl AppView {
         window.remove_window();
     }
 
+    /// Close the account window because the connection it edits was disconnected (see
+    /// `AppView::disconnect`). A window whose account can no longer be read or saved would only
+    /// mislead, so it goes away with its connection.
+    pub(super) fn close_create_user_for_connection(
+        &mut self,
+        connection_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let belongs = self
+            .create_user_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.connection_index == connection_index);
+        if !belongs {
+            return;
+        }
+        // Removing a window fires gpui's window-closed observers, and this runs from inside an
+        // `AppView` update, so the removal happens on the next effect flush
+        // (see `close_connection_window`, which has the same constraint).
+        let handle = self.create_user_window.take();
+        self.cancel_create_user(cx);
+        if let Some(handle) = handle {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+        }
+    }
+
     /// Close the window and drop its entities.
     pub(super) fn cancel_create_user(&mut self, cx: &mut Context<'_, Self>) {
         self.create_user_dialog = None;

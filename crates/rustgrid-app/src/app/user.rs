@@ -816,6 +816,31 @@ impl AppView {
         cx.notify();
     }
 
+    /// Close the 对象权限 window because the connection whose grants it edits was disconnected (see
+    /// `AppView::disconnect`): every action in it would fail against the closed connection.
+    pub(super) fn close_privilege_manager_for_connection(
+        &mut self,
+        connection: &Arc<dyn Connection>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let belongs = self
+            .object_privileges
+            .as_ref()
+            .is_some_and(|manager| Arc::ptr_eq(manager.read(cx).connection(), connection));
+        if !belongs {
+            return;
+        }
+        // Deferred for the same reason as `close_connection_window`: removing a window fires
+        // gpui's window-closed observers, which re-enter `AppView` from inside its own update.
+        let handle = self.object_privileges_window.take();
+        self.close_privilege_manager(cx);
+        if let Some(handle) = handle {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+        }
+    }
+
     /// The Users status shown in the window's bottom bar.
     pub(super) fn render_users_status(&self) -> AnyElement {
         let theme = self.theme;

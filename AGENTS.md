@@ -548,6 +548,8 @@ shadcn chrome described above. Implemented today:
     run). Save is one path for both flows; changing the username/host emits `RENAME USER` before
     the rest of the script so the account keeps its grants and role edges, and a successful save
     reloads the account in place. Passwords are prompted on connect, never stored in a profile.
+    Disconnecting a connection closes the account window and the 对象权限 window with it (and drops
+    the Users list), so no window is left editing an account over a dead connection.
 11. Stored routines (functions and procedures): the `Functions` main tab lists a database's
     routines from the connection tree's selection, with the toolbar 设计函数 / 新建函数 /
     删除函数 / 运行函数 (and a matching right-click menu in the object list and the connection

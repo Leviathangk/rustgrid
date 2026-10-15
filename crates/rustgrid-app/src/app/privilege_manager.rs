@@ -131,6 +131,12 @@ impl PrivilegeManager {
         self.focus.clone()
     }
 
+    /// The connection whose grants the manager edits, so a disconnect can close this window with
+    /// it.
+    pub(super) fn connection(&self) -> &Arc<dyn Connection> {
+        &self.connection
+    }
+
     /// Load the database list for the object tree and the account list for the account panel.
     pub(super) fn load(&mut self, cx: &mut Context<'_, Self>) {
         let connection = self.connection.clone();

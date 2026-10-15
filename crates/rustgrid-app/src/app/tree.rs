@@ -507,9 +507,22 @@ impl AppView {
             self.object_pane = None;
         }
 
+        // The Users tab lists one connection's accounts; a closed connection's list is dead data,
+        // so forget it and let the next render re-read it for whatever is selected now.
+        if self.users_connection == Some(index) {
+            self.users_connection = None;
+            self.users = Loadable::Idle;
+            self.selected_user = None;
+            self.info_user = Loadable::Idle;
+        }
+
         if let Some(connection) = connection {
             self.close_connection_grids(&connection, cx);
             self.close_connection_designs(&connection, cx);
+            // The Users feature's windows are bound to this connection: close them with it rather
+            // than leave a window whose account list and grants can no longer be read or saved.
+            self.close_create_user_for_connection(index, cx);
+            self.close_privilege_manager_for_connection(&connection, cx);
             let runtime = self.runtime.clone();
             cx.spawn(async move |_this, _cx| {
                 let _ = runtime.spawn(async move { connection.close().await }).await;
