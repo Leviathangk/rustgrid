@@ -670,6 +670,24 @@ impl GridFieldLayout {
         next.insert(to.min(next.len()), name);
         self.order = next;
     }
+
+    /// Flip every field's visibility (反选). The inversion never hides the last visible field: when
+    /// every field was shown the first one stays, so a grid can never end up with no columns.
+    pub fn invert_visibility(&mut self) {
+        if self.order.len() <= 1 {
+            return;
+        }
+        let mut inverted: BTreeSet<String> = self
+            .order
+            .iter()
+            .filter(|name| !self.hidden.contains(*name))
+            .cloned()
+            .collect();
+        if inverted.len() >= self.order.len() {
+            inverted.remove(&self.order[0]);
+        }
+        self.hidden = inverted;
+    }
 }
 
 /// Apply `order` (the display position each element's *source* index belongs at) to `values` in
@@ -1200,5 +1218,24 @@ mod tests {
         let moved = layout.order.clone();
         layout.move_field(&moved, 2, 0);
         assert_eq!(layout.order, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn inverting_a_field_layout_never_hides_every_field() {
+        let table = columns(&["a", "b", "c"]);
+        let mut layout = GridFieldLayout::default();
+        layout.order = layout.resolved_order(&table);
+        // Everything was shown, so the inversion hides all but the first field.
+        layout.invert_visibility();
+        assert_eq!(layout.hidden, hidden(&["b", "c"]));
+        // Inverting back shows exactly the field the first inversion kept.
+        layout.invert_visibility();
+        assert_eq!(layout.hidden, hidden(&["a"]));
+        // A single-field table has nothing to invert.
+        let single = columns(&["a"]);
+        let mut only = GridFieldLayout::default();
+        only.order = only.resolved_order(&single);
+        only.invert_visibility();
+        assert!(only.hidden.is_empty());
     }
 }

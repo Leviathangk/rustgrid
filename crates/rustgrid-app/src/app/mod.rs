@@ -1454,8 +1454,9 @@ struct GridView {
     /// The popup's search text and its shared field.
     field_filter_search: String,
     field_filter_search_input: Entity<TextInput>,
-    /// The working display order while the popup is open (every field, hidden ones included).
-    field_filter_order: Vec<String>,
+    /// The popup's working layout (display order — every field, hidden ones included — plus the
+    /// hidden set) while it is open. Edits land here, never on the grid, until 确定 installs them.
+    field_filter_draft: GridFieldLayout,
     /// The field being dragged to a new position, with the pointer y captured on mouse-down.
     field_filter_drag: Option<FieldFilterDrag>,
     /// Where the 字段筛选 trigger sits (window space), so its popup can be anchored under it.
@@ -1802,7 +1803,10 @@ const FIELD_FILTER_POPUP_WIDTH: f32 = 252.0;
 /// The height of one row of the 字段筛选 popup's field list.
 const FIELD_FILTER_ROW_HEIGHT: f32 = 24.0;
 /// The tallest the 字段筛选 popup's field list grows before it scrolls.
-const FIELD_FILTER_LIST_MAX_HEIGHT: f32 = 460.0;
+const FIELD_FILTER_LIST_MAX_HEIGHT: f32 = 620.0;
+/// The popup's fixed chrome (header, search box, footer and the borders between them), reserved
+/// out of the pane height when sizing the field list.
+const FIELD_FILTER_CHROME_HEIGHT: f32 = 124.0;
 
 pub struct AppView {
     registry: Arc<DriverRegistry>,

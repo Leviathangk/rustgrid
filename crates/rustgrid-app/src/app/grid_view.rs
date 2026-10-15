@@ -56,7 +56,7 @@ impl GridView {
             field_filter_focus_pending: false,
             field_filter_search: String::new(),
             field_filter_search_input,
-            field_filter_order: Vec::new(),
+            field_filter_draft: GridFieldLayout::default(),
             field_filter_drag: None,
             field_filter_anchor: Rc::new(RefCell::new(Point::default())),
             grid_pane_bounds: Rc::new(RefCell::new(Bounds::default())),
@@ -745,12 +745,15 @@ impl Render for GridView {
             root = root.child(self.render_field_filter_backdrop(cx));
             root = root.child(self.render_field_filter_popup(cx));
         }
-        // The pane's own window-space bounds, so the popup can be positioned inside it. The toolbar
-        // is the pane's first child, so its rectangle is the pane's top-left corner and width.
+        // The pane's own window-space bounds, so the popup can be positioned inside it. The root's
+        // children are the toolbar plus the body/controls, so the pane rectangle is their *union* —
+        // the toolbar alone would report the pane's width but only its own 28px height, which used
+        // to pin the popup's field list to its minimum height.
         let pane_bounds = self.grid_pane_bounds.clone();
         root = root.on_children_prepainted(move |bounds, _window, _cx| {
-            if let Some(first) = bounds.first() {
-                *pane_bounds.borrow_mut() = *first;
+            let union = bounds.iter().copied().reduce(|a, b| a.union(&b));
+            if let Some(union) = union {
+                *pane_bounds.borrow_mut() = union;
             }
         });
         // Surface the load/error state the fetch paths set; without this a slow or failed

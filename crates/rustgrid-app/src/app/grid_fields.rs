@@ -1,11 +1,12 @@
 //! The grid's 字段筛选 popup: an anchored, non-modal panel under the toolbar item that shows, hides
 //! and re-orders the table's fields.
 //!
-//! The layout is applied by projecting `GridState::columns` (and their widths) out of the table's
-//! natural column order — the rows keep the engine's order and are read through
-//! `GridState::source_col` — so a change re-projects metadata only: no refetch, no row copy. The
-//! result is remembered per connection/database/table, so a table reopens with the field set the
-//! user last chose.
+//! Edits land on a draft layout held by [`GridView::field_filter_draft`]; 确定 installs it on the
+//! grid, 取消/an Escape/any click outside discards it. Applying projects `GridState::columns` (and
+//! their widths) out of the table's natural column order — the rows keep the engine's order and are
+//! read through `GridState::source_col` — so it re-projects metadata only: no refetch, no row copy.
+//! The result is remembered per connection/database/table, so a table reopens with the field set
+//! the user last chose.
 
 use super::*;
 
@@ -51,14 +52,14 @@ fn field_matches(name: &str, comment: &str, needle: &str) -> bool {
 }
 
 impl GridView {
-    /// The item's colour: the accent once fields are hidden or re-ordered, and the muted chrome
-    /// colour while the grid shows the table's natural field set — so the single icon reads as
-    /// "set" or "not set" at a glance.
+    /// The item's colour: the brand accent once fields are hidden or re-ordered, and the plain
+    /// chrome text colour while the grid shows the table's natural field set — so the single icon
+    /// is colourless by default and only picks up a colour once a layout is set.
     pub(super) fn field_filter_color(&self) -> u32 {
         if self.state.field_layout_configured() {
-            self.theme.primary
+            self.theme.brand
         } else {
-            self.theme.icon_views
+            self.theme.text
         }
     }
 
@@ -71,9 +72,10 @@ impl GridView {
         if self.state.sql.is_some() || self.state.all_columns.is_empty() {
             return;
         }
-        self.field_filter_order = self
-            .state
-            .field_layout
+        // The popup works on a draft copy: nothing reaches the grid until 确定.
+        self.field_filter_draft = self.state.field_layout.clone();
+        self.field_filter_draft.order = self
+            .field_filter_draft
             .resolved_order(&self.state.all_columns);
         self.field_filter_search.clear();
         let input = self.field_filter_search_input.clone();
@@ -84,7 +86,7 @@ impl GridView {
         cx.notify();
     }
 
-    /// Dismiss the popup without changing the applied layout (every edit already applied live).
+    /// Dismiss the popup, discarding its draft (the applied layout keeps whatever 确定 last set).
     pub(super) fn close_field_filter(&mut self, cx: &mut Context<'_, Self>) {
         self.field_filter_open = false;
         self.field_filter_drag = None;
@@ -92,44 +94,60 @@ impl GridView {
         cx.notify();
     }
 
-    /// How many of the fields are currently visible.
+    /// 确定: install the popup's draft layout on the grid, remember it per table and close.
+    pub(super) fn field_filter_apply(&mut self, cx: &mut Context<'_, Self>) {
+        self.state.field_layout = self.field_filter_draft.clone();
+        self.state.reproject_fields();
+        self.field_filter_draft = self.state.field_layout.clone();
+        self.persist_field_layout(cx);
+        self.close_field_filter(cx);
+    }
+
+    /// How many of the fields the draft shows.
     fn field_filter_visible_count(&self) -> usize {
-        self.field_filter_order
+        self.field_filter_draft
+            .order
             .iter()
-            .filter(|name| !self.state.field_layout.hidden.contains(*name))
+            .filter(|name| !self.field_filter_draft.hidden.contains(*name))
             .count()
     }
 
-    /// Hide or show one field. The last visible field can never be hidden.
+    /// Hide or show one field in the draft. The last visible field can never be hidden.
     pub(super) fn field_filter_toggle(&mut self, name: String, cx: &mut Context<'_, Self>) {
-        let hide = !self.state.field_layout.hidden.contains(&name);
+        let hide = !self.field_filter_draft.hidden.contains(&name);
         if hide && self.field_filter_visible_count() <= 1 {
             return;
         }
-        self.state.field_layout.set_hidden(&name, hide);
-        self.apply_field_filter(cx);
+        self.field_filter_draft.set_hidden(&name, hide);
+        cx.notify();
     }
 
-    /// 重置: put the fields back the way the engine returns them — the table's own order with every
-    /// field shown.
+    /// 重置: put the draft back the way the engine returns the fields — the table's own order with
+    /// every field shown.
     pub(super) fn field_filter_reset(&mut self, cx: &mut Context<'_, Self>) {
-        self.field_filter_order = self
+        self.field_filter_draft.order = self
             .state
             .all_columns
             .iter()
             .map(|column| column.name.clone())
             .collect();
-        self.state.field_layout.hidden.clear();
-        self.apply_field_filter(cx);
+        self.field_filter_draft.hidden.clear();
+        cx.notify();
     }
 
-    /// 全选: show every field (keeping the current order).
+    /// 全选: show every field in the draft (keeping the current order).
     pub(super) fn field_filter_show_all(&mut self, cx: &mut Context<'_, Self>) {
-        if self.state.field_layout.hidden.is_empty() {
+        if self.field_filter_draft.hidden.is_empty() {
             return;
         }
-        self.state.field_layout.hidden.clear();
-        self.apply_field_filter(cx);
+        self.field_filter_draft.hidden.clear();
+        cx.notify();
+    }
+
+    /// 反选: flip every field's visibility in the draft, never hiding the last visible one.
+    pub(super) fn field_filter_invert(&mut self, cx: &mut Context<'_, Self>) {
+        self.field_filter_draft.invert_visibility();
+        cx.notify();
     }
 
     /// Start dragging a field row's handle.
@@ -147,8 +165,9 @@ impl GridView {
         cx.notify();
     }
 
-    /// Reorder the field being dragged as the pointer crosses row boundaries. The list has a fixed
-    /// row height, so the target position is where the pointer has travelled from the press.
+    /// Reorder the field being dragged as the pointer crosses row boundaries — in the draft only;
+    /// the grid picks the new order up when 确定 is pressed. The list has a fixed row height, so the
+    /// target position is where the pointer has travelled from the press.
     pub(super) fn field_filter_drag_move(
         &mut self,
         event: &MouseMoveEvent,
@@ -162,7 +181,7 @@ impl GridView {
             cx.notify();
             return;
         }
-        let len = self.field_filter_order.len();
+        let len = self.field_filter_draft.order.len();
         if len == 0 {
             return;
         }
@@ -172,44 +191,21 @@ impl GridView {
         if target == drag.current {
             return;
         }
-        self.state
-            .field_layout
-            .move_field(&self.field_filter_order, drag.current, target);
-        self.field_filter_order = self.state.field_layout.order.clone();
+        let order = self.field_filter_draft.order.clone();
+        self.field_filter_draft
+            .move_field(&order, drag.current, target);
         self.field_filter_drag = Some(FieldFilterDrag {
             current: target,
             ..drag
         });
-        // The reorder is applied live so the grid tracks the drag; the settings write waits for the
-        // drop, so dragging across several rows does not rewrite the file once per row.
-        self.apply_field_filter_working(cx);
+        cx.notify();
     }
 
-    /// Finish a drag: remember the new order, or discard a drag that never moved.
+    /// Finish a drag.
     pub(super) fn field_filter_drag_end(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(drag) = self.field_filter_drag.take() else {
-            return;
-        };
-        if drag.current != drag.from {
-            self.persist_field_layout(cx);
+        if self.field_filter_drag.take().is_some() {
+            cx.notify();
         }
-        cx.notify();
-    }
-
-    /// Apply the popup's working order/hidden set to the grid in place and remember it per table.
-    fn apply_field_filter(&mut self, cx: &mut Context<'_, Self>) {
-        self.apply_field_filter_working(cx);
-        self.persist_field_layout(cx);
-    }
-
-    /// Re-project the grid from the working order without writing settings.
-    fn apply_field_filter_working(&mut self, cx: &mut Context<'_, Self>) {
-        self.state.field_layout.order = self.field_filter_order.clone();
-        self.state.reproject_fields();
-        // `reproject_fields` resolves the order against the table's columns, so a field added to the
-        // table since the layout was saved shows up in the popup instead of disappearing.
-        self.field_filter_order = self.state.field_layout.order.clone();
-        cx.notify();
     }
 
     /// Write the applied layout to settings so the next open of this table restores it.
@@ -271,12 +267,12 @@ impl GridView {
         let top = GRID_TOOLBAR_HEIGHT + 2.0;
         // Keep the whole panel inside the pane — the header, search box and footer take roughly
         // this much — while letting a tall pane show as many fields as fit.
-        let list_max_height =
-            (f32::from(pane.size.height) - top - 110.0).clamp(140.0, FIELD_FILTER_LIST_MAX_HEIGHT);
+        let list_max_height = (f32::from(pane.size.height) - top - FIELD_FILTER_CHROME_HEIGHT)
+            .clamp(140.0, FIELD_FILTER_LIST_MAX_HEIGHT);
 
         let columns = self.state.all_columns.clone();
-        let order = self.field_filter_order.clone();
-        let hidden = self.state.field_layout.hidden.clone();
+        let order = self.field_filter_draft.order.clone();
+        let hidden = self.field_filter_draft.hidden.clone();
         let needle = self.field_filter_search.trim().to_lowercase();
         let dragged = self.field_filter_drag.map(|drag| drag.current);
         let weak = self.self_weak.clone();
@@ -424,23 +420,56 @@ impl GridView {
             .flex()
             .flex_row()
             .items_center()
-            .justify_end()
+            .justify_between()
             .gap_1()
             .px_2()
             .py_1()
             .flex_none()
             .border_t_1()
             .border_color(rgb(theme.border))
-            .child(self.field_filter_action(
-                "field-filter-reset",
-                t!("grid.field_filter_reset").to_string(),
-                cx.listener(|this, _event, _window, cx| this.field_filter_reset(cx)),
-            ))
-            .child(self.field_filter_action(
-                "field-filter-select-all",
-                t!("grid.field_filter_select_all").to_string(),
-                cx.listener(|this, _event, _window, cx| this.field_filter_show_all(cx)),
-            ));
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(self.field_filter_action(
+                        "field-filter-reset",
+                        t!("grid.field_filter_reset").to_string(),
+                        cx.listener(|this, _event, _window, cx| this.field_filter_reset(cx)),
+                    ))
+                    .child(self.field_filter_action(
+                        "field-filter-select-all",
+                        t!("grid.field_filter_select_all").to_string(),
+                        cx.listener(|this, _event, _window, cx| this.field_filter_show_all(cx)),
+                    ))
+                    .child(self.field_filter_action(
+                        "field-filter-invert",
+                        t!("grid.field_filter_invert").to_string(),
+                        cx.listener(|this, _event, _window, cx| this.field_filter_invert(cx)),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(ui::popup_button(
+                        "field-filter-cancel",
+                        t!("form.cancel").to_string(),
+                        false,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.close_field_filter(cx)),
+                    ))
+                    .child(ui::popup_button(
+                        "field-filter-ok",
+                        t!("form.ok").to_string(),
+                        true,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.field_filter_apply(cx)),
+                    )),
+            );
 
         let panel = ui::popup_panel(theme)
             .id("field-filter-popup")

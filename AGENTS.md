@@ -297,17 +297,24 @@ touching UI code.
   `.occlude()` backdrop (`FIELD_FILTER_BACKDROP_PRIORITY`, whose `on_mouse_down` dismisses) and the
   `ui::popup_panel` on top (`FIELD_FILTER_POPUP_PRIORITY`), positioned from the toolbar item's
   window rect (recorded by the `on_children_prepainted` wrapper in `render_grid_toolbar`) minus the
-  pane's (`GridView::grid_pane_bounds`). Because the backdrop covers the pane *including* the
+  pane's (`GridView::grid_pane_bounds`, the **union** of the root's children rects — taking only the
+  first child gave the toolbar's width but its 28px height, which pinned the list to its minimum
+  height and made the popup look short). Because the backdrop covers the pane *including* the
   trigger, a second press on the trigger dismisses rather than re-opens — the trigger keeps a plain
   `on_click`. Rows reorder by dragging only their `drag_handle.svg` handle (never the row, which
   would fight the visibility toggle) using the pointer's travel over fixed-height rows. The toolbar
   item carries the **label 筛选 (the same `grid.filter` string as the WHERE panel's button) with one
-  icon**, and says everything about its state through colour: `theme.primary` once a field is hidden
-  or re-ordered (`GridState::field_layout_configured`), the muted `theme.icon_views` while the grid
-  shows the table's natural field set, and no background tint of its own (the open popup is the
-  feedback). Its footer is just 重置 (`field_filter_reset`: table order + every field shown) and 全选
-  (`field_filter_show_all`: every field shown). The popup title stays 字段筛选, which is what tells it
-  apart from the WHERE button.
+  icon**, and says everything about its state through colour: the brand accent (`theme.brand`) once a
+  field is hidden or re-ordered (`GridState::field_layout_configured`), the plain chrome text colour
+  (`theme.text`) while the grid shows the table's natural field set — so the icon is colourless until
+  a layout is set — and no background tint of its own (the open popup is the feedback). Every edit
+  (visibility, 重置, 全选, a drag) lands on a **draft** (`GridView::field_filter_draft`), not on the
+  grid: 确定 (`field_filter_apply`) installs it, remembers it per table and closes, while 取消, Escape
+  or a click outside just discards it, so the grid only ever shows an applied layout. The footer is
+  重置 (`field_filter_reset`: table order + every field shown), 全选 (`field_filter_show_all`: every
+  field shown) and 反选 (`field_filter_invert` → `GridFieldLayout::invert_visibility`, which never
+  hides the last visible field) on the left, 取消 / 确定 on the right. The popup title
+  stays 字段筛选, which is what tells it apart from the WHERE button.
 - **A field layout never touches the row data.** `GridState` keeps the engine's columns in
   `all_columns`, the display order in `column_order` (display position -> natural index, visible
   fields first), and `visible_columns`; `columns`/`column_widths` are the *projection* of that order
@@ -602,13 +609,14 @@ shadcn chrome described above. Implemented today:
 16. Grid field presentation (`app/grid_fields.rs` + `app/options.rs` + `session.rs::GridFieldLayout`):
     the table grid's toolbar ends with the 字段筛选 item (labelled 筛选, after 导出). It opens a popup
     panel under the button (not a child window) listing every field with a visibility check box, a
-    search box, the field's comment beside its name, and 重置 / 全选; the last visible field cannot be
-    hidden and a drag on a row's handle re-orders the fields. The layout (order + hidden set) is
-    applied immediately and remembered per connection/database/table in `settings.json`
+    search box, the field's comment beside its name, and 重置 / 全选 / 反选; the last visible field
+    cannot be hidden (the same rule 反选 honors) and a drag on a row's handle re-orders the fields.
+    The edits stay on a draft and only 确定 applies them (取消 / click-away discards); the applied
+    layout (order + hidden set) is then remembered per connection/database/table in `settings.json`
     (`grid_field_layouts`), so the table reopens with the same field set (a field added to the table
     afterwards is appended rather than lost). One icon serves both states, told apart by colour —
-    grey (`theme.icon_views`) for the table's own field set, `theme.primary` once a field is hidden or
-    re-ordered — and the popup's counter reads `visible/total`. The 数据 page of the Options window
+    the plain `theme.text` for the table's own field set, the accent `theme.brand` once a field is
+    hidden or re-ordered — and the popup's counter reads `visible/total`. The 数据 page of the Options window
     (`OptionsSection::Data`, between 编辑器 and 关于) holds the one grid display preference,
     表格内展示字段备注 (`AppSettings::grid_show_comments`, off by default), which paints each column's
     comment under its name in the grid header.

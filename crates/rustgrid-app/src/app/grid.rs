@@ -294,9 +294,10 @@ impl GridView {
                         grid.state.install_page(page.columns, page.rows, widths);
                         grid.state.total_rows = page.total_rows;
                         if grid.field_filter_open {
-                            grid.field_filter_order = grid
-                                .state
-                                .field_layout
+                            // Keep the in-progress draft, but fold in any field the table has
+                            // gained since the popup opened so it is still listable.
+                            grid.field_filter_draft.order = grid
+                                .field_filter_draft
                                 .resolved_order(&grid.state.all_columns);
                         }
                         grid.state.error = None;

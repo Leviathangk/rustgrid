@@ -87,9 +87,9 @@ impl GridView {
                 // The 字段筛选 item toggles the popup; while the popup is open its click-away
                 // backdrop covers this button too, so a second press dismisses rather than
                 // re-opening. The wrapper only reports the button's position, which anchors the
-                // popup directly under it. One icon serves both states: the colour marks a
-                // configured field set (a hidden or re-ordered field) and stays the muted chrome
-                // colour otherwise.
+                // popup directly under it. One icon serves both states: it is colourless while the
+                // grid shows the table's natural field set and gains the brand colour once a field
+                // is hidden or re-ordered (i.e. once 确定 applied a layout).
                 let anchor = self.field_filter_anchor.clone();
                 let configured = self.state.field_layout_configured();
                 div()
