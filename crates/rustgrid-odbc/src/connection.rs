@@ -42,6 +42,14 @@ impl OdbcConnection {
         {
             engine = detect_engine(&name);
         }
+        // A driver that reports no DBMS name at all still usually names its engine in its own
+        // description ("MySQL ODBC 8.0 Unicode Driver"), which is what the form picked, so fall
+        // back to that before giving up on the dialect.
+        if engine.is_empty()
+            && let Some(driver) = config.options.get("odbc.driver")
+        {
+            engine = detect_engine(driver);
+        }
         Self {
             handle: Mutex::new(ConnHandle(handle)),
             engine,
