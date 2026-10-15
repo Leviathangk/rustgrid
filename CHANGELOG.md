@@ -13,7 +13,7 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 
 ### Added
 
-- **Changelog** in 选项 → 关于: once a check has found a newer release, the panel shows that
+- **Changelog** in Options → About: once a check has found a newer release, the panel shows that
   version's notes — what installing would bring, in the UI's own language — and stays off the page
   entirely while this build already is the newest release. The repository keeps its changelog in
   English and Chinese, and the release job publishes each version's section as the release notes
@@ -23,9 +23,9 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
   `JOIN` / `INTO` / `UPDATE` / `TABLE`, and the everyday keywords (in their most-typed order) come
   before the rest of the language. `Tab` accepts the highlighted candidate, and still indents when
   no popup is open.
-- The query editor's run keystrokes are configurable in 选项 → **快捷键**: click a field, press the
-  combination, and OK applies it (Default restores Navicat's Ctrl+R / Ctrl+Shift+R). Ctrl+R runs the
-  whole editor, Ctrl+Shift+R only the selection, and Ctrl+Enter stays an alias for running.
+- The query editor's run keystrokes are configurable in Options → **Shortcuts**: click a field, press
+  the combination, and OK applies it (Default restores Navicat's Ctrl+R / Ctrl+Shift+R). Ctrl+R runs
+  the whole editor, Ctrl+Shift+R only the selection, and Ctrl+Enter stays an alias for running.
 
 ### Fixed
 

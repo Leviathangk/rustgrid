@@ -442,4 +442,31 @@ First release.
             );
         }
     }
+
+    #[test]
+    fn the_english_changelog_is_written_in_english() {
+        // Each changelog stays in its own language, so its UI labels read the way that language's
+        // `locales/*.yml` has them — 选项 → 关于 is "Options → About" here. The header's language
+        // switcher and the name of the other language are the only exceptions.
+        const ALLOWED: &str = "简体中文";
+        let offenders = CHANGELOG_EN
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.replace(ALLOWED, "").chars().any(is_cjk))
+            .map(|(index, line)| format!("{}: {}", index + 1, line.trim()))
+            .collect::<Vec<_>>();
+        assert!(
+            offenders.is_empty(),
+            "CHANGELOG.md must be English throughout — quote UI labels from locales/en.yml:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// Han characters, CJK punctuation and full-width forms, i.e. text that is not English.
+    fn is_cjk(c: char) -> bool {
+        matches!(
+            c as u32,
+            0x3000..=0x303F | 0x3040..=0x30FF | 0x4E00..=0x9FFF | 0xFF00..=0xFFEF
+        )
+    }
 }

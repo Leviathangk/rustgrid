@@ -208,7 +208,14 @@ not a later refactor.
 - **Every version change is recorded in both changelogs — no exceptions.** The moment the workspace
   version in the root `Cargo.toml` changes, the same commit writes that version's section into
   **both** `CHANGELOG.md` and `CHANGELOG_zh.md` (newest first, Keep-a-Changelog headings — Added /
-  Changed / Fixed, translated in the Chinese file) describing what the version brings. Those two
+  Changed / Fixed, translated in the Chinese file) describing what the version brings. **Each file
+  stays in its own language**: `CHANGELOG.md` is English throughout — a UI label is quoted in its
+  English form as `locales/en.yml` has it (选项 → 关于 is written `Options → About`) — and
+  `CHANGELOG_zh.md` is Chinese throughout. The only exceptions are the language-switcher line, the
+  name of the other language, engine/product names, identifiers, file paths and code spans. Never
+  paste a Chinese label into the English file (or an English label into the Chinese one) just because
+  that is what the UI, an issue or a commit message called it; a test
+  (`crates/rustgrid-app/src/app/changelog.rs`) fails on CJK anywhere else in `CHANGELOG.md`. Those two
   files are the single source of the version's own notes: the release job publishes the matching
   sections as the GitHub release notes (split by the `<!-- rustgrid:en -->` / `<!-- rustgrid:zh -->`
   markers) and fails when either is missing, alongside its tag-vs-`Cargo.toml` check; 选项 → 关于
