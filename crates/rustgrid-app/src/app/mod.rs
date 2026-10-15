@@ -2133,8 +2133,9 @@ pub struct AppView {
     /// The newest release's version, once a check has found one.
     update_version: Option<String>,
     /// The newer release's notes (its GitHub release body), which the check reads along with the
-    /// version. Only the release can carry them: the running build's embedded changelog predates it.
-    /// Drives the changelog at the foot of 关于.
+    /// version. Only the release can carry them: the running build has no entry for a version newer
+    /// than itself. Drives the changelog at the foot of 关于, which appears exactly while this is
+    /// `Some` (see `update::changelog_panel`).
     update_notes: Option<String>,
     /// Live download progress for the in-flight install: `(bytes_downloaded, total_bytes)`.
     /// `total_bytes` is `None` until the server's `Content-Length` is known. Cleared when the

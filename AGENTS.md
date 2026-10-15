@@ -212,15 +212,14 @@ not a later refactor.
   files are the single source of the version's own notes: the release job publishes the matching
   sections as the GitHub release notes (split by the `<!-- rustgrid:en -->` / `<!-- rustgrid:zh -->`
   markers) and fails when either is missing, alongside its tag-vs-`Cargo.toml` check; 选项 → 关于
-  renders the running version's section from the files embedded at compile time and, once a check
-  finds a newer release, that release's section from its notes, in the UI's own language
-  (`crates/rustgrid-app/src/app/changelog.rs`). A release tagged before the job copied its section
-  into the body carries only GitHub's auto-generated `**Full Changelog**: …` line, so the check
-  reads that version's section out of the repository's own changelogs instead and rebuilds the
-  marked body (`update.rs::fetch_repo_file` → `changelog::notes_body`): 关于 always describes what
-  installing would bring, never the running build's entry. A version bump with no changelog entry
-  therefore fails the app's own test (`changelog.rs`) as well as the release job — write the entry
-  with the bump, never after it.
+  shows the newer release's section — never this build's own — while a check has found one, in the
+  UI's own language, and leaves the 更新日志 section off the page entirely while this build is the
+  newest release (`crates/rustgrid-app/src/app/changelog.rs`). A release tagged before the job
+  copied its section into the body carries only GitHub's auto-generated `**Full Changelog**: …`
+  line, so the check reads that version's section out of the repository's own changelogs instead and
+  rebuilds the marked body (`update.rs::fetch_repo_file` → `changelog::notes_body`). A version bump
+  with no changelog entry therefore fails the app's own test (`changelog.rs`) as well as the release
+  job — write the entry with the bump, never after it.
 
 ## Extensibility requirements (design for these from the start)
 

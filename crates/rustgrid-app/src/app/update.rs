@@ -151,7 +151,13 @@ fn check_latest() -> Result<Option<(String, Option<String>)>, String> {
 /// instead of the running version's entry. A failed fetch falls back to the body as it is: a
 /// hand-written release still says something worth reading.
 fn release_notes(release: &self_update::Release) -> Option<String> {
-    let body = release.body().map(str::to_string);
+    // A release with no description at all is no better than one whose description is not a
+    // changelog, so it takes the same route; and with nothing to show the panel stays hidden (see
+    // `options_about_body`) rather than reaching for the version this build already is.
+    let body = release
+        .body()
+        .filter(|body| !body.trim().is_empty())
+        .map(str::to_string);
     if body.as_deref().is_some_and(changelog::is_release_notes) {
         return body;
     }
@@ -566,16 +572,28 @@ impl AppView {
                 self.download_progress_element(theme),
                 |element, progress| element.child(progress),
             )
-            .child(self.changelog_panel(theme))
+            // The newer release's changelog — and only while there is one to describe (see
+            // `changelog_panel`).
+            .when_some(self.changelog_panel(theme), |element, panel| {
+                element.child(panel)
+            })
     }
 
-    /// The changelog at the foot of 关于: what the running version brought, or — while an update is
-    /// available — what the newer release documents (see [`changelog`]). It follows the UI language,
-    /// so a 简体中文界面 shows the Chinese changelog.
-    fn changelog_panel(&self, theme: Theme) -> AnyElement {
-        let mut notes = div().flex().flex_col().gap_2().w_full();
-        for note in changelog::notes(self.language, APP_VERSION, self.update_notes.as_deref()) {
-            notes = notes.child(match note {
+    /// The changelog at the foot of 关于: what installing the newer release would bring, in the UI's
+    /// own language (so a 简体中文界面 shows the Chinese changelog).
+    ///
+    /// `None` — the section stays off the page — when there is nothing to describe: this build is
+    /// the newest release, or the newer release documents itself in neither place (see
+    /// [`changelog`]). It never falls back to this build's own entry, which would label the running
+    /// version as the update.
+    fn changelog_panel(&self, theme: Theme) -> Option<AnyElement> {
+        let notes = changelog::notes(self.language, self.update_notes.as_deref());
+        if notes.is_empty() {
+            return None;
+        }
+        let mut lines = div().flex().flex_col().gap_2().w_full();
+        for note in notes {
+            lines = lines.child(match note {
                 changelog::NoteLine::Version { version, date } => div()
                     .flex()
                     .flex_row()
@@ -632,37 +650,39 @@ impl AppView {
                     .into_any_element(),
             });
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .flex_1()
-            .min_h(px(0.0))
-            .w_full()
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("about.changelog").to_string()),
-            )
-            .child(
-                div()
-                    .id("about-changelog")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .w_full()
-                    .p_3()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .bg(rgb(theme.dialog_face))
-                    .overflow_y_scroll()
-                    .child(notes),
-            )
-            .into_any_element()
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!("about.changelog").to_string()),
+                )
+                .child(
+                    div()
+                        .id("about-changelog")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .w_full()
+                        .p_3()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.dialog_face))
+                        .overflow_y_scroll()
+                        .child(lines),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The live download progress bar and byte caption for the 关于 page. `None` unless an install
