@@ -378,31 +378,28 @@ First release.
     fn the_repository_changelogs_feed_the_notes_of_another_version() {
         // The live half of the fallback: the contents API really answers with the file text (the
         // media type and the User-Agent GitHub demands are not something a stub can check), and what
-        // comes back documents a version. Compared against the file in this checkout, which
-        // `the_changelogs_document_the_running_version` requires to carry the running version; the
-        // body is then driven through `notes` as the newer release's would be.
+        // comes back can be turned into one release's notes, read back in the UI's own language —
+        // which is what `notes` does with a fetched body. The version is taken from the fetched file
+        // rather than from this build, which may carry a bump the repository has not seen yet.
         let english = update::fetch_repo_file("CHANGELOG.md").expect("CHANGELOG.md is fetchable");
         let chinese =
             update::fetch_repo_file("CHANGELOG_zh.md").expect("CHANGELOG_zh.md is fetchable");
-        assert_eq!(
-            version_section(&english, APP_VERSION).as_deref(),
-            version_section(CHANGELOG_EN, APP_VERSION).as_deref(),
-        );
-        assert_eq!(
-            version_section(&chinese, APP_VERSION).as_deref(),
-            version_section(CHANGELOG_ZH, APP_VERSION).as_deref(),
-        );
+        let newest = version_blocks(&english)
+            .first()
+            .and_then(|block| version_heading(block))
+            .map(|(version, _)| version)
+            .expect("the English changelog documents a version");
 
-        let body = notes_body(APP_VERSION, &english, &chinese)
-            .unwrap_or_else(|| panic!("both changelogs must document {APP_VERSION}"));
+        let body = notes_body(&newest, &english, &chinese)
+            .unwrap_or_else(|| panic!("both changelogs must document {newest}"));
         for language in [LanguageSetting::En, LanguageSetting::ZhCn] {
             let notes = notes(language, Some(&body));
             assert!(
                 matches!(
                     notes.first(),
-                    Some(NoteLine::Version { version, .. }) if version == APP_VERSION
+                    Some(NoteLine::Version { version, .. }) if version.as_str() == newest
                 ),
-                "{language:?}: the fetched body must document {APP_VERSION}"
+                "{language:?}: the fetched body must document {newest}"
             );
         }
     }
