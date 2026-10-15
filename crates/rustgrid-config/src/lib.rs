@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 10;
+const SETTINGS_VERSION: u32 = 11;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -171,10 +171,23 @@ struct SettingsFile {
     /// Whether the grid header shows each column's data type between its name and comment.
     #[serde(default)]
     grid_show_types: bool,
+    /// The keystroke that runs the whole query editor (Navicat's 运行), as a gpui keystroke string.
+    #[serde(default = "default_run_shortcut")]
+    run_shortcut: String,
+    /// The keystroke that runs only the selected SQL (Navicat's 运行已选).
+    #[serde(default = "default_run_selected_shortcut")]
+    run_selected_shortcut: String,
 }
 
 /// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
 pub const DEFAULT_EDITOR_FONT_SIZE: u32 = 14;
+
+/// The default keystroke for 运行 (run the whole editor): Navicat's Ctrl+R. gpui's `secondary`
+/// modifier is Ctrl off macOS and ⌘ on it, so the same default reads correctly on both.
+pub const DEFAULT_RUN_SHORTCUT: &str = "secondary-r";
+
+/// The default keystroke for 运行已选 (run the selection): Navicat's Ctrl+Shift+R.
+pub const DEFAULT_RUN_SELECTED_SHORTCUT: &str = "secondary-shift-r";
 
 fn default_editor_font_size() -> u32 {
     DEFAULT_EDITOR_FONT_SIZE
@@ -182,6 +195,14 @@ fn default_editor_font_size() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_run_shortcut() -> String {
+    DEFAULT_RUN_SHORTCUT.to_string()
+}
+
+fn default_run_selected_shortcut() -> String {
+    DEFAULT_RUN_SELECTED_SHORTCUT.to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +232,11 @@ pub struct AppSettings {
     pub grid_show_comments: bool,
     /// Whether the grid header shows each column's data type between its name and comment.
     pub grid_show_types: bool,
+    /// The keystroke that runs the whole query editor (Navicat's 运行). A gpui keystroke string
+    /// (`"secondary-r"`), so it is editable from the Options window's 快捷键 page.
+    pub run_shortcut: String,
+    /// The keystroke that runs only the selected SQL (Navicat's 运行已选).
+    pub run_selected_shortcut: String,
 }
 
 impl Default for AppSettings {
@@ -231,6 +257,8 @@ impl Default for AppSettings {
             grid_field_layouts: BTreeMap::new(),
             grid_show_comments: false,
             grid_show_types: false,
+            run_shortcut: default_run_shortcut(),
+            run_selected_shortcut: default_run_selected_shortcut(),
         }
     }
 }
@@ -430,6 +458,8 @@ impl ConfigStore {
             grid_field_layouts: file.grid_field_layouts,
             grid_show_comments: file.grid_show_comments,
             grid_show_types: file.grid_show_types,
+            run_shortcut: file.run_shortcut,
+            run_selected_shortcut: file.run_selected_shortcut,
         })
     }
 
@@ -452,6 +482,8 @@ impl ConfigStore {
             grid_field_layouts: settings.grid_field_layouts.clone(),
             grid_show_comments: settings.grid_show_comments,
             grid_show_types: settings.grid_show_types,
+            run_shortcut: settings.run_shortcut.clone(),
+            run_selected_shortcut: settings.run_selected_shortcut.clone(),
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

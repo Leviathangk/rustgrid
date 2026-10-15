@@ -1,10 +1,11 @@
 //! The Options window (设置): a separate OS window, opened from the titlebar's settings button.
 //!
 //! It hosts the 常规 page (the language selector — the app theme is still chosen from the titlebar
-//! dropdown) and the 编辑器 page, which configures the SQL editor: a live preview, font family,
-//! font size, syntax theme and the line-number / word-wrap toggles. Editor edits are staged and
-//! only applied on 确定, so 取消 discards them. Like the Export/Import/User windows, `AppView`
-//! owns the state and this module renders it; `AppView::sync_dialog` is not involved.
+//! dropdown), the 编辑器 page, which configures the SQL editor (a live preview, font family, font
+//! size, syntax theme and the line-number / word-wrap toggles), the 快捷键 page (the query editor's
+//! 运行 / 运行已选 keystrokes), the 数据 page (grid display) and 关于. Every edit is staged and only
+//! applied on 确定, so 取消 discards them. Like the Export/Import/User windows, `AppView` owns the
+//! state and this module renders it; `AppView::sync_dialog` is not involved.
 
 use super::*;
 use gpui_kit::component::switch::Switch;
@@ -200,6 +201,9 @@ impl AppView {
         self.options_editor_word_wrap = self.editor_word_wrap;
         self.options_grid_show_comments = self.grid_show_comments;
         self.options_grid_show_types = self.grid_show_types;
+        self.options_run_shortcut = self.run_shortcut.clone();
+        self.options_run_selected_shortcut = self.run_selected_shortcut.clone();
+        self.recording_shortcut = None;
         self.ensure_language_combo(cx);
         self.ensure_editor_combos(cx);
         let weak = cx.weak_entity();
@@ -357,6 +361,17 @@ impl AppView {
         self.editor_word_wrap = self.options_editor_word_wrap;
         self.grid_show_comments = self.options_grid_show_comments;
         self.grid_show_types = self.options_grid_show_types;
+        self.run_shortcut = self.options_run_shortcut.clone();
+        self.run_selected_shortcut = self.options_run_selected_shortcut.clone();
+        self.recording_shortcut = None;
+        // Re-bind the editor's 运行 / 运行已选 keystrokes: the old ones (if the user changed them)
+        // are shadowed by a `NoAction` so they stop firing.
+        self.bound_run_shortcuts = bind_run_shortcuts(
+            cx,
+            &self.run_shortcut,
+            &self.run_selected_shortcut,
+            &self.bound_run_shortcuts,
+        );
         let language = self.options_language;
         self.set_language(language, cx);
         self.persist_settings();
@@ -516,6 +531,19 @@ impl AppView {
             )
             .child(
                 self.options_category_row(
+                    "options-shortcuts",
+                    t!("options.shortcuts").to_string(),
+                    self.options_section == OptionsSection::Shortcuts,
+                    true,
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_section = OptionsSection::Shortcuts;
+                    this.recording_shortcut = None;
+                    cx.notify();
+                })),
+            )
+            .child(
+                self.options_category_row(
                     "options-data",
                     t!("options.data").to_string(),
                     self.options_section == OptionsSection::Data,
@@ -523,6 +551,7 @@ impl AppView {
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_section = OptionsSection::Data;
+                    this.recording_shortcut = None;
                     cx.notify();
                 })),
             )
@@ -544,8 +573,134 @@ impl AppView {
         match self.options_section {
             OptionsSection::General => self.options_general_body(cx).into_any_element(),
             OptionsSection::Editor => self.options_editor_body(cx).into_any_element(),
+            OptionsSection::Shortcuts => self.options_shortcuts_body(cx).into_any_element(),
             OptionsSection::Data => self.options_data_body(cx).into_any_element(),
             OptionsSection::About => self.options_about_body(cx).into_any_element(),
+        }
+    }
+
+    /// The 快捷键 page: the query editor's 运行 / 运行已选 keystrokes (Navicat's Ctrl+R /
+    /// Ctrl+Shift+R by default). Clicking a field starts recording, and the next keystroke becomes
+    /// the shortcut; 默认 restores the built-in pair.
+    fn options_shortcuts_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .child(t!("options.shortcuts").to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("options.shortcuts.hint").to_string()),
+            )
+            .child(self.shortcut_row(OptionsShortcut::Run, t!("query.run").to_string(), theme, cx))
+            .child(self.shortcut_row(
+                OptionsShortcut::RunSelected,
+                t!("query.run_selected").to_string(),
+                theme,
+                cx,
+            ))
+    }
+
+    /// One 快捷键 row: the action's label and the field that captures its keystroke.
+    fn shortcut_row(
+        &self,
+        kind: OptionsShortcut,
+        label: String,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let recording = self.recording_shortcut == Some(kind);
+        let focus = match kind {
+            OptionsShortcut::Run => self.options_run_focus.clone(),
+            OptionsShortcut::RunSelected => self.options_run_selected_focus.clone(),
+        };
+        let value = match kind {
+            OptionsShortcut::Run => self.options_run_shortcut.clone(),
+            OptionsShortcut::RunSelected => self.options_run_selected_shortcut.clone(),
+        };
+        let capture_focus = focus.clone();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .h(px(28.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(match kind {
+                        OptionsShortcut::Run => "options-run-shortcut",
+                        OptionsShortcut::RunSelected => "options-run-selected-shortcut",
+                    }))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(160.0))
+                    .h(px(24.0))
+                    .flex_none()
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgb(if recording { theme.brand } else { theme.border }))
+                    .bg(rgb(theme.input_bg))
+                    .text_size(px(12.0))
+                    .text_color(rgb(if recording {
+                        theme.text_muted
+                    } else {
+                        theme.text
+                    }))
+                    .cursor_pointer()
+                    .hover(move |style| style.border_color(rgb(theme.brand)))
+                    .track_focus(&focus)
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        this.recording_shortcut = Some(kind);
+                        window.focus(&capture_focus, cx);
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                        if this.recording_shortcut != Some(kind) {
+                            return;
+                        }
+                        // Escape cancels the capture, and must not reach the window's own
+                        // "Escape closes the Options window" handler.
+                        if event.keystroke.key == "escape" {
+                            this.recording_shortcut = None;
+                        } else if let Some(shortcut) = shortcut_from_keystroke(&event.keystroke) {
+                            this.set_shortcut(kind, shortcut);
+                            this.recording_shortcut = None;
+                        }
+                        // A bare modifier (or an unusable key) keeps the capture open; either way
+                        // the keystroke is ours while the row is recording.
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .child(if recording {
+                        t!("options.shortcuts.press").to_string()
+                    } else {
+                        shortcut_label(&value)
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// Stage a recorded keystroke on the 快捷键 page (it is applied on OK).
+    fn set_shortcut(&mut self, kind: OptionsShortcut, shortcut: String) {
+        match kind {
+            OptionsShortcut::Run => self.options_run_shortcut = shortcut,
+            OptionsShortcut::RunSelected => self.options_run_selected_shortcut = shortcut,
         }
     }
 
@@ -733,6 +888,8 @@ impl AppView {
                     this.options_editor_word_wrap = true;
                     this.options_grid_show_comments = false;
                     this.options_grid_show_types = false;
+                    this.options_run_shortcut = DEFAULT_RUN_SHORTCUT.to_string();
+                    this.options_run_selected_shortcut = DEFAULT_RUN_SELECTED_SHORTCUT.to_string();
                     cx.notify();
                 }),
             ))
@@ -757,4 +914,40 @@ impl AppView {
             )
             .text_color(rgb(theme.text))
     }
+}
+
+/// The keystroke string for a captured key, or `None` when it cannot stand as a shortcut on its
+/// own: a bare modifier, or a plain character that the user would only ever type into the editor
+/// (a function key is accepted without modifiers; everything else needs Ctrl/Alt/⌘).
+fn shortcut_from_keystroke(keystroke: &Keystroke) -> Option<String> {
+    let key = keystroke.key.as_str();
+    if matches!(key, "control" | "shift" | "alt" | "platform" | "function") {
+        return None;
+    }
+    let modifiers = keystroke.modifiers;
+    let mut parts: Vec<&str> = Vec::new();
+    if modifiers.control {
+        parts.push("ctrl");
+    }
+    if modifiers.alt {
+        parts.push("alt");
+    }
+    if modifiers.shift {
+        parts.push("shift");
+    }
+    if modifiers.platform {
+        parts.push("cmd");
+    }
+    if parts.is_empty() && !is_function_key(key) {
+        return None;
+    }
+    parts.push(key);
+    Some(parts.join("-"))
+}
+
+/// Whether `key` is one of the F1..F24 function keys.
+fn is_function_key(key: &str) -> bool {
+    key.strip_prefix('f')
+        .and_then(|number| number.parse::<u8>().ok())
+        .is_some_and(|number| (1..=24).contains(&number))
 }

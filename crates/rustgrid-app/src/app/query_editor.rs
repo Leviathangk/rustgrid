@@ -177,10 +177,26 @@ impl AppView {
                     this.begin_save_query(window, cx);
                 }
             }))
+            .on_action(cx.listener(move |this, _: &RunQuery, _window, cx| {
+                // 运行: the whole editor, regardless of the selection.
+                this.activate_query(index, cx);
+                this.run_query(false, cx);
+            }))
             .on_action(cx.listener(move |this, _: &RunSelectedQuery, _window, cx| {
                 // Bring the tab that owns this editor to the front, then run its selection.
                 this.activate_query(index, cx);
                 this.run_query(true, cx);
+            }))
+            .on_action(cx.listener(move |this, _: &AcceptCompletion, window, cx| {
+                // Tab confirms the completion popup exactly like Enter. The kit has no Tab
+                // handling of its own, so when no popup is open the keystroke is left to
+                // propagate and the editor's `IndentInline` binding runs instead.
+                let editor = this.query_editors.get(index).cloned().flatten();
+                if let Some(editor) = editor
+                    && editor.update(cx, |editor, cx| editor.accept_completion(window, cx))
+                {
+                    cx.stop_propagation();
+                }
             }))
             .on_action(
                 cx.listener(move |this, _: &SelectAllOccurrences, _window, cx| {

@@ -9,16 +9,18 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight, HighlightStyle,
-    ImageSource, KeyBinding, KeyDownEvent, ListHorizontalSizingBehavior, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource, ScrollDelta,
-    ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, StyledText,
-    Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection, UniformListScrollHandle,
-    WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle, WindowId, WindowOptions,
-    canvas, deferred, div, img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
+    ImageSource, KeyBinding, KeyDownEvent, Keystroke, ListHorizontalSizingBehavior, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, Pixels, Point, Render,
+    Resource, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
+    StyledText, Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection,
+    UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
+    WindowId, WindowOptions, canvas, deferred, div, img, prelude::*, px, relative, rgb, rgba, size,
+    svg, uniform_list,
 };
 use rustgrid_config::{
-    AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,
-    LanguageSetting, ThemeSetting,
+    AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE,
+    DEFAULT_RUN_SELECTED_SHORTCUT, DEFAULT_RUN_SHORTCUT, FieldLayout, GroupEntry, LanguageSetting,
+    ThemeSetting,
 };
 use rustgrid_core::{
     BackupObjectKind, CellValue, Connection, ConnectionConfig, ConnectionFieldChoice,
@@ -52,6 +54,7 @@ use crate::theme::{ConnectionColor, Theme};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::calendar::CalendarState;
 use gpui_kit::component::input::ShowCompletions;
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::time_field::{TimeField, TimeFieldState, TimePrecision};
 
@@ -94,14 +97,22 @@ gpui::actions!(
     ]
 );
 
-// Query-editor actions. The editor's own undo/redo bindings handle Ctrl+Z; `RunSelectedQuery`
-// is dispatched from the editor's right-click menu and Ctrl+Enter, and `SaveQuery` from Ctrl+S.
+// Query-editor actions. The editor's own undo/redo bindings handle Ctrl+Z; `RunQuery` and
+// `RunSelectedQuery` are the 运行 / 运行已选 pair (their keystrokes come from the settings, Navicat's
+// Ctrl+R / Ctrl+Shift+R by default), and `SaveQuery` from Ctrl+S. `AcceptCompletion` lets Tab
+// confirm the completion popup exactly like Enter does (the kit only handles Enter).
 // `SelectAllOccurrences` (Ctrl+Shift+L) puts a cursor on every occurrence of the current word or
 // selection, using gpui-kit 0.7.3's `InputState::add_selection`; `ShowCompletions` (Ctrl+Space) is
 // the kit's editor action for requesting the completion menu on demand.
 gpui::actions!(
     queryeditor,
-    [RunSelectedQuery, SaveQuery, SelectAllOccurrences]
+    [
+        RunQuery,
+        RunSelectedQuery,
+        SaveQuery,
+        AcceptCompletion,
+        SelectAllOccurrences
+    ]
 );
 
 // The grid status bar's selectable SQL line. `Root` binds `ctrl-c` (copy) and `ctrl-a`
@@ -128,6 +139,10 @@ const GRID_STATUS_CONTEXT: &str = "GridStatus";
 
 /// Key context applied to the SQL query editor, so Ctrl+Z / Ctrl+Y / Ctrl+S reach it.
 const QUERY_EDITOR_CONTEXT: &str = "QueryEditor";
+
+/// The editor's own `Input` context as seen from the query editor, for key bindings that must tie
+/// with the kit's text-input bindings and outrank them (later bindings win at equal depth).
+const QUERY_EDITOR_INPUT_CONTEXT: &str = "QueryEditor > Input";
 
 /// The stable settings key for the Queries tab's remembered list layout.
 pub(super) const VIEW_PAGE_QUERIES: &str = "queries";
@@ -1785,9 +1800,20 @@ const NO_LIMIT_PAGE_SIZE: u64 = 200_000;
 enum OptionsSection {
     General,
     Editor,
+    /// The 快捷键 page: the query editor's run shortcuts (Navicat's Ctrl+R / Ctrl+Shift+R).
+    Shortcuts,
     /// The 数据 page: grid display preferences (the field-comment toggle).
     Data,
     About,
+}
+
+/// One row of the Options window's 快捷键 page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OptionsShortcut {
+    /// 运行: run the whole query editor.
+    Run,
+    /// 运行已选: run only the selected SQL.
+    RunSelected,
 }
 
 /// The height of one extra grid-header line: a field's type or comment painted under its name.
@@ -2023,6 +2049,15 @@ pub struct AppView {
     /// The remembered field layout (字段筛选) per table grid, keyed by connection/database/table,
     /// persisted in settings.
     grid_field_layouts: BTreeMap<String, FieldLayout>,
+    /// The keystroke that runs the whole query editor (Navicat's 运行), a gpui keystroke string
+    /// bound in the editor's key context. Editable from the Options window's 快捷键 page.
+    run_shortcut: String,
+    /// The keystroke that runs only the selected SQL (Navicat's 运行已选).
+    run_selected_shortcut: String,
+    /// The keystrokes the run shortcuts were last bound with, so a change in the Options window can
+    /// unbind the old ones (the keymap has no removal API: a later `NoAction` for a keystroke
+    /// shadows the binding this app registered for it earlier).
+    bound_run_shortcuts: Vec<String>,
     object_search: String,
     object_search_input: Entity<TextInput>,
     /// Scroll position of the backup/restore object picker, so it can show a vertical scrollbar.
@@ -2079,6 +2114,14 @@ pub struct AppView {
     options_grid_show_comments: bool,
     /// The staged 数据 page toggle (grid field types), applied on OK.
     options_grid_show_types: bool,
+    /// The staged 快捷键 page keystrokes, applied on OK.
+    options_run_shortcut: String,
+    options_run_selected_shortcut: String,
+    /// The 快捷键 row that is waiting for a keystroke, if any.
+    recording_shortcut: Option<OptionsShortcut>,
+    /// Focus targets for the 快捷键 page's two capture fields, so clicking one starts recording.
+    options_run_focus: FocusHandle,
+    options_run_selected_focus: FocusHandle,
     editor_font_combo: Option<Entity<ComboBox>>,
     editor_size_combo: Option<Entity<ComboBox>>,
     /// The OS window hosting the Options dialog, if open.
@@ -2340,6 +2383,53 @@ mod widgets;
 
 use info_pane::{InfoPane, SidebarHost};
 
+/// Bind the query editor's 运行 / 运行已选 shortcuts (Navicat's Ctrl+R / Ctrl+Shift+R by default) in
+/// the editor's key context, and return the keystrokes now bound.
+///
+/// `previous` holds the keystrokes a former call bound. gpui's keymap has no removal API, so each
+/// one is shadowed by a `NoAction` binding first: a later binding outranks the earlier one
+/// registered for the same keystroke, so the app's stale binding (and nothing else) stops firing.
+/// The new bindings come after those, so re-picking a keystroke works. A keystroke that does not
+/// parse is skipped rather than panicking, and an empty list means "this shortcut is unbound".
+fn bind_run_shortcuts(
+    cx: &mut App,
+    run: &str,
+    run_selected: &str,
+    previous: &[String],
+) -> Vec<String> {
+    let mut bindings = Vec::new();
+    for keystroke in previous {
+        if Keystroke::parse(keystroke).is_ok() {
+            bindings.push(KeyBinding::new(
+                keystroke,
+                NoAction {},
+                Some(QUERY_EDITOR_CONTEXT),
+            ));
+        }
+    }
+    let mut bound = Vec::new();
+    if Keystroke::parse(run).is_ok() {
+        bindings.push(KeyBinding::new(run, RunQuery, Some(QUERY_EDITOR_CONTEXT)));
+        bound.push(run.to_string());
+    }
+    if Keystroke::parse(run_selected).is_ok() {
+        bindings.push(KeyBinding::new(
+            run_selected,
+            RunSelectedQuery,
+            Some(QUERY_EDITOR_CONTEXT),
+        ));
+        bound.push(run_selected.to_string());
+    }
+    cx.bind_keys(bindings);
+    bound
+}
+
+/// A configured shortcut, formatted for display: `"secondary-r"` reads `Ctrl+R` on Windows/Linux
+/// and `⌘R` on macOS (the `secondary` modifier is platform-dependent).
+fn shortcut_label(shortcut: &str) -> String {
+    Keystroke::parse(shortcut).map_or_else(|_| shortcut.to_string(), |key| Kbd::format(&key))
+}
+
 /// The language to start in on a first launch: a Chinese system locale maps to `zh-CN`, every
 /// other locale to English.
 fn detect_system_language() -> LanguageSetting {
@@ -2448,7 +2538,21 @@ impl AppView {
                 SelectAllOccurrences,
                 Some(QUERY_EDITOR_CONTEXT),
             ),
+            // Tab confirms the highlighted completion item exactly like Enter does. gpui-kit only
+            // handles Enter (its completion menu checks `input::Enter`), so this binding ties with
+            // the kit's `Tab -> IndentInline` at the same context depth and, being registered
+            // later, wins; the handler lets the keystroke fall through to the kit when no menu is
+            // open (see `AppView::render_query_editor`).
+            KeyBinding::new("tab", AcceptCompletion, Some(QUERY_EDITOR_INPUT_CONTEXT)),
         ]);
+        // The 运行 / 运行已选 shortcuts come from the settings (Navicat's Ctrl+R / Ctrl+Shift+R by
+        // default) and are re-bound when the Options window applies a change.
+        let bound_run_shortcuts = bind_run_shortcuts(
+            cx,
+            &settings.run_shortcut,
+            &settings.run_selected_shortcut,
+            &[],
+        );
         let app = cx.weak_entity();
         let app_entity = cx.entity();
         let tree_pane = cx.new(|cx| TreePane::new(app.clone(), cx));
@@ -2615,6 +2719,9 @@ impl AppView {
             grid_show_comments: settings.grid_show_comments,
             grid_show_types: settings.grid_show_types,
             grid_field_layouts: settings.grid_field_layouts.clone(),
+            run_shortcut: settings.run_shortcut.clone(),
+            run_selected_shortcut: settings.run_selected_shortcut.clone(),
+            bound_run_shortcuts,
             object_search: String::new(),
             backup_objects_scroll: ScrollHandle::new(),
             object_search_input: {
@@ -2667,6 +2774,11 @@ impl AppView {
             options_editor_word_wrap: settings.editor_word_wrap,
             options_grid_show_comments: settings.grid_show_comments,
             options_grid_show_types: settings.grid_show_types,
+            options_run_shortcut: settings.run_shortcut.clone(),
+            options_run_selected_shortcut: settings.run_selected_shortcut.clone(),
+            recording_shortcut: None,
+            options_run_focus: cx.focus_handle(),
+            options_run_selected_focus: cx.focus_handle(),
             editor_font_combo: None,
             editor_size_combo: None,
             options_window: None,
@@ -2956,6 +3068,8 @@ impl AppView {
             grid_field_layouts: self.grid_field_layouts.clone(),
             grid_show_comments: self.grid_show_comments,
             grid_show_types: self.grid_show_types,
+            run_shortcut: self.run_shortcut.clone(),
+            run_selected_shortcut: self.run_selected_shortcut.clone(),
         }) {
             // Preferences failing to persist is not worth a modal; note it in the log line only.
             let _ = error;

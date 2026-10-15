@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{
-    Copy, Cut, Editor, EditorState, InputEvent, Paste, Redo, SelectAll, Undo,
+    Copy, Cut, Editor, EditorState, Enter, InputEvent, Paste, Redo, SelectAll, Undo,
 };
 use gpui_kit::component::native_menu::NativeMenu;
 
@@ -182,6 +182,30 @@ impl SqlEditor {
         });
     }
 
+    /// Confirm the highlighted completion item — exactly what Enter does — so the editor can bind
+    /// Tab to it as well. Returns whether the editor consumed the keystroke: `false` means neither
+    /// the completion nor the code-action menu was open, so the caller must let it fall through to
+    /// the editor's own Tab binding (indent).
+    pub(crate) fn accept_completion(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self.state.clone() else {
+            return false;
+        };
+        state.update(cx, |state, cx| {
+            state.route_overlay_action(
+                Box::new(Enter {
+                    secondary: false,
+                    shift: false,
+                }),
+                window,
+                cx,
+            )
+        })
+    }
+
     /// Replace the whole document. Before the first render (and whenever no window is at hand) the
     /// text is queued and applied on the next `flush`.
     pub(crate) fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -286,19 +310,20 @@ impl Render for SqlEditor {
 /// `Editor::context_menu` replaces the built-in menu, so the standard items are rebuilt here from
 /// the same input actions the built-in menu uses.
 fn sql_editor_context_menu(menu: NativeMenu) -> NativeMenu {
-    menu.menu(
-        t!("query.run_selected").to_string(),
-        Box::new(crate::app::RunSelectedQuery),
-    )
-    .separator()
-    .menu(t!("query.undo").to_string(), Box::new(Undo))
-    .menu(t!("query.redo").to_string(), Box::new(Redo))
-    .separator()
-    .menu(t!("query.cut").to_string(), Box::new(Cut))
-    .menu(t!("query.copy").to_string(), Box::new(Copy))
-    .menu(t!("query.paste").to_string(), Box::new(Paste))
-    .separator()
-    .menu(t!("query.select_all").to_string(), Box::new(SelectAll))
+    menu.menu(t!("query.run").to_string(), Box::new(crate::app::RunQuery))
+        .menu(
+            t!("query.run_selected").to_string(),
+            Box::new(crate::app::RunSelectedQuery),
+        )
+        .separator()
+        .menu(t!("query.undo").to_string(), Box::new(Undo))
+        .menu(t!("query.redo").to_string(), Box::new(Redo))
+        .separator()
+        .menu(t!("query.cut").to_string(), Box::new(Cut))
+        .menu(t!("query.copy").to_string(), Box::new(Copy))
+        .menu(t!("query.paste").to_string(), Box::new(Paste))
+        .separator()
+        .menu(t!("query.select_all").to_string(), Box::new(SelectAll))
 }
 
 /// The ASCII identifier-ish run around `cursor` (letters, digits and `_`), as a byte range, or

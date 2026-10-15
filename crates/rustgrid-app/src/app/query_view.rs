@@ -90,6 +90,13 @@ impl AppView {
         } else {
             t!("query.run").to_string()
         };
+        // The shortcut it fires is shown on hover — the configured one, since the Options window's
+        // 快捷键 page can change it.
+        let run_tooltip = format!(
+            "{} ({})",
+            t!("query.run"),
+            shortcut_label(&self.run_shortcut)
+        );
 
         let controls = div()
             .flex()
@@ -111,17 +118,20 @@ impl AppView {
         };
         let controls = controls
             .child(div().w(px(10.0)).flex_none())
-            .child(self.query_tool_button(
-                "query-run",
-                "icons/run.svg",
-                run_label,
-                theme.text,
-                theme.icon_connection,
-                run_enabled,
-                // The wrapped editor owns the real selection, so `run_query` re-reads it live and
-                // runs the selection when there is one, otherwise the whole editor.
-                cx.listener(move |this, _event, _window, cx| this.run_query(true, cx)),
-            ))
+            .child(
+                self.query_tool_button(
+                    "query-run",
+                    "icons/run.svg",
+                    run_label,
+                    theme.text,
+                    theme.icon_connection,
+                    run_enabled,
+                    // The wrapped editor owns the real selection, so `run_query` re-reads it live
+                    // and runs the selection when there is one, otherwise the whole editor.
+                    cx.listener(move |this, _event, _window, cx| this.run_query(true, cx)),
+                )
+                .tooltip(ui::text_tooltip(run_tooltip)),
+            )
             .child(self.query_tool_button(
                 "query-stop",
                 "icons/stop.svg",
