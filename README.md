@@ -103,6 +103,10 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-config` — versioned settings/profiles and encrypted secret storage.
 - `crates/rustgrid-app` — the GPUI desktop application (binary `RustGrid`).
 
+## Changelog
+
+Every release and what changed in it: [`CHANGELOG.md`](CHANGELOG.md) ([简体中文](CHANGELOG_zh.md)).
+
 ## License
 
 Licensed under the **Apache License, Version 2.0**. Commercial use is permitted. See the

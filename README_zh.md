@@ -101,6 +101,10 @@ cargo run -p rustgrid-app
 - `crates/rustgrid-config` —— 带版本号的设置 / 连接配置，以及加密的密钥存储。
 - `crates/rustgrid-app` —— GPUI 桌面应用（二进制 `RustGrid`）。
 
+## 更新日志
+
+每个版本及其变更内容见 [`CHANGELOG_zh.md`](CHANGELOG_zh.md)（[English](CHANGELOG.md)）。
+
 ## 开源协议
 
 采用 **Apache License 2.0** 协议，允许商用。完整协议文本见 [`LICENSE`](LICENSE)。
