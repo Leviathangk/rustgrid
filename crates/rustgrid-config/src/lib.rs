@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 9;
+const SETTINGS_VERSION: u32 = 10;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -168,6 +168,9 @@ struct SettingsFile {
     /// Whether the grid header shows each column's comment under its name.
     #[serde(default)]
     grid_show_comments: bool,
+    /// Whether the grid header shows each column's data type between its name and comment.
+    #[serde(default)]
+    grid_show_types: bool,
 }
 
 /// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
@@ -206,6 +209,8 @@ pub struct AppSettings {
     pub grid_field_layouts: BTreeMap<String, FieldLayout>,
     /// Whether the grid header shows each column's comment under its name.
     pub grid_show_comments: bool,
+    /// Whether the grid header shows each column's data type between its name and comment.
+    pub grid_show_types: bool,
 }
 
 impl Default for AppSettings {
@@ -225,6 +230,7 @@ impl Default for AppSettings {
             connection_colors: BTreeMap::new(),
             grid_field_layouts: BTreeMap::new(),
             grid_show_comments: false,
+            grid_show_types: false,
         }
     }
 }
@@ -423,6 +429,7 @@ impl ConfigStore {
             connection_colors: file.connection_colors,
             grid_field_layouts: file.grid_field_layouts,
             grid_show_comments: file.grid_show_comments,
+            grid_show_types: file.grid_show_types,
         })
     }
 
@@ -444,6 +451,7 @@ impl ConfigStore {
             connection_colors: settings.connection_colors.clone(),
             grid_field_layouts: settings.grid_field_layouts.clone(),
             grid_show_comments: settings.grid_show_comments,
+            grid_show_types: settings.grid_show_types,
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;

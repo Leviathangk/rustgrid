@@ -169,13 +169,25 @@ impl GridView {
                 .any(|column| !column.comment.is_empty())
     }
 
-    /// The header's height: two lines while it paints the fields' comments.
+    /// Whether the grid header paints each field's data type between its name and comment: the
+    /// 数据 option is on *and* this grid actually has a typed column (query results may not).
+    pub(super) fn show_column_types(&self, cx: &Context<'_, Self>) -> bool {
+        self.app
+            .upgrade()
+            .is_some_and(|app| app.read(cx).show_column_types())
+            && self
+                .state
+                .columns
+                .iter()
+                .any(|column| !column.data_type.is_empty())
+    }
+
+    /// The header's height: one line plus 14px for each of the field's type and comment lines the
+    /// 数据 options paint under the name.
     pub(super) fn header_height(&self, cx: &Context<'_, Self>) -> f32 {
-        if self.show_column_comments(cx) {
-            GRID_HEADER_COMMENT_HEIGHT
-        } else {
-            GRID_ROW_HEIGHT
-        }
+        let extra_lines =
+            usize::from(self.show_column_types(cx)) + usize::from(self.show_column_comments(cx));
+        GRID_ROW_HEIGHT + extra_lines as f32 * GRID_HEADER_LINE_HEIGHT
     }
 }
 
@@ -184,7 +196,8 @@ impl Render for GridView {
         self.prepare_frame(window, cx);
         let theme = self.theme;
         let header_height = self.header_height(cx);
-        let show_comments = header_height > GRID_ROW_HEIGHT;
+        let show_types = self.show_column_types(cx);
+        let show_comments = self.show_column_comments(cx);
         // The hidden fields are kept at the tail of `columns`/`column_widths`, so only the leading
         // `visible_columns` entries are drawn.
         let all_widths: Vec<f32> = if self.state.column_widths.len() == self.state.columns.len() {
@@ -301,6 +314,7 @@ impl Render for GridView {
                     SharedString::from(format!("grid-head-text-{}-{}", self.state.id, index)),
                     column,
                     width,
+                    show_types,
                     show_comments,
                     theme,
                 ))
@@ -920,28 +934,41 @@ fn source_cell<'a>(
     rows.get(row)?.get(source)
 }
 
-/// One grid header cell's text: the field name, with the field's comment under it when the 数据
-/// option is on. Both lines are clipped to the column, and a line that is too long to fit is shown
-/// in full in a hover tooltip.
+/// One grid header cell's text: the field name, with the field's data type and comment under it
+/// when the 数据 options are on (the type sits between the name and the comment). Every line is
+/// clipped to the column, and a line that is too long to fit is shown in full in a hover tooltip.
 fn header_cell_text(
     id: SharedString,
     column: &rustgrid_core::ColumnInfo,
     width: f32,
+    show_types: bool,
     show_comments: bool,
     theme: Theme,
 ) -> AnyElement {
     let name = column.name.clone();
+    let data_type = column.data_type.clone();
     let comment = column.comment.clone();
-    // The comment is only painted when the 数据 option is on, but a field name that does not fit is
-    // always worth a tooltip.
+    // The type and comment lines are only painted when the 数据 options are on, but a field name
+    // that does not fit is always worth a tooltip.
     let text_width = (width - 12.0).max(16.0);
     let name_cut = ui::approx_text_width(&name) > text_width;
+    let type_shown = show_types && !data_type.is_empty();
     let comment_shown = show_comments && !comment.is_empty();
+    let type_cut = type_shown && ui::approx_text_width(&data_type) > text_width;
     let comment_cut = comment_shown && ui::approx_text_width(&comment) > text_width;
-    let tooltip = if name_cut && comment_shown {
-        Some(format!("{name}\n{comment}"))
-    } else if name_cut {
-        Some(name.clone())
+    // A clipped name shows the whole header (name, type and comment) in the tooltip; otherwise only
+    // the line that does not fit needs one.
+    let tooltip = if name_cut {
+        let mut lines = vec![name.clone()];
+        if type_shown {
+            lines.push(data_type.clone());
+        }
+        if comment_shown {
+            lines.push(comment.clone());
+        }
+        Some(lines.join("\n"))
+    } else if type_cut {
+        Some(data_type.clone())
     } else if comment_cut {
         Some(comment.clone())
     } else {
@@ -957,22 +984,33 @@ fn header_cell_text(
     if let Some(tooltip) = tooltip {
         container = container.tooltip(ui::text_tooltip(tooltip));
     }
-    let text = if show_comments {
-        div()
+    let text = if type_shown || comment_shown {
+        let mut lines = div()
             .flex()
             .flex_col()
             .justify_center()
             .w_full()
             .min_w(px(0.0))
-            .child(div().truncate().child(name))
-            .child(
+            .child(div().truncate().child(name));
+        if type_shown {
+            lines = lines.child(
+                div()
+                    .truncate()
+                    .text_size(px(10.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(data_type),
+            );
+        }
+        if comment_shown {
+            lines = lines.child(
                 div()
                     .truncate()
                     .text_size(px(10.0))
                     .text_color(rgb(theme.text_muted))
                     .child(comment),
-            )
-            .into_any_element()
+            );
+        }
+        lines.into_any_element()
     } else {
         div()
             .w_full()

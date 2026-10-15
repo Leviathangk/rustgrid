@@ -1790,8 +1790,8 @@ enum OptionsSection {
     About,
 }
 
-/// The height of the grid header when it shows each column's comment under its name.
-const GRID_HEADER_COMMENT_HEIGHT: f32 = 38.0;
+/// The height of one extra grid-header line: a field's type or comment painted under its name.
+const GRID_HEADER_LINE_HEIGHT: f32 = 14.0;
 /// The height of the grid's toolbar row.
 const GRID_TOOLBAR_HEIGHT: f32 = 28.0;
 /// The deferred paint priority of the 字段筛选 popup and its click-away backdrop. Both are painted
@@ -2017,6 +2017,9 @@ pub struct AppView {
     /// Whether the grid header shows each column's comment under its name. Set from the 数据 page
     /// of the Options window; off by default.
     grid_show_comments: bool,
+    /// Whether the grid header shows each column's data type between its name and comment. Set from
+    /// the 数据 page of the Options window; off by default.
+    grid_show_types: bool,
     /// The remembered field layout (字段筛选) per table grid, keyed by connection/database/table,
     /// persisted in settings.
     grid_field_layouts: BTreeMap<String, FieldLayout>,
@@ -2074,6 +2077,8 @@ pub struct AppView {
     options_editor_word_wrap: bool,
     /// The staged 数据 page toggle (grid field comments), applied on OK.
     options_grid_show_comments: bool,
+    /// The staged 数据 page toggle (grid field types), applied on OK.
+    options_grid_show_types: bool,
     editor_font_combo: Option<Entity<ComboBox>>,
     editor_size_combo: Option<Entity<ComboBox>>,
     /// The OS window hosting the Options dialog, if open.
@@ -2603,6 +2608,7 @@ impl AppView {
             page_size: 1000,
             limit_records: true,
             grid_show_comments: settings.grid_show_comments,
+            grid_show_types: settings.grid_show_types,
             grid_field_layouts: settings.grid_field_layouts.clone(),
             object_search: String::new(),
             backup_objects_scroll: ScrollHandle::new(),
@@ -2655,6 +2661,7 @@ impl AppView {
             options_editor_line_numbers: settings.editor_line_numbers,
             options_editor_word_wrap: settings.editor_word_wrap,
             options_grid_show_comments: settings.grid_show_comments,
+            options_grid_show_types: settings.grid_show_types,
             editor_font_combo: None,
             editor_size_combo: None,
             options_window: None,
@@ -2942,6 +2949,7 @@ impl AppView {
             connection_colors: self.connection_colors.clone(),
             grid_field_layouts: self.grid_field_layouts.clone(),
             grid_show_comments: self.grid_show_comments,
+            grid_show_types: self.grid_show_types,
         }) {
             // Preferences failing to persist is not worth a modal; note it in the log line only.
             let _ = error;
@@ -2951,6 +2959,11 @@ impl AppView {
     /// Whether the grid header shows each column's comment under its name.
     pub(super) fn show_column_comments(&self) -> bool {
         self.grid_show_comments
+    }
+
+    /// Whether the grid header shows each column's data type between its name and comment.
+    pub(super) fn show_column_types(&self) -> bool {
+        self.grid_show_types
     }
 
     /// The persisted field layout for one table grid, if the user has configured one.

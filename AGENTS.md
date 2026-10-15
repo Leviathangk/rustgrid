@@ -286,11 +286,14 @@ touching UI code.
   style them with borders or filled buttons. `win_button`/`dialog_button` are for push buttons
   inside dialogs. `ui::toolbar_item` supplies the content as explicit children (16px icon, 12px
   label) because gpui-kit's default button typography (16px) is too large for the app's chrome.
-- **The grid header can carry a second line: the field's comment.** With the 数据 option on
-  (`AppSettings::grid_show_comments`), `grid_view.rs::header_cell_text` paints each column's comment
-  under its name at 10px muted, the header grows to `GRID_HEADER_COMMENT_HEIGHT`, and either line is
-  clipped to the column with `truncate()` (an ellipsis) and shown in full in a hover tooltip when it
-  does not fit. The date/time picker positions itself from the same header height
+- **The grid header can carry two extra lines: the field's type (数据) and comment.** With the 数据
+  options on (`AppSettings::grid_show_types` / `grid_show_comments`),
+  `grid_view.rs::header_cell_text` paints each column's data type, then its comment, under the name
+  at 10px muted (the type sits between the name and the comment), and the header grows by
+  `GRID_HEADER_LINE_HEIGHT` (14px) per line (`GridView::header_height`). Every line is clipped to the
+  column with `truncate()` (an ellipsis) and shown in full in a hover tooltip when it does not fit.
+  Both options are off by default, and each line only appears while the grid actually has such a
+  column. The date/time picker positions itself from the same header height
   (`grid_cell.rs::render_date_picker`) instead of assuming one row.
 - **The 字段筛选 popup is an anchored, click-away-dismissed panel, and it configures the grid's field
   *layout*.** `app/grid_fields.rs` draws it as a `deferred` pair under `root`: a transparent
@@ -617,9 +620,9 @@ shadcn chrome described above. Implemented today:
     afterwards is appended rather than lost). One icon serves both states, told apart by colour —
     the plain `theme.text` for the table's own field set, the accent `theme.brand` once a field is
     hidden or re-ordered — and the popup's counter reads `visible/total`. The 数据 page of the Options window
-    (`OptionsSection::Data`, between 编辑器 and 关于) holds the one grid display preference,
-    表格内展示字段备注 (`AppSettings::grid_show_comments`, off by default), which paints each column's
-    comment under its name in the grid header.
+    (`OptionsSection::Data`, between 编辑器 and 关于) holds the two grid display switches, 展示备注
+    (`AppSettings::grid_show_comments`) and 展示类型 (`grid_show_types`), both off by default, which
+    paint each column's comment / data type under its name in the grid header.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL and Oracle, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`

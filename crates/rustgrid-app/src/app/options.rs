@@ -7,6 +7,7 @@
 //! owns the state and this module renders it; `AppView::sync_dialog` is not involved.
 
 use super::*;
+use gpui_kit::component::switch::Switch;
 
 /// The sentinel combo value for "use the built-in default font".
 const DEFAULT_FONT_VALUE: &str = "__default_font__";
@@ -127,7 +128,9 @@ fn field_label(theme: Theme, label: String, control: AnyElement) -> impl IntoEle
         .child(control)
 }
 
-/// A clickable settings row: a label on the left, a check box on the right.
+/// A clickable settings row: a label on the left, a switch on the right. The row owns the click
+/// (the switch is an inert indicator), so the whole line toggles and the control only reflects the
+/// state.
 fn toggle_row(theme: Theme, id: &'static str, label: String, checked: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -145,7 +148,12 @@ fn toggle_row(theme: Theme, id: &'static str, label: String, checked: bool) -> S
                 .text_color(rgb(theme.text))
                 .child(label),
         )
-        .child(checkbox_box(checked, theme))
+        .child(
+            Switch::new(SharedString::from(format!("{id}-switch")))
+                .checked(checked)
+                .with_size(gpui_kit::component::Size::Small)
+                .tab_stop(false),
+        )
 }
 
 /// The root view of the Options OS window. It re-renders whenever `AppView` changes.
@@ -191,6 +199,7 @@ impl AppView {
         self.options_editor_line_numbers = self.editor_line_numbers;
         self.options_editor_word_wrap = self.editor_word_wrap;
         self.options_grid_show_comments = self.grid_show_comments;
+        self.options_grid_show_types = self.grid_show_types;
         self.ensure_language_combo(cx);
         self.ensure_editor_combos(cx);
         let weak = cx.weak_entity();
@@ -347,6 +356,7 @@ impl AppView {
         self.editor_line_numbers = self.options_editor_line_numbers;
         self.editor_word_wrap = self.options_editor_word_wrap;
         self.grid_show_comments = self.options_grid_show_comments;
+        self.grid_show_types = self.options_grid_show_types;
         let language = self.options_language;
         self.set_language(language, cx);
         self.persist_settings();
@@ -447,6 +457,9 @@ impl AppView {
                             .min_w(px(0.0))
                             .h_full()
                             .p_4()
+                            // The content pane sits on the dialog's own background while the nav
+                            // keeps the tinted face, so the two sides read as separate surfaces.
+                            .bg(rgb(theme.dialog_bg))
                             .overflow_y_scroll()
                             .child(self.options_body(cx)),
                     ),
@@ -558,6 +571,18 @@ impl AppView {
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_grid_show_comments = !this.options_grid_show_comments;
+                    cx.notify();
+                })),
+            )
+            .child(
+                toggle_row(
+                    theme,
+                    "options-grid-show-types",
+                    t!("options.data.show_types").to_string(),
+                    self.options_grid_show_types,
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_grid_show_types = !this.options_grid_show_types;
                     cx.notify();
                 })),
             )
@@ -707,6 +732,7 @@ impl AppView {
                     this.options_editor_line_numbers = true;
                     this.options_editor_word_wrap = true;
                     this.options_grid_show_comments = false;
+                    this.options_grid_show_types = false;
                     cx.notify();
                 }),
             ))
