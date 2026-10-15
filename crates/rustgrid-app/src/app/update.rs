@@ -12,6 +12,8 @@
 //! layouts — see [`configure_macos_layout`].
 
 use super::*;
+use std::io::Read as _;
+use std::time::Duration;
 
 /// The GitHub repository whose Releases are checked.
 const REPO_OWNER: &str = "yisier";
@@ -113,6 +115,12 @@ impl UpdateStatus {
     }
 }
 
+/// The repository's English changelog, for an English UI; the Chinese one is [`CHANGELOG_ZH_FILE`].
+const CHANGELOG_EN_FILE: &str = "CHANGELOG.md";
+
+/// The repository's Chinese changelog, for a 简体中文 UI (see `changelog`).
+const CHANGELOG_ZH_FILE: &str = "CHANGELOG_zh.md";
+
 /// Blocking: ask GitHub for the newest release and return its version and notes when it is strictly
 /// newer than the running build. Runs on the tokio blocking pool via `Runtime::spawn_blocking`.
 fn check_latest() -> Result<Option<(String, Option<String>)>, String> {
@@ -127,15 +135,61 @@ fn check_latest() -> Result<Option<(String, Option<String>)>, String> {
     let release = updater
         .is_update_available()
         .map_err(|error| error.to_string())?;
-    // The release's body is the changelog the release job published for that version (see
-    // `.github/workflows/release.yml`), so 关于 can show what installing would bring without a
-    // second request.
-    Ok(release.map(|release| {
-        (
-            release.version().to_string(),
-            release.body().map(str::to_string),
-        )
-    }))
+    // The notes travel with the release (see `release_notes`), so 关于 can show what installing
+    // would bring without a second check.
+    Ok(release.map(|release| (release.version().to_string(), release_notes(&release))))
+}
+
+/// The newer release's notes as 关于 should show them — the release body when the release job wrote
+/// it, and otherwise the version's section read out of the repository's changelogs.
+///
+/// The running build embeds the changelogs as of *its own* release, so it has no entry for a version
+/// newer than itself; and every release published before the workflow copied the section into the
+/// release body carries only GitHub's auto-generated `**Full Changelog**: …` line — which is not a
+/// changelog. For those the note is fetched (one request per language, and only in that case, so a
+/// release the job documented costs nothing extra), and 关于 then shows what installing would bring
+/// instead of the running version's entry. A failed fetch falls back to the body as it is: a
+/// hand-written release still says something worth reading.
+fn release_notes(release: &self_update::Release) -> Option<String> {
+    let body = release.body().map(str::to_string);
+    if body.as_deref().is_some_and(changelog::is_release_notes) {
+        return body;
+    }
+    let fetched = match (
+        fetch_repo_file(CHANGELOG_EN_FILE),
+        fetch_repo_file(CHANGELOG_ZH_FILE),
+    ) {
+        (Some(english), Some(chinese)) => {
+            changelog::notes_body(release.version(), &english, &chinese)
+        }
+        _ => None,
+    };
+    fetched.or(body)
+}
+
+/// Blocking: a file's text from the repository through GitHub's contents API.
+///
+/// `Accept: application/vnd.github.raw` makes the endpoint answer with the file itself rather than
+/// its base64 JSON envelope, and leaving `?ref` off resolves to the repository's default branch,
+/// whose changelog documents every released version — including one released before the tag carried
+/// a changelog at all. Only failures that leave the panel without notes return `None`.
+pub(super) fn fetch_repo_file(file: &str) -> Option<String> {
+    use self_update::http_client::{HttpClient, UreqClient, header};
+    let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file}");
+    // GitHub rejects a request without a User-Agent, and the media type must be asked for by name.
+    let mut headers = self_update::http_client::HeaderMap::new();
+    headers.insert(
+        header::USER_AGENT,
+        format!("{BIN_NAME}/{APP_VERSION}").parse().ok()?,
+    );
+    headers.insert(header::ACCEPT, "application/vnd.github.raw".parse().ok()?);
+    let client = UreqClient::default();
+    let response = client
+        .get(&url, &headers, Some(Duration::from_secs(20)))
+        .ok()?;
+    let mut text = String::new();
+    response.body().read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 /// Blocking: download and install the newest release, returning the installed version. The caller
@@ -651,5 +705,59 @@ impl AppView {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A release as GitHub hands one to `check_latest`: a version and its body.
+    fn release(body: &str) -> self_update::Release {
+        let mut builder = self_update::Release::builder();
+        builder
+            .name("v0.0.11")
+            .version("0.0.11")
+            .date("2026-10-15")
+            .body(body);
+        builder.build().expect("0.0.11 is a release")
+    }
+
+    #[test]
+    fn a_release_the_job_documented_keeps_its_own_notes() {
+        // The release job already built the body out of the changelog (see release.yml), so it must
+        // be what 关于 shows — as published, and without the fallback's two requests.
+        let body = changelog::notes_body(
+            "0.0.11",
+            "## [0.0.11] - 2026-10-15\n\n### Added\n\n- published\n",
+            "## [0.0.11] - 2026-10-15\n\n### 新增\n\n- 已发布\n",
+        )
+        .expect("both languages document 0.0.11");
+        assert_eq!(
+            release_notes(&release(&body)).as_deref(),
+            Some(body.as_str())
+        );
+    }
+
+    #[test]
+    #[ignore = "network: fetches the repository's changelogs from the GitHub API"]
+    fn a_release_without_its_own_notes_is_documented_from_the_repository() {
+        // The reported bug: a release published before the workflow copied the changelog into its
+        // body carries only GitHub's auto-generated `**Full Changelog**: …` line, so 关于 showed
+        // that — or the running version's entry — instead of what installing would bring. The
+        // repository's changelog documents the version, so the fallback must supply it in both
+        // languages. The body below is verbatim what the v0.0.11 release carries.
+        let notes = release_notes(&release(
+            "**Full Changelog**: https://github.com/yisier/rustgrid/compare/v0.0.10...v0.0.11",
+        ))
+        .expect("the repository changelogs document 0.0.11");
+        for language in [LanguageSetting::En, LanguageSetting::ZhCn] {
+            let section = changelog::release_body_section(&notes, language)
+                .unwrap_or_else(|| panic!("{language:?}: the notes carry a section per language"));
+            assert!(
+                section.starts_with("## [0.0.11]"),
+                "{language:?}: 关于 must show 0.0.11's entry, got {section}"
+            );
+        }
     }
 }

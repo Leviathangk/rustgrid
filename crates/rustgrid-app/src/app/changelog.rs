@@ -10,6 +10,10 @@
 //!   version's section as the GitHub release notes (see `.github/workflows/release.yml`), and the
 //!   update check already reads that release, so its body carries the notes with it (see
 //!   `update.rs`). Those notes hold both languages, split by [`MARKER_EN`] / [`MARKER_ZH`].
+//! - A release published before that workflow step existed carries only GitHub's auto-generated
+//!   "Full Changelog" line. There the check reads the version's section out of the repository's own
+//!   changelogs and rebuilds the marked body with [`notes_body`], so 关于 still shows what
+//!   installing would bring instead of the running version's entry.
 //!
 //! Only the version the page is about is shown: the newer release while an update is available
 //! (what installing would get you), otherwise the running version (what this build brought).
@@ -66,6 +70,32 @@ fn embedded(language: LanguageSetting) -> &'static str {
         LanguageSetting::En => CHANGELOG_EN,
         LanguageSetting::ZhCn => CHANGELOG_ZH,
     }
+}
+
+/// Whether a release body is one the release job wrote. The language markers are its signature, so
+/// this is what tells the notes published from the changelog (see `.github/workflows/release.yml`)
+/// apart from everything else — most importantly from the `**Full Changelog**: …` line GitHub
+/// auto-generates for a release published before that step existed, which is not a changelog and
+/// sends the check to the repository's own copy instead (see [`notes_body`]).
+pub(super) fn is_release_notes(body: &str) -> bool {
+    body.contains(MARKER_EN) || body.contains(MARKER_ZH)
+}
+
+/// A release body in the shape the release job publishes, assembled from the two changelogs'
+/// sections for `version`.
+///
+/// The fallback for a release whose own body carries no notes — every release tagged before the
+/// workflow read them out of the changelog. The running build cannot embed a version newer than
+/// itself, so `update.rs` fetches the repository's changelogs and rebuilds the body here, keeping
+/// the render path (which splits it by language) exactly as it is for a published one. `None`
+/// unless **both** changelogs document `version`: half a body would show one UI language a
+/// different release's entry.
+pub(super) fn notes_body(version: &str, changelog_en: &str, changelog_zh: &str) -> Option<String> {
+    let english = version_section(changelog_en, version)?;
+    let chinese = version_section(changelog_zh, version)?;
+    Some(format!(
+        "{MARKER_EN}\n{english}\n\n{MARKER_ZH}\n{chinese}\n"
+    ))
 }
 
 /// The part of a GitHub release body written for one language.
@@ -219,6 +249,7 @@ fn strip_inline(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::update;
     use super::super::update::APP_VERSION;
     use super::*;
 
@@ -293,6 +324,104 @@ First release.
         let body = "## What's Changed\n\n* fix a thing\n";
         let section = release_body_section(body, LanguageSetting::En).unwrap();
         assert_eq!(section, body.trim());
+    }
+
+    #[test]
+    fn a_release_body_is_recognised_by_its_markers() {
+        // Only the release job's own output counts as notes: the check reads the changelog out of
+        // the repository for everything else, so a misdetection here would either skip that
+        // fallback (showing the auto-generated line) or waste two requests on every release.
+        assert!(is_release_notes(&format!("{MARKER_EN}\n## [9.9.9]\n")));
+        assert!(is_release_notes(&format!("{MARKER_ZH}\n## [9.9.9]\n")));
+        assert!(!is_release_notes(""));
+        assert!(!is_release_notes(
+            "**Full Changelog**: https://github.com/yisier/rustgrid/compare/v0.0.10...v0.0.11"
+        ));
+    }
+
+    #[test]
+    fn notes_body_reads_a_version_out_of_both_changelogs() {
+        // The fallback path end to end: the check fetches the two repository changelogs for a
+        // release whose body has no notes, and 关于 must show that version's entry — not the
+        // running one — in whichever language the UI is in.
+        let english = "# Changelog\n\n## [0.0.12] - 2026-10-16\n\n### Added\n\n- english point\n\n\
+                       ## [0.0.11] - 2026-10-15\n\n### Added\n\n- old point\n";
+        let chinese = "# 更新日志\n\n## [0.0.12] - 2026-10-16\n\n### 新增\n\n- 中文要点\n\n\
+                       ## [0.0.11] - 2026-10-15\n\n### 新增\n\n- 旧要点\n";
+        let body = notes_body("0.0.12", english, chinese).expect("both changelogs document 0.0.12");
+
+        let english_notes = notes(LanguageSetting::En, "0.0.11", Some(&body));
+        assert!(matches!(
+            english_notes.first(),
+            Some(NoteLine::Version { version, .. }) if version == "0.0.12"
+        ));
+        assert!(
+            english_notes
+                .iter()
+                .any(|note| matches!(note, NoteLine::Bullet(item) if item == "english point"))
+        );
+        assert!(
+            !english_notes
+                .iter()
+                .any(|note| matches!(note, NoteLine::Bullet(item) if item == "old point"))
+        );
+
+        let chinese_notes = notes(LanguageSetting::ZhCn, "0.0.11", Some(&body));
+        assert!(matches!(
+            chinese_notes.first(),
+            Some(NoteLine::Version { version, .. }) if version == "0.0.12"
+        ));
+        assert!(
+            chinese_notes
+                .iter()
+                .any(|note| matches!(note, NoteLine::Bullet(item) if item == "中文要点"))
+        );
+    }
+
+    #[test]
+    fn notes_body_needs_both_changelogs() {
+        // Half a body would hand one UI language the other release's entry; with none, the check
+        // keeps the release body it had rather than showing a mismatched changelog.
+        let english = "## [0.0.12]\n\n- english point\n";
+        let chinese_old = "## [0.0.11]\n\n- 旧要点\n";
+        assert_eq!(notes_body("0.0.12", english, chinese_old), None);
+        assert_eq!(notes_body("0.0.12", chinese_old, english), None);
+        assert_eq!(notes_body("0.0.9", english, chinese_old), None);
+    }
+
+    #[test]
+    #[ignore = "network: fetches the repository's changelogs from the GitHub API"]
+    fn the_repository_changelogs_feed_the_notes_of_another_version() {
+        // The live half of the fallback: the contents API really answers with the file text (the
+        // media type and the User-Agent GitHub demands are not something a stub can check), and what
+        // comes back documents a version. Compared against the embedded section for the running
+        // version, which `the_embedded_changelog_documents_the_running_version` requires to exist;
+        // the assertion `notes` is driven with "0.0.0" stands in for the newer release a build
+        // cannot embed.
+        let english = update::fetch_repo_file("CHANGELOG.md").expect("CHANGELOG.md is fetchable");
+        let chinese =
+            update::fetch_repo_file("CHANGELOG_zh.md").expect("CHANGELOG_zh.md is fetchable");
+        assert_eq!(
+            version_section(&english, APP_VERSION).as_deref(),
+            version_section(CHANGELOG_EN, APP_VERSION).as_deref(),
+        );
+        assert_eq!(
+            version_section(&chinese, APP_VERSION).as_deref(),
+            version_section(CHANGELOG_ZH, APP_VERSION).as_deref(),
+        );
+
+        let body = notes_body(APP_VERSION, &english, &chinese)
+            .unwrap_or_else(|| panic!("both changelogs must document {APP_VERSION}"));
+        for language in [LanguageSetting::En, LanguageSetting::ZhCn] {
+            let notes = notes(language, "0.0.0", Some(&body));
+            assert!(
+                matches!(
+                    notes.first(),
+                    Some(NoteLine::Version { version, .. }) if version == APP_VERSION
+                ),
+                "{language:?}: the fetched body must document {APP_VERSION}, not the running 0.0.0"
+            );
+        }
     }
 
     #[test]
