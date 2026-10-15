@@ -9,6 +9,33 @@ All notable changes to RustGrid are documented in this file. The format is based
 UI labels are quoted as the app shows them, so this file quotes the English strings;
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) quotes the 简体中文 ones.
 
+## [0.0.12] - 2026-10-15
+
+### Added
+
+- **Changelog** in 选项 → 关于: once a check has found a newer release, the panel shows that
+  version's notes — what installing would bring, in the UI's own language — and stays off the page
+  entirely while this build already is the newest release. The repository keeps its changelog in
+  English and Chinese, and the release job publishes each version's section as the release notes
+  (it fails when a version's section is missing).
+- SQL completion matches loosely: a candidate is found by its exact name, a prefix, anything inside
+  it or a subsequence of it, with the closest matches leading; the tables lead right after `FROM` /
+  `JOIN` / `INTO` / `UPDATE` / `TABLE`, and the everyday keywords (in their most-typed order) come
+  before the rest of the language. `Tab` accepts the highlighted candidate, and still indents when
+  no popup is open.
+- The query editor's run keystrokes are configurable in 选项 → **快捷键**: click a field, press the
+  combination, and OK applies it (Default restores Navicat's Ctrl+R / Ctrl+Shift+R). Ctrl+R runs the
+  whole editor, Ctrl+Shift+R only the selection, and Ctrl+Enter stays an alias for running.
+
+### Fixed
+
+- Grid cells and headers have 6px of horizontal padding, so a value no longer sits flush against the
+  previous column's divider and its text (issue #5).
+- The MySQL account editor lists a database the account only holds an entry for
+  (`GRANT USAGE ON db.* WITH GRANT OPTION`), which Navicat and `SHOW DATABASES` report as well.
+- **Close Connection** closes that connection's account window and Object Privileges window with it
+  and drops the Users list, so no window is left editing an account over a dead connection.
+
 ## [0.0.11] - 2026-10-15
 
 ### Added
