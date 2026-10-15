@@ -291,7 +291,7 @@ impl Render for GridView {
                 .h(px(header_height))
                 .w(px(width))
                 .flex_none()
-                .pr(px(4.0))
+                .px(px(6.0))
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .cursor_pointer()
@@ -543,7 +543,10 @@ impl Render for GridView {
                                 .h(px(GRID_ROW_HEIGHT))
                                 .w(px(width))
                                 .flex_none()
-                                .pr(px(4.0))
+                                // Horizontal padding keeps a value off its neighbour's divider (and
+                                // off the previous column's text), so bordered cells read as
+                                // separate values instead of one run of characters.
+                                .px(px(6.0))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .border_r_1()
@@ -626,7 +629,16 @@ impl Render for GridView {
                                     cell_element = cell_element.child(input.clone());
                                 }
                                 _ => {
-                                    cell_element = cell_element.child(display);
+                                    // Constrain the value to the cell's padded content box: gpui's
+                                    // overflow clip is the border box, so an unconstrained child
+                                    // would still run into the right padding and touch the divider.
+                                    cell_element = cell_element.child(
+                                        div()
+                                            .w_full()
+                                            .min_w(px(0.0))
+                                            .overflow_hidden()
+                                            .child(display),
+                                    );
                                 }
                             }
                             row_element = row_element.child(cell_element);
@@ -858,15 +870,26 @@ impl Render for GridView {
                                     let consumed = weak
                                         .update(cx, |this, cx| {
                                             // A horizontal trackpad swipe pans the columns; the
-                                            // vertical wheel keeps driving vertical scrolling.
-                                            let horizontal =
-                                                dx != 0.0 && this.scroll_grid_columns(dx, cx);
+                                            // vertical wheel keeps driving vertical scrolling. A
+                                            // horizontal gesture is claimed even when the columns
+                                            // cannot pan any further: the row list scrolls on one
+                                            // axis only and gpui maps a delta with no room on its
+                                            // axis onto the other, so letting such an event bubble
+                                            // made a swipe past the last column roll the rows
+                                            // instead of doing nothing. A vertical delta is left to
+                                            // bubble as before, so the wheel still reaches the list
+                                            // when the selection cannot move.
+                                            let horizontal = dx != 0.0;
+                                            if horizontal {
+                                                this.scroll_grid_columns(dx, cx);
+                                            }
                                             let vertical = dy != 0.0
                                                 && this.scroll_grid_selection(position, dy, cx);
-                                            if horizontal || vertical {
+                                            let consumed = horizontal || vertical;
+                                            if consumed {
                                                 cx.stop_propagation();
                                             }
-                                            horizontal || vertical
+                                            consumed
                                         })
                                         .unwrap_or(false);
                                     if consumed {
