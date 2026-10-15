@@ -223,10 +223,39 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The release body is the version's own changelog section, in both languages, split by the
+      # markers the app reads back in 选项 → 关于 (see `crates/rustgrid-app/src/app/changelog.rs`).
+      # Missing the section means the version was bumped without its changelog entry, which would
+      # leave 关于 with nothing to show — fail rather than publish a release that cannot describe
+      # itself.
+      - name: Build the release notes from the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          section() {
+            awk -v want="## [$version]" '
+              index($0, want) == 1 { inside = 1 }
+              inside && /^## \[/ && index($0, want) != 1 { exit }
+              inside { print }
+            ' "$1"
+          }
+          {
+            echo "<!-- rustgrid:en -->"
+            section CHANGELOG.md
+            echo
+            echo "<!-- rustgrid:zh -->"
+            section CHANGELOG_zh.md
+          } > release-notes.md
+          for file in CHANGELOG.md CHANGELOG_zh.md; do
+            if [ -z "$(section "$file")" ]; then
+              echo "::error::$file has no section for $version — add it before tagging"
+              exit 1
+            fi
+          done
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: release-notes.md
           draft: false
           prerelease: false

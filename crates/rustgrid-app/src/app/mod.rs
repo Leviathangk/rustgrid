@@ -2089,6 +2089,10 @@ pub struct AppView {
     update_status: update::UpdateStatus,
     /// The newest release's version, once a check has found one.
     update_version: Option<String>,
+    /// The newer release's notes (its GitHub release body), which the check reads along with the
+    /// version. Only the release can carry them: the running build's embedded changelog predates it.
+    /// Drives the changelog at the foot of 关于.
+    update_notes: Option<String>,
     /// Live download progress for the in-flight install: `(bytes_downloaded, total_bytes)`.
     /// `total_bytes` is `None` until the server's `Content-Length` is known. Cleared when the
     /// install ends. Drives the titlebar percentage and the 关于 progress bar.
@@ -2287,6 +2291,7 @@ pub struct AppView {
 }
 
 mod backup;
+mod changelog;
 mod connection_form;
 mod database;
 mod db_dialog;
@@ -2668,6 +2673,7 @@ impl AppView {
             options_focus: cx.focus_handle(),
             update_status: update::UpdateStatus::Idle,
             update_version: None,
+            update_notes: None,
             update_progress: None,
             update_checked: false,
             tree_revision: 0,

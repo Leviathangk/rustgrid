@@ -113,9 +113,9 @@ impl UpdateStatus {
     }
 }
 
-/// Blocking: ask GitHub for the newest release and return its version when it is strictly newer
-/// than the running build. Runs on the tokio blocking pool via `Runtime::spawn_blocking`.
-fn check_latest() -> Result<Option<String>, String> {
+/// Blocking: ask GitHub for the newest release and return its version and notes when it is strictly
+/// newer than the running build. Runs on the tokio blocking pool via `Runtime::spawn_blocking`.
+fn check_latest() -> Result<Option<(String, Option<String>)>, String> {
     let updater = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
@@ -127,7 +127,15 @@ fn check_latest() -> Result<Option<String>, String> {
     let release = updater
         .is_update_available()
         .map_err(|error| error.to_string())?;
-    Ok(release.map(|release| release.version().to_string()))
+    // The release's body is the changelog the release job published for that version (see
+    // `.github/workflows/release.yml`), so 关于 can show what installing would bring without a
+    // second request.
+    Ok(release.map(|release| {
+        (
+            release.version().to_string(),
+            release.body().map(str::to_string),
+        )
+    }))
 }
 
 /// Blocking: download and install the newest release, returning the installed version. The caller
@@ -218,12 +226,14 @@ impl AppView {
             let result = runtime.spawn_blocking(check_latest).await;
             let _ = this.update(cx, move |app, cx| {
                 match result {
-                    Ok(Ok(Some(version))) => {
+                    Ok(Ok(Some((version, notes)))) => {
                         app.update_version = Some(version);
+                        app.update_notes = notes;
                         app.update_status = UpdateStatus::Available;
                     }
                     Ok(Ok(None)) => {
                         app.update_version = None;
+                        app.update_notes = None;
                         app.update_status = UpdateStatus::UpToDate;
                     }
                     Ok(Err(error)) => {
@@ -413,7 +423,7 @@ impl AppView {
         button.tooltip(ui::text_tooltip(tooltip)).into_any_element()
     }
 
-    /// The 关于 page: app identity, current version and the manual update controls.
+    /// The 关于 page: app identity, current version, the manual update controls and the changelog.
     pub(super) fn options_about_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let status_color = if matches!(self.update_status, UpdateStatus::Failed(_)) {
@@ -450,6 +460,10 @@ impl AppView {
             .flex_col()
             .gap_4()
             .w_full()
+            // The changelog panel takes the height the page's own controls leave, so the page
+            // reads as a filled box instead of an empty one under the status line.
+            .h_full()
+            .min_h(px(0.0))
             .child(
                 div()
                     .flex()
@@ -498,6 +512,103 @@ impl AppView {
                 self.download_progress_element(theme),
                 |element, progress| element.child(progress),
             )
+            .child(self.changelog_panel(theme))
+    }
+
+    /// The changelog at the foot of 关于: what the running version brought, or — while an update is
+    /// available — what the newer release documents (see [`changelog`]). It follows the UI language,
+    /// so a 简体中文界面 shows the Chinese changelog.
+    fn changelog_panel(&self, theme: Theme) -> AnyElement {
+        let mut notes = div().flex().flex_col().gap_2().w_full();
+        for note in changelog::notes(self.language, APP_VERSION, self.update_notes.as_deref()) {
+            notes = notes.child(match note {
+                changelog::NoteLine::Version { version, date } => div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text))
+                            .child(version),
+                    )
+                    .when_some(date, |row, date| {
+                        row.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.text_muted))
+                                .child(date),
+                        )
+                    })
+                    .into_any_element(),
+                changelog::NoteLine::Group(group) => div()
+                    .mt_1()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme.brand))
+                    .child(group)
+                    .into_any_element(),
+                changelog::NoteLine::Bullet(item) => div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .w_full()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child("•"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text))
+                            .child(item),
+                    )
+                    .into_any_element(),
+                changelog::NoteLine::Text(text) => div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text))
+                    .child(text)
+                    .into_any_element(),
+            });
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("about.changelog").to_string()),
+            )
+            .child(
+                div()
+                    .id("about-changelog")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .p_3()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.dialog_face))
+                    .overflow_y_scroll()
+                    .child(notes),
+            )
+            .into_any_element()
     }
 
     /// The live download progress bar and byte caption for the 关于 page. `None` unless an install

@@ -6,6 +6,8 @@ not a later refactor.
 
 ## Repository layout (Cargo workspace)
 
+- Root files: `AGENTS.md`, `README.md` / `README_zh.md`, and the changelog pair `CHANGELOG.md` /
+  `CHANGELOG_zh.md` — **every version change is recorded in both changelogs** (see Commands).
 - `crates/rustgrid-core` — engine-agnostic domain: `Driver`/`Connection` traits, models
   (`CellValue`, `ConnectionProfile`, `TablePage`, ...), `Error`, `DriverRegistry`.
   **No sqlx / GPUI / OS dependencies here.**
@@ -203,6 +205,18 @@ not a later refactor.
 - No `DATABASE_URL` or sqlx offline cache: queries use the **runtime** API (`sqlx::query`,
   not `sqlx::query!`). Do not add the `macros` feature.
 - `Cargo.lock` is committed (this is an application, not a library). No CI yet.
+- **Every version change is recorded in both changelogs — no exceptions.** The moment the workspace
+  version in the root `Cargo.toml` changes, the same commit writes that version's section into
+  **both** `CHANGELOG.md` and `CHANGELOG_zh.md` (newest first, Keep-a-Changelog headings — Added /
+  Changed / Fixed, translated in the Chinese file) describing what the version brings. Those two
+  files are the single source of the version's own notes: the release job publishes the matching
+  sections as the GitHub release notes (split by the `<!-- rustgrid:en -->` / `<!-- rustgrid:zh -->`
+  markers) and fails when either is missing, alongside its tag-vs-`Cargo.toml` check; 选项 → 关于
+  renders the running version's section from the files embedded at compile time and, once a check
+  finds a newer release, that release's section from its notes, in the UI's own language
+  (`crates/rustgrid-app/src/app/changelog.rs`). A version bump with no changelog entry therefore
+  fails the app's own test (`changelog.rs`) as well as the release job — write the entry with the
+  bump, never after it.
 
 ## Extensibility requirements (design for these from the start)
 
