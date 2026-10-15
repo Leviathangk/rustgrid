@@ -745,6 +745,14 @@ make more engines cheap later — do not build those features early.
   `rustgrid_core::Error::Authentication` by checking `MySqlDatabaseError::number()`
   (1044/1045/1698) — **not** `DatabaseError::code()`, which returns the SQLSTATE (e.g.
   `28000`). The app keys its password prompt off this variant.
+- The MySQL account editor reads database/table/routine grants from the
+  `information_schema.*_PRIVILEGES` views **including `IS_GRANTABLE`**
+  (`rustgrid-mysql::user::row_privileges`). A database the account holds only an entry for
+  (`GRANT USAGE ON db.* WITH GRANT OPTION`) is reported as the keyword `USAGE`, which the privilege
+  catalog does not know; `IS_GRANTABLE` is the only sign of it, so dropping it hid that database
+  from the editor (Navicat lists it, and `SHOW DATABASES` returns it). Never drop a row just because
+  its `PRIVILEGE_TYPE` is unknown — read its grant option. `REVOKE GRANT OPTION ON db.*` is what
+  actually removes such an entry; `REVOKE USAGE …` / `REVOKE ALL PRIVILEGES …` leave it in place.
 - `rustgrid-mysql::decode_cell` uses sqlx's **checked** `try_get` (which enforces
   `Type::compatible`) for every known type, then falls back to `try_get_unchecked::<Vec<u8>>`
   + UTF-8 for text-encoded types (DECIMAL, JSON) and raw bytes otherwise. Do not reorder to

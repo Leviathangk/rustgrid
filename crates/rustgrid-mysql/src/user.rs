@@ -355,6 +355,26 @@ fn has_grant_option(privileges: &BTreeSet<PrivilegeId>) -> bool {
         .any(|privilege| privilege.matches("GRANT OPTION"))
 }
 
+/// The privileges one `*_PRIVILEGES` row reports for its object, from the row's keyword and
+/// `IS_GRANTABLE` flag.
+///
+/// A database the account holds an entry for but grants nothing on (`GRANT USAGE ON db.*`) is
+/// reported as the keyword `USAGE`, which is not a privilege this catalog knows. `IS_GRANTABLE` is
+/// the only sign such an entry exists (MySQL always keeps a grant option there, since a `mysql.db`
+/// row with no privileges and no grant option is pruned), so reading it keeps that database in the
+/// account's grant list — as Navicat does — and lets the editor revoke it again
+/// (`REVOKE GRANT OPTION ON db.*` is what drops the entry).
+fn row_privileges(keyword: &str, grantable: bool) -> Vec<PrivilegeId> {
+    let mut privileges = Vec::new();
+    if let Some(privilege) = privilege_id(keyword) {
+        privileges.push(privilege);
+    }
+    if grantable {
+        privileges.push(PrivilegeId::new("GRANT OPTION"));
+    }
+    privileges
+}
+
 // ----- Reading -------------------------------------------------------------------------------
 
 fn read_account(row: &MySqlRow) -> UserAccount {
@@ -406,11 +426,12 @@ async fn fetch_server_privileges(pool: &MySqlPool, grantee: &str) -> Result<BTre
 async fn fetch_object_grants(pool: &MySqlPool, grantee: &str) -> Result<Vec<ObjectGrant>> {
     let mut merged: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = BTreeMap::new();
     for sql in [
-        "SELECT TABLE_SCHEMA, '' AS object_name, PRIVILEGE_TYPE \
+        "SELECT TABLE_SCHEMA, '' AS object_name, PRIVILEGE_TYPE, IS_GRANTABLE \
          FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = ?",
-        "SELECT TABLE_SCHEMA, TABLE_NAME AS object_name, PRIVILEGE_TYPE \
+        "SELECT TABLE_SCHEMA, TABLE_NAME AS object_name, PRIVILEGE_TYPE, IS_GRANTABLE \
          FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE = ?",
-        "SELECT ROUTINE_SCHEMA AS TABLE_SCHEMA, ROUTINE_NAME AS object_name, PRIVILEGE_TYPE \
+        "SELECT ROUTINE_SCHEMA AS TABLE_SCHEMA, ROUTINE_NAME AS object_name, PRIVILEGE_TYPE, \
+         IS_GRANTABLE \
          FROM information_schema.ROUTINE_PRIVILEGES WHERE GRANTEE = ?",
     ] {
         // A view may be missing on some servers (e.g. `ROUTINE_PRIVILEGES` on MariaDB builds);
@@ -420,13 +441,17 @@ async fn fetch_object_grants(pool: &MySqlPool, grantee: &str) -> Result<Vec<Obje
             Err(_) => continue,
         };
         for row in &rows {
-            let Some(privilege) = privilege_id(&text(row, "PRIVILEGE_TYPE")) else {
+            let granted = row_privileges(
+                &text(row, "PRIVILEGE_TYPE"),
+                text(row, "IS_GRANTABLE").eq_ignore_ascii_case("YES"),
+            );
+            if granted.is_empty() {
                 continue;
-            };
+            }
             merged
                 .entry((text(row, "TABLE_SCHEMA"), text(row, "object_name")))
                 .or_default()
-                .insert(privilege);
+                .extend(granted);
         }
     }
 
@@ -977,7 +1002,7 @@ pub(crate) async fn object_privilege_matrix(
 ) -> Result<Vec<ObjectPrivilegeRow>> {
     let rows = if name.is_empty() {
         sqlx::query(
-            "SELECT GRANTEE, PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES \
+            "SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.SCHEMA_PRIVILEGES \
              WHERE TABLE_SCHEMA = ?",
         )
         .bind(database)
@@ -986,7 +1011,7 @@ pub(crate) async fn object_privilege_matrix(
         .map_err(map_query_error)?
     } else {
         sqlx::query(
-            "SELECT GRANTEE, PRIVILEGE_TYPE FROM information_schema.TABLE_PRIVILEGES \
+            "SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.TABLE_PRIVILEGES \
              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
         )
         .bind(database)
@@ -998,11 +1023,15 @@ pub(crate) async fn object_privilege_matrix(
 
     let mut merged: BTreeMap<(String, String), BTreeSet<PrivilegeId>> = BTreeMap::new();
     for row in &rows {
-        let (user, host) = parse_grantee(&text(row, "GRANTEE"));
-        let Some(privilege) = privilege_id(&text(row, "PRIVILEGE_TYPE")) else {
+        let granted = row_privileges(
+            &text(row, "PRIVILEGE_TYPE"),
+            text(row, "IS_GRANTABLE").eq_ignore_ascii_case("YES"),
+        );
+        if granted.is_empty() {
             continue;
-        };
-        merged.entry((user, host)).or_default().insert(privilege);
+        }
+        let (user, host) = parse_grantee(&text(row, "GRANTEE"));
+        merged.entry((user, host)).or_default().extend(granted);
     }
 
     Ok(merged
@@ -1191,6 +1220,32 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn reads_a_privilege_with_its_grant_option() {
+        assert_eq!(row_privileges("SELECT", false), vec![p("SELECT")]);
+        assert_eq!(
+            row_privileges("SELECT", true),
+            vec![p("SELECT"), p("GRANT OPTION")]
+        );
+    }
+
+    #[test]
+    fn keeps_a_database_the_account_only_holds_an_entry_for() {
+        // `GRANT USAGE ON db.* WITH GRANT OPTION` is the entry an account has on a database it
+        // cannot read: MySQL reports the row as `USAGE` (no known privilege) plus a grant option.
+        assert_eq!(row_privileges("USAGE", true), vec![p("GRANT OPTION")]);
+    }
+
+    #[test]
+    fn drops_a_usage_row_that_carries_no_grant_option() {
+        assert!(row_privileges("USAGE", false).is_empty());
+    }
+
+    #[test]
+    fn drops_a_dynamic_privilege_the_catalog_does_not_know() {
+        assert!(row_privileges("SYSTEM_VARIABLES_ADMIN", false).is_empty());
     }
 
     #[test]
