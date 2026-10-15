@@ -152,3 +152,44 @@ async fn live_odbc_browse_query_and_edit() {
 
     connection.close().await.expect("close");
 }
+
+/// Connect from the form's own fields (driver name + host + port + credentials) rather than a raw
+/// connection string, which is the path that used to fail for MySQL with
+/// "Missing option MULTI_HOST=1" because the port was appended to `Server=` with a comma.
+///
+/// Set `RUSTGRID_ODBC_DRIVER` (e.g. `MySQL ODBC 8.0 Unicode Driver`) and `RUSTGRID_ODBC_PASSWORD`,
+/// optionally `RUSTGRID_ODBC_HOST`/`PORT`/`USER`/`DATABASE`, then:
+///
+/// ```powershell
+/// cargo test -p rustgrid-odbc -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore]
+async fn live_odbc_connects_from_the_form_fields() {
+    let Ok(driver) = std::env::var("RUSTGRID_ODBC_DRIVER") else {
+        eprintln!("RUSTGRID_ODBC_DRIVER not set; skipping");
+        return;
+    };
+    let env_or =
+        |key: &str, default: &str| std::env::var(key).unwrap_or_else(|_| default.to_string());
+
+    let config = ConnectionConfig {
+        driver: DriverId::new("odbc"),
+        host: env_or("RUSTGRID_ODBC_HOST", "127.0.0.1"),
+        port: env_or("RUSTGRID_ODBC_PORT", "").parse().unwrap_or_default(),
+        username: env_or("RUSTGRID_ODBC_USER", "root"),
+        password: std::env::var("RUSTGRID_ODBC_PASSWORD").ok(),
+        database: std::env::var("RUSTGRID_ODBC_DATABASE").ok(),
+        options: BTreeMap::from([("odbc.driver".to_string(), driver.clone())]),
+        settings: ConnectionOptions::default(),
+    };
+
+    let connection = OdbcDriver::new()
+        .connect(&config)
+        .await
+        .unwrap_or_else(|error| panic!("connect with driver `{driver}`: {error}"));
+
+    let databases = connection.list_databases().await.expect("list databases");
+    eprintln!("databases: {:?}", databases.len());
+    connection.close().await.expect("close");
+}

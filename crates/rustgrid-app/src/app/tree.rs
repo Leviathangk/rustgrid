@@ -198,17 +198,23 @@ impl AppView {
                 .into_iter()
                 .map(ComboOption::plain)
                 .collect();
-            let selected = form.odbc_driver.clone();
-            let app = weak.clone();
-            Some(cx.new(|cx| {
-                ComboBox::new(theme, options, selected, 260.0, cx)
-                    .full_width()
-                    .on_select(Rc::new(move |value, _window, cx| {
-                        let _ = app.update(cx, |app, cx| {
-                            app.set_form_field(FormField::OdbcDriver, value, cx)
-                        });
-                    }))
-            }))
+            // An empty list means the system has no ODBC driver manager (or no driver) installed.
+            // The free-text driver field takes over in that case — see `render_general_page`.
+            if options.is_empty() {
+                None
+            } else {
+                let selected = form.odbc_driver.clone();
+                let app = weak.clone();
+                Some(cx.new(|cx| {
+                    ComboBox::new(theme, options, selected, 260.0, cx)
+                        .full_width()
+                        .on_select(Rc::new(move |value, _window, cx| {
+                            let _ = app.update(cx, |app, cx| {
+                                app.set_form_field(FormField::OdbcDriver, value, cx)
+                            });
+                        }))
+                }))
+            }
         } else {
             None
         };

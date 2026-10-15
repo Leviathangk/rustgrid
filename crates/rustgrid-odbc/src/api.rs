@@ -195,16 +195,36 @@ fn candidate_libraries() -> &'static [&'static str] {
     }
     #[cfg(target_os = "macos")]
     {
+        // macOS ships no driver manager, so one usually comes from Homebrew — whose lib directory
+        // is not on the default dyld search path, which is why the bare names are tried first and
+        // then the absolute locations (`libodbc` is unixODBC, `libiodbc` is iODBC, whose Homebrew
+        // formula is keg-only and therefore only reachable through its opt path).
         &[
             "libodbc.2.dylib",
             "libodbc.dylib",
+            "/opt/homebrew/lib/libodbc.2.dylib",
+            "/opt/homebrew/lib/libodbc.dylib",
+            "/usr/local/lib/libodbc.2.dylib",
+            "/usr/local/lib/libodbc.dylib",
             "libiodbc.2.dylib",
             "libiodbc.dylib",
+            "/opt/homebrew/opt/libiodbc/lib/libiodbc.2.dylib",
+            "/usr/local/opt/libiodbc/lib/libiodbc.2.dylib",
+            "/usr/local/lib/libiodbc.2.dylib",
         ]
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        &["libodbc.so.2", "libodbc.so"]
+        // A package manager puts unixODBC on the loader's search path, so the bare names normally
+        // resolve; the absolute locations cover a manually installed or statically relocated one.
+        &[
+            "libodbc.so.2",
+            "libodbc.so",
+            "/usr/lib/x86_64-linux-gnu/libodbc.so.2",
+            "/usr/lib/aarch64-linux-gnu/libodbc.so.2",
+            "/usr/lib64/libodbc.so.2",
+            "/usr/local/lib/libodbc.so.2",
+        ]
     }
     #[cfg(not(any(target_os = "windows", unix)))]
     {

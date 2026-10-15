@@ -559,7 +559,22 @@ impl AppView {
                         error_hint(FormField::OdbcDriver),
                         match self.form_odbc_driver.clone() {
                             Some(combo) => div().w_full().child(combo).into_any_element(),
-                            None => div().into_any_element(),
+                            // Nothing was enumerated from the system's ODBC driver manager: fall
+                            // back to typing the driver name, and say what is missing instead of
+                            // showing an empty dropdown that only says 此项为必填.
+                            None => div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .w_full()
+                                .child(input(FormField::OdbcDriver))
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(t!("form.odbc.no_drivers").to_string()),
+                                )
+                                .into_any_element(),
                         },
                         theme,
                     ))
