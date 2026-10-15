@@ -120,6 +120,38 @@ impl OdbcConnection {
             _ => format!("ALTER TABLE {table} RENAME TO {new_name}"),
         }
     }
+
+    /// The first column of `sql` as text, skipping NULLs and empty values (used for the catalog
+    /// queries — `sys.databases` / `SHOW DATABASES` — that list the server's databases).
+    fn first_column(&self, sql: &str) -> Result<Vec<String>> {
+        let (_columns, rows, _affected) = self.run(sql)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .filter_map(|value| match value {
+                CellValue::Text(text) if !text.is_empty() => Some(text),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// The catalogs the driver's own `SQLTables` reports, for the engines that have no catalog
+    /// query of their own.
+    fn table_catalogs(&self) -> Result<Vec<String>> {
+        let api = api::api().map_err(Error::Connection)?;
+        let dbc = self.handle()?.0;
+        let (columns, rows) = api.tables(dbc, "", "", "", "").map_err(Error::Query)?;
+        let index = column_index(&columns, "TABLE_CAT");
+        let mut names = BTreeSet::new();
+        for row in rows {
+            if let Some(CellValue::Text(name)) = index.and_then(|index| row.get(index))
+                && !name.is_empty()
+            {
+                names.insert(name.clone());
+            }
+        }
+        Ok(names.into_iter().collect())
+    }
 }
 
 impl Drop for OdbcConnection {
@@ -144,32 +176,15 @@ impl Connection for OdbcConnection {
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
-        // SQL Server's ODBC `SQLTables` only reports the current catalog, so list every database
-        // explicitly; other engines fall back to the catalogs `SQLTables` exposes.
-        if self.engine.eq_ignore_ascii_case("sqlserver") {
-            let (_columns, rows, _affected) =
-                self.run("SELECT name FROM sys.databases ORDER BY name")?;
-            let mut names = Vec::new();
-            for row in rows {
-                if let Some(CellValue::Text(name)) = row.first() {
-                    names.push(DatabaseInfo { name: name.clone() });
-                }
-            }
-            return Ok(names);
-        }
-
-        let api = api::api().map_err(Error::Connection)?;
-        let dbc = self.handle()?.0;
-        let (columns, rows) = api.tables(dbc, "", "", "", "").map_err(Error::Query)?;
-        let index = column_index(&columns, "TABLE_CAT");
-        let mut names = BTreeSet::new();
-        for row in rows {
-            if let Some(CellValue::Text(name)) = index.and_then(|index| row.get(index))
-                && !name.is_empty()
-            {
-                names.insert(name.clone());
-            }
-        }
+        // ODBC's `SQLTables` catalog list only reports the *current* catalog on several drivers —
+        // SQL Server, and MySQL, which does not even fill `TABLE_CAT` in (so it reported no
+        // database at all) — so those engines ask the server directly. The rest fall back to the
+        // catalogs `SQLTables` exposes.
+        let names: Vec<String> = match self.engine.to_ascii_lowercase().as_str() {
+            "sqlserver" => self.first_column("SELECT name FROM sys.databases ORDER BY name")?,
+            "mysql" | "mariadb" => self.first_column("SHOW DATABASES")?,
+            _ => self.table_catalogs()?,
+        };
         Ok(names
             .into_iter()
             .map(|name| DatabaseInfo { name })

@@ -190,6 +190,12 @@ async fn live_odbc_connects_from_the_form_fields() {
         .unwrap_or_else(|error| panic!("connect with driver `{driver}`: {error}"));
 
     let databases = connection.list_databases().await.expect("list databases");
-    eprintln!("databases: {:?}", databases.len());
+    let names = databases
+        .iter()
+        .map(|database| database.name.clone())
+        .collect::<Vec<_>>();
+    eprintln!("databases: {names:?}");
+    // MySQL's ODBC driver leaves `TABLE_CAT` unset, so the catalog list used to come back empty.
+    assert!(!names.is_empty(), "expected at least one database");
     connection.close().await.expect("close");
 }
