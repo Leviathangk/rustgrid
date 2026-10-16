@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
+use gpui_kit::base::SelectableText;
+
 /// Height of one row in the identity form and the grant/role lists.
 const CREATE_ROW_HEIGHT: f32 = 26.0;
 /// Width of the identity form's label column; every label ends at the same x.
@@ -6161,12 +6163,15 @@ impl AppView {
                     .border_color(rgb(theme.border))
                     .bg(rgb(theme.input_bg))
                     .p_2()
+                    .cursor_text()
                     .child(
                         div()
                             .font_family("Consolas")
                             .text_size(px(12.0))
                             .text_color(rgb(theme.text))
-                            .child(text),
+                            // Selectable as well as copyable: the 复制 button above takes the whole
+                            // script, a mouse drag + Ctrl+C takes part of it.
+                            .child(SelectableText::new("user-create-sql-text", text)),
                     ),
             )
             .into_any_element()

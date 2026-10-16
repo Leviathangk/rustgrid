@@ -12,6 +12,7 @@ use super::user_create::{
     PrivilegeTooltip, catalog_label, preset_privileges, privilege_label, privilege_summary, section,
 };
 use super::*;
+use gpui_kit::base::SelectableText;
 
 /// Height of one account row in the account list.
 const PM_ROW_HEIGHT: f32 = 22.0;
@@ -972,12 +973,15 @@ impl PrivilegeManager {
                     .overflow_y_scroll()
                     .track_scroll(&self.sql_scroll)
                     .p_2()
+                    .cursor_text()
                     .child(
                         div()
                             .font_family("Consolas")
                             .text_size(px(12.5))
                             .text_color(rgb(self.theme.text))
-                            .child(text),
+                            // The script is read-only text the user must copy, so it is selectable
+                            // (mouse drag + Ctrl+C) rather than a plain label.
+                            .child(SelectableText::new("op-sql-text", text)),
                     )
                     .into_any_element()
             }
