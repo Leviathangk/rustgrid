@@ -61,10 +61,14 @@ impl TableDesignView {
 
         root = root.child(self.render_body(cx));
 
+        // The view's own origin in window space, so a popup's prepaint anchor (also window space)
+        // can be converted into view-local coordinates. Only the origin: `on_children_prepainted`
+        // reports the children, and the toolbar is the one sitting in the root's corner — the body
+        // (which knows the bottom edge) records the size.
         let root_bounds = self.root_bounds.clone();
         root = root.on_children_prepainted(move |bounds, _window, _cx| {
             if let Some(first) = bounds.first() {
-                *root_bounds.borrow_mut() = *first;
+                root_bounds.borrow_mut().origin = first.origin;
             }
         });
 
@@ -364,12 +368,24 @@ impl TableDesignView {
             }
         };
 
+        // The bottom half of the view's own box: this body fills everything below the sub-tabs, so
+        // its children's bottom edge is the designer's bottom edge. The root records the top-left
+        // half (see `render_design`) — a floating popup is a child of the root too, and letting it
+        // into the box would inflate the very measurement its own position is computed from.
+        let root_bounds = self.root_bounds.clone();
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .overflow_hidden()
+            .on_children_prepainted(move |bounds, _window, _cx| {
+                let union = bounds.iter().copied().reduce(|a, b| a.union(&b));
+                if let Some(union) = union {
+                    let mut recorded = root_bounds.borrow_mut();
+                    recorded.size = size(union.size.width, union.bottom() - recorded.origin.y);
+                }
+            })
             .child(content)
             .into_any_element()
     }
@@ -1666,7 +1682,7 @@ impl TableDesignView {
                         theme,
                     ));
                 }
-                INDEX_KIND_WIDTH
+                index_kind_width(&self.designer)
             }
             IndexComboField::Method => {
                 let current = index_method_label(&self.designer, index);
@@ -1768,7 +1784,9 @@ impl TableDesignView {
             };
         let below = view_height - anchor_y - reserved;
         let above = anchor_y - DESIGN_ROW_HEIGHT - reserved;
-        let open_up = below < INDEX_FIELDS_LIST_MIN_HEIGHT && above > below;
+        // With no measurement yet (the view's first frame) opening "above" would place the panel
+        // off the window, so a missing box always falls back to opening below the cell.
+        let open_up = view_height > 0.0 && below < INDEX_FIELDS_LIST_MIN_HEIGHT && above > below;
         let list_height = if open_up { above } else { below }
             .clamp(INDEX_FIELDS_LIST_MIN_HEIGHT, INDEX_FIELDS_LIST_HEIGHT);
 
@@ -1782,7 +1800,9 @@ impl TableDesignView {
                 this.close_index_fields(cx);
             }));
         if open_up {
-            panel = panel.bottom(px(view_height - anchor_y + DESIGN_ROW_HEIGHT));
+            // Above the cell: the panel's bottom edge sits on the cell's top edge, never below the
+            // view's own bottom (which is what a negative offset would mean).
+            panel = panel.bottom(px((view_height - anchor_y + DESIGN_ROW_HEIGHT).max(0.0)));
         } else {
             panel = panel.top(anchor.y);
         }

@@ -342,7 +342,7 @@ pub(super) fn index_grid_columns(designer: &TableDesignerSpec) -> Vec<(&'static 
     let mut columns = vec![
         ("design.index.name", INDEX_NAME_WIDTH),
         ("design.index.fields", INDEX_FIELDS_WIDTH),
-        ("design.index.type", INDEX_KIND_WIDTH),
+        ("design.index.type", index_kind_width(designer)),
     ];
     if designer.index_methods().is_some() {
         columns.push(("design.index.method", INDEX_METHOD_WIDTH));
@@ -351,6 +351,19 @@ pub(super) fn index_grid_columns(designer: &TableDesignerSpec) -> Vec<(&'static 
         columns.push(("design.index.comment", INDEX_COMMENT_WIDTH));
     }
     columns
+}
+
+/// The 索引类型 column's width: wide enough for the engine's longest kind label — SQL Server's
+/// `UNIQUE NONCLUSTERED` does not fit MySQL's 130px — and never narrower than the default. The cell
+/// and its drop-down share the width, so a long label is clipped in neither.
+pub(super) fn index_kind_width(designer: &TableDesignerSpec) -> f32 {
+    let longest = designer
+        .index_kinds
+        .iter()
+        .map(|kind| ui::approx_text_width(kind.label))
+        .fold(0.0, f32::max);
+    // The cell's own cell padding and trailing chevron, plus the drop-down row's check mark.
+    INDEX_KIND_WIDTH.max(longest + 34.0)
 }
 
 /// The 索引类型 cell's text for one index row: the engine's declared kind (`NORMAL`, `UNIQUE`,
