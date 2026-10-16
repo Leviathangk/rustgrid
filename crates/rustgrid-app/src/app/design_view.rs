@@ -297,6 +297,9 @@ impl TableDesignView {
 
     fn render_subtabs(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
+        // The bar's leading padding is part of `DESIGN_LABEL_INSET`: 8 (here) + a tab's 1px left
+        // border + its `px_4` padding is what puts the first tab's label (字段) on the same line as
+        // the grid's first header (列名) below it. Change one, check the constant.
         let mut bar = div()
             .flex()
             .flex_row()

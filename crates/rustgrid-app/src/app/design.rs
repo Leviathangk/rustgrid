@@ -15,10 +15,18 @@ pub(super) const DESIGN_HEADER_HEIGHT: f32 = 24.0;
 /// The row-header strip of every designer grid: the row marker's column, as narrow as the marker
 /// needs (the same 16px the table grid's gutter uses, `GRID_GUTTER_WIDTH`).
 pub(super) const DESIGN_GUTTER_WIDTH: f32 = 16.0;
-/// The left inset of a designer grid's cells *and* their header labels. A column's header, its
-/// value and the in-place editor that replaces the value must all start on the same line — keeping
-/// them on one constant is what stops a cell's text from drifting away from its header.
-pub(super) const DESIGN_CELL_INSET: f32 = 8.0;
+/// The x every designer label starts on: the sub-tab strip's first tab (字段) and the grid's first
+/// column — its header (列名), its values and the in-place editor a cell swaps in.
+///
+/// The tab reaches it through the strip's own `px_2` padding, a tab's 1px left border and its
+/// `px_4` padding (8 + 1 + 16, see `render_subtabs`); the grid through the row-header gutter plus
+/// [`DESIGN_CELL_INSET`]. Both sides derive from this one number so they cannot drift apart.
+pub(super) const DESIGN_LABEL_INSET: f32 = 25.0;
+/// The left inset of a designer grid's cells *and* their header labels: the room
+/// [`DESIGN_LABEL_INSET`] leaves after the row-header gutter. A column's header, its value and the
+/// in-place editor that replaces the value all start on this inset — one constant, so a cell's
+/// text cannot drift away from its header.
+pub(super) const DESIGN_CELL_INSET: f32 = DESIGN_LABEL_INSET - DESIGN_GUTTER_WIDTH;
 pub(super) const FIELD_NAME_WIDTH: f32 = 246.0;
 pub(super) const FIELD_TYPE_WIDTH: f32 = 178.0;
 pub(super) const FIELD_LENGTH_WIDTH: f32 = 90.0;
@@ -3299,6 +3307,147 @@ mod tests {
             FieldCell::Text(FieldColumn::Decimals),
             FieldCell::Text(FieldColumn::Comment),
         ]
+    }
+
+    /// The designer's labels must share one left edge: the sub-tab strip's first tab (字段) and the
+    /// grid's first column — its header (列名), its values and the in-place editor a cell swaps in.
+    ///
+    /// The elements hereby mirror the two chains that build them, `render_subtabs` (the strip's
+    /// `px_2` padding, a tab's 1px left border and its `px_4` padding) and the grid's header/value
+    /// cells (the row-header gutter plus `DESIGN_CELL_INSET`), so a change on either side that
+    /// forgets `DESIGN_LABEL_INSET` fails here.
+    #[gpui_kit::test]
+    fn the_sub_tab_label_and_the_grid_labels_share_one_left_edge(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        use gpui::{Bounds, IntoElement, Point, Render, Window, WindowBounds, WindowOptions, size};
+        use gpui_kit::TestSupportExt as _;
+        use gpui_kit::test::TestWindowExt as _;
+
+        struct Probe;
+        impl Render for Probe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let theme = Theme::light();
+                div()
+                    .size_full()
+                    .bg(rgb(theme.editor_bg))
+                    .text_color(rgb(theme.text))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_end()
+                            .gap_1()
+                            .h(px(26.0))
+                            .flex_none()
+                            .px_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .px_4()
+                                    .h(px(24.0))
+                                    .text_size(px(12.0))
+                                    .border_t_1()
+                                    .border_l_1()
+                                    .border_r_1()
+                                    .child(div().id("tab-label").test_support().child("字段")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_none()
+                            .h(px(DESIGN_HEADER_HEIGHT))
+                            .w_full()
+                            .child(
+                                div()
+                                    .w(px(DESIGN_GUTTER_WIDTH))
+                                    .h(px(DESIGN_HEADER_HEIGHT))
+                                    .flex_none()
+                                    .border_r_1(),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .h(px(DESIGN_HEADER_HEIGHT))
+                                    .w(px(200.0))
+                                    .flex_none()
+                                    .px(px(DESIGN_CELL_INSET))
+                                    .child(div().id("head-label").test_support().child("列名")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_none()
+                            .h(px(DESIGN_ROW_HEIGHT))
+                            .child(
+                                div()
+                                    .w(px(DESIGN_GUTTER_WIDTH))
+                                    .h(px(DESIGN_ROW_HEIGHT))
+                                    .flex_none()
+                                    .border_r_1(),
+                            )
+                            .child(
+                                div()
+                                    .id("value-cell")
+                                    .flex()
+                                    .items_center()
+                                    .h(px(DESIGN_ROW_HEIGHT))
+                                    .w(px(200.0))
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .border_r_1()
+                                    .border_b_1()
+                                    .pl(px(DESIGN_CELL_INSET))
+                                    .pr(px(4.0))
+                                    .child(div().id("value-label").test_support().child("id")),
+                            ),
+                    )
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        let (handle, _) = cx.update(|cx| {
+            let probe = cx.new(|_| Probe);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(800.0), px(600.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| probe.clone(),
+            )
+            .expect("open test window")
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (tab_x, head_x, value_x) = cx
+            .update_window(handle, |_, window, _cx| {
+                (
+                    f32::from(window.find("tab-label").bounds().origin.x),
+                    f32::from(window.find("head-label").bounds().origin.x),
+                    f32::from(window.find("value-label").bounds().origin.x),
+                )
+            })
+            .unwrap();
+        assert_eq!(tab_x, DESIGN_LABEL_INSET, "the first sub-tab's label");
+        assert_eq!(head_x, DESIGN_LABEL_INSET, "a column's header label");
+        assert_eq!(value_x, DESIGN_LABEL_INSET, "a column's value");
     }
 
     #[test]
