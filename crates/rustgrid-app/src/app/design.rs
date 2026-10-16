@@ -43,15 +43,16 @@ pub(super) const INDEX_COMMENT_WIDTH: f32 = 240.0;
 // The index field editor's per-row controls.
 pub(super) const INDEX_FIELD_NAME_WIDTH: f32 = 200.0;
 pub(super) const INDEX_FIELD_OPTION_WIDTH: f32 = 80.0;
+/// What a row leads its name with: the ▶ marker, the check box and the gaps between the three. The
+/// header, which has neither, offsets its 字段 label by the same amount so the 排序 / 子部分 cells line
+/// up with it.
+pub(super) const INDEX_FIELD_LEAD_WIDTH: f32 = 39.0;
 
-// The index field editor's panel metrics. The list is as tall as the window allows (up to
-// `INDEX_FIELDS_LIST_HEIGHT`) instead of a fixed 240px that cut the footer off on a short window,
-// and `INDEX_FIELDS_CHROME_HEIGHT` is the header, footer and padding around it. The expanded field
-// list brings its own search box, so its height is shared by both.
-pub(super) const INDEX_FIELDS_LIST_HEIGHT: f32 = 340.0;
-pub(super) const INDEX_FIELDS_LIST_MIN_HEIGHT: f32 = 96.0;
-pub(super) const INDEX_FIELDS_PICKER_HEIGHT: f32 = 200.0;
-pub(super) const INDEX_FIELDS_SEARCH_HEIGHT: f32 = 32.0;
+// The index field editor's panel metrics. Its list is as tall as the window allows (up to
+// `INDEX_FIELDS_LIST_HEIGHT`) instead of a fixed 240px that cut the footer off on a short window;
+// `INDEX_FIELDS_CHROME_HEIGHT` is the header, footer and padding around it.
+pub(super) const INDEX_FIELDS_LIST_HEIGHT: f32 = 420.0;
+pub(super) const INDEX_FIELDS_LIST_MIN_HEIGHT: f32 = 120.0;
 pub(super) const INDEX_FIELDS_CHROME_HEIGHT: f32 = 96.0;
 
 // The foreign-key grid's columns.
@@ -300,11 +301,26 @@ fn apply_row_selection(
     }
 }
 
+/// One row of the index field editor's list: a column of the table, whether it is a member of the
+/// index being edited, and — for a member — its own per-column options.
+#[derive(Clone)]
+pub(super) struct IndexFieldRow {
+    pub(super) name: String,
+    /// Whether the column is one of the index's fields (the editor's check box).
+    pub(super) member: bool,
+    pub(super) descending: bool,
+    pub(super) prefix_length: String,
+}
+
 /// The index field editor's open draft.
 ///
-/// Every edit (name, 排序, 子部分, order, add/remove) lands here and only 确定 installs it; 取消 or a
-/// click outside discards it, exactly as Navicat's editor does. A draft for the primary key row edits
-/// the columns' 主键 flags instead — the model keeps that key on the columns, so its rows carry no
+/// The editor is Navicat's: one row per *column of the table* with a check box, so a field is
+/// picked by ticking it rather than by typing a name, and the list can be reordered with ↑ ↓. The
+/// ticked rows, in list order, are the index's fields.
+///
+/// Every edit (the ticks, 排序, 子部分, the order) lands here and only 确定 installs it; 取消 or a click
+/// outside discards it, exactly as Navicat's editor does. A draft for the primary key row edits the
+/// columns' 主键 flags instead — the model keeps that key on the columns, so its rows carry no
 /// per-column options.
 #[derive(Clone)]
 pub(super) struct IndexFieldsDraft {
@@ -312,10 +328,26 @@ pub(super) struct IndexFieldsDraft {
     pub(super) row: usize,
     /// Whether this is the 主键 row.
     pub(super) primary: bool,
-    /// The chosen columns, in index order.
-    pub(super) columns: Vec<IndexColumnDef>,
-    /// The row the footer's ↑ ↓ − act on.
+    /// Every column of the table, in the order the editor lists them (the table's own order at
+    /// first, permuted with ↑ ↓).
+    pub(super) fields: Vec<IndexFieldRow>,
+    /// The row the footer's ↑ ↓ + − and the ▶ marker act on.
     pub(super) selected: Option<usize>,
+}
+
+impl IndexFieldsDraft {
+    /// The ticked fields, in list order: what 确定 installs.
+    pub(super) fn members(&self) -> Vec<IndexColumnDef> {
+        self.fields
+            .iter()
+            .filter(|field| field.member)
+            .map(|field| IndexColumnDef {
+                name: field.name.clone(),
+                descending: field.descending,
+                prefix_length: field.prefix_length.clone(),
+            })
+            .collect()
+    }
 }
 
 /// The text editor columns of the index grid.
@@ -404,16 +436,33 @@ pub(super) fn default_index_kind(designer: &TableDesignerSpec) -> (bool, String)
         .unwrap_or((false, String::new()))
 }
 
-/// The index field editor's width: the field column plus the engine's per-column option cells, so
-/// a wide set (MySQL's 排序 + 子部分) is never clipped — the grid's own 字段 column is a different
-/// width and must not size this panel.
-pub(super) fn index_fields_panel_width(designer: &TableDesignerSpec, primary: bool) -> f32 {
+/// The 字段 column's width in the index field editor: the table's longest column name plus a little
+/// slack, so a long field (`CUSTOMER_GRP_SCH_DETAIL_ID`) is drawn in full instead of being wrapped
+/// or clipped.
+pub(super) fn index_fields_name_width(columns: &[ColumnDef]) -> f32 {
+    let longest = columns
+        .iter()
+        .map(|column| ui::approx_text_width(&column.name))
+        .fold(0.0, f32::max);
+    INDEX_FIELD_NAME_WIDTH.max(longest + 8.0)
+}
+
+/// The width of the whole editor: the 字段 column, the ▶ marker and check box the rows lead with,
+/// the engine's per-column option cells (MySQL's 排序 + 子部分) and the panel's own padding.
+pub(super) fn index_fields_panel_width(
+    designer: &TableDesignerSpec,
+    columns: &[ColumnDef],
+    primary: bool,
+) -> f32 {
     let options = if primary {
         0
     } else {
         designer.index_columns.len()
     } as f32;
-    INDEX_FIELD_NAME_WIDTH + options * (INDEX_FIELD_OPTION_WIDTH + 8.0) + 24.0
+    index_fields_name_width(columns)
+        + INDEX_FIELD_LEAD_WIDTH
+        + options * (INDEX_FIELD_OPTION_WIDTH + 8.0)
+        + 24.0
 }
 
 /// Add `value` to `list`, or remove it if it is already present.
@@ -499,19 +548,12 @@ pub(super) struct TableDesignView {
     /// Which index row's kind/method dropdown is open.
     pub(super) index_combo: Option<(usize, IndexComboField)>,
     pub(super) index_combo_anchor: IndexComboAnchors,
-    /// The 字段 drop-down of the selected index, as a draft (see [`IndexFieldsDraft`]).
+    /// The 字段 editor of the selected index, as a draft (see [`IndexFieldsDraft`]).
     pub(super) index_fields_draft: Option<IndexFieldsDraft>,
     pub(super) index_fields_anchor: DesignPickerAnchors,
-    /// The draft row whose field list is expanded (an inline list, not a floating menu: a menu would
-    /// render outside this panel's bounds and the panel's click-outside handler would close it).
-    pub(super) index_field_picker: Option<usize>,
-    /// The 子部分 input of each draft row, rebuilt whenever the draft's rows change (the wrapper
-    /// builds its inner state on the first render).
+    /// The 子部分 input of each draft row that is part of the index, rebuilt whenever the draft's
+    /// rows change (the wrapper builds its inner state on the first render).
     pub(super) index_field_prefix_inputs: BTreeMap<usize, Entity<TextInput>>,
-    /// The search box of the expanded field list and the text it holds (kept across rows, like the
-    /// type drop-down's, so the filter does not rebuild on every render).
-    pub(super) index_field_search: Option<Entity<TextInput>>,
-    pub(super) index_field_query: String,
     /// The unique-key grid: its own selection, in-place name editor and field picker. An engine
     /// only shows the tab when its [`TableDesignerSpec`] declares it.
     pub(super) selected_unique_key: Option<usize>,
@@ -695,10 +737,7 @@ impl TableDesignView {
             index_combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             index_fields_draft: None,
             index_fields_anchor: Rc::new(RefCell::new(BTreeMap::new())),
-            index_field_picker: None,
             index_field_prefix_inputs: BTreeMap::new(),
-            index_field_search: None,
-            index_field_query: String::new(),
             selected_unique_key: None,
             unique_key_rows: RowSelection::default(),
             unique_key_edit: None,
@@ -2137,6 +2176,10 @@ impl TableDesignView {
 
     /// Open the 字段 editor for one index row as a draft. The primary key row is editable too: the
     /// model keeps its columns as the 主键 flags on the columns, so its draft edits those flags.
+    ///
+    /// The list is every column of the table in its own order, with the index's fields ticked — the
+    /// shape Navicat uses, which also means a long column name is shown in full instead of being
+    /// typed.
     pub(super) fn open_index_fields(
         &mut self,
         row: usize,
@@ -2147,7 +2190,7 @@ impl TableDesignView {
             return;
         };
         let primary = index.primary;
-        let columns: Vec<IndexColumnDef> = if primary {
+        let members: Vec<IndexColumnDef> = if primary {
             self.schema
                 .columns
                 .iter()
@@ -2157,15 +2200,41 @@ impl TableDesignView {
         } else {
             index.columns.clone()
         };
+        let fields: Vec<IndexFieldRow> = self
+            .schema
+            .columns
+            .iter()
+            .map(|column| {
+                let member = members
+                    .iter()
+                    .find(|member| member.name == column.name)
+                    .cloned()
+                    .unwrap_or_else(|| IndexColumnDef::new(column.name.clone()));
+                IndexFieldRow {
+                    name: column.name.clone(),
+                    member: members
+                        .iter()
+                        .any(|candidate| candidate.name == column.name),
+                    descending: member.descending,
+                    prefix_length: member.prefix_length,
+                }
+            })
+            .collect();
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
         self.select_index(row, cx);
+        // The caret starts on the first field that is part of the index, so ↑ ↓ + − have something
+        // to act on; on a brand-new index that is the first row.
+        let selected = fields
+            .iter()
+            .position(|field| field.member)
+            .or((!fields.is_empty()).then_some(0));
         self.index_fields_draft = Some(IndexFieldsDraft {
             row,
             primary,
-            selected: (!columns.is_empty()).then_some(0),
-            columns,
+            fields,
+            selected,
         });
         self.rebuild_index_field_inputs(cx);
         cx.notify();
@@ -2179,18 +2248,14 @@ impl TableDesignView {
         }
     }
 
-    /// Apply the draft: an ordinary index takes its column list, the primary key takes the flags.
+    /// Apply the draft: an ordinary index takes its field list, the primary key takes the flags.
     pub(super) fn confirm_index_fields(&mut self, cx: &mut Context<'_, Self>) {
         let Some(draft) = self.index_fields_draft.take() else {
             return;
         };
-        let columns: Vec<IndexColumnDef> = draft
-            .columns
-            .into_iter()
-            .filter(|column| !column.name.trim().is_empty())
-            .collect();
+        let fields = draft.members();
         if draft.primary {
-            let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
+            let names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
             for column in self.schema.columns.iter_mut() {
                 let primary = names.contains(&column.name);
                 column.primary_key = primary;
@@ -2199,7 +2264,7 @@ impl TableDesignView {
                 }
             }
         } else if let Some(index) = self.schema.indexes.get_mut(draft.row) {
-            index.columns = columns;
+            index.columns = fields;
         }
         self.discard_index_field_inputs();
         self.mark_dirty(cx);
@@ -2207,9 +2272,7 @@ impl TableDesignView {
 
     /// Drop the draft's per-row controls (`None` draft, or rows changed under them).
     fn discard_index_field_inputs(&mut self) {
-        self.index_field_picker = None;
         self.index_field_prefix_inputs.clear();
-        self.index_field_query.clear();
     }
 
     /// Rebuild the per-row controls after the draft's rows changed.
@@ -2218,8 +2281,8 @@ impl TableDesignView {
         let Some(draft) = self.index_fields_draft.clone() else {
             return;
         };
-        // The primary key's rows carry no per-column options (the model keeps the key on the
-        // columns themselves).
+        // The primary key's rows carry no per-column options, and 子部分 only applies to a field that
+        // is part of the index — an unticked row shows an empty cell, so no editor is built for it.
         let has_prefix = !draft.primary
             && self
                 .designer
@@ -2229,11 +2292,14 @@ impl TableDesignView {
             return;
         }
         let theme = self.theme;
-        for (draft_row, column) in draft.columns.iter().enumerate() {
+        for (draft_row, field) in draft.fields.iter().enumerate() {
+            if !field.member {
+                continue;
+            }
             let weak = self.self_weak.clone();
             let input = text_input(
                 theme,
-                column.prefix_length.clone(),
+                field.prefix_length.clone(),
                 weak,
                 InputTag::IndexPrefix(draft_row),
                 cx,
@@ -2242,75 +2308,7 @@ impl TableDesignView {
         }
     }
 
-    /// Expand (or collapse) one draft row's field list and put the caret in its search box, so a
-    /// wide table's field is found by typing rather than by scrolling.
-    pub(super) fn toggle_index_field_picker(
-        &mut self,
-        row: usize,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.index_field_picker == Some(row) {
-            self.index_field_picker = None;
-            self.index_field_query.clear();
-            cx.notify();
-            return;
-        }
-        self.index_field_picker = Some(row);
-        self.index_field_query.clear();
-        let theme = self.theme;
-        let weak = self.self_weak.clone();
-        let filter = weak.clone();
-        let cancel = weak;
-        let input = self
-            .index_field_search
-            .get_or_insert_with(|| {
-                cx.new(move |cx| {
-                    TextInput::new(
-                        theme,
-                        "",
-                        TextInputOptions {
-                            size: Some(Size::XSmall),
-                            text_size: Some(12.0),
-                            ..Default::default()
-                        },
-                        cx,
-                    )
-                    .on_change(Rc::new(move |text, _window, cx| {
-                        let _ = filter.update(cx, |view, cx| {
-                            view.index_field_query = text.to_string();
-                            cx.notify();
-                        });
-                    }))
-                    .on_cancel(Rc::new(move |_window, cx| {
-                        let _ = cancel.update(cx, |view, cx| {
-                            view.index_field_picker = None;
-                            view.index_field_query.clear();
-                            cx.notify();
-                        });
-                    }))
-                })
-            })
-            .clone();
-        input.update(cx, |input, cx| input.set_text("", cx));
-        let focus = input.read(cx).focus_handle();
-        window.focus(&focus, cx);
-        cx.notify();
-    }
-
-    /// The columns the open field list offers: every column of the table, in the table's own order,
-    /// narrowed by the search box's text (the same subsequence match the type drop-down uses).
-    pub(super) fn index_field_options(&self) -> Vec<String> {
-        let query = self.index_field_query.trim().to_lowercase();
-        self.schema
-            .columns
-            .iter()
-            .map(|column| column.name.clone())
-            .filter(|name| query.is_empty() || is_fuzzy_subsequence(&query, &name.to_lowercase()))
-            .collect()
-    }
-
-    /// Select the draft row the footer's ↑ ↓ − act on.
+    /// Select the draft row the footer's ↑ ↓ + − act on.
     pub(super) fn select_index_draft_row(&mut self, row: usize, cx: &mut Context<'_, Self>) {
         if let Some(draft) = self.index_fields_draft.as_mut() {
             draft.selected = Some(row);
@@ -2318,91 +2316,77 @@ impl TableDesignView {
         }
     }
 
-    /// Give one draft row the column the user picked from its expanded list.
-    pub(super) fn set_index_draft_name(
-        &mut self,
-        draft_row: usize,
-        name: &str,
-        cx: &mut Context<'_, Self>,
-    ) {
+    /// Tick (or untick) one row's check box, which is what adds or removes the field.
+    pub(super) fn toggle_index_draft_member(&mut self, row: usize, cx: &mut Context<'_, Self>) {
         if let Some(draft) = self.index_fields_draft.as_mut()
-            && let Some(column) = draft.columns.get_mut(draft_row)
+            && let Some(field) = draft.fields.get_mut(row)
         {
-            column.name = name.to_string();
-        }
-        self.index_field_picker = None;
-        self.index_field_query.clear();
-        cx.notify();
-    }
-
-    /// Flip one draft column between `ASC` and `DESC`.
-    pub(super) fn toggle_index_draft_sort(&mut self, draft_row: usize, cx: &mut Context<'_, Self>) {
-        if let Some(draft) = self.index_fields_draft.as_mut()
-            && let Some(column) = draft.columns.get_mut(draft_row)
-        {
-            column.descending = !column.descending;
-        }
-        cx.notify();
-    }
-
-    fn set_index_draft_prefix(&mut self, draft_row: usize, text: &str, cx: &mut Context<'_, Self>) {
-        if let Some(draft) = self.index_fields_draft.as_mut()
-            && let Some(column) = draft.columns.get_mut(draft_row)
-        {
-            column.prefix_length = text.to_string();
-        }
-        cx.notify();
-    }
-
-    /// Append a draft row, starting from the first column the draft does not use yet.
-    pub(super) fn add_index_draft_column(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(draft) = self.index_fields_draft.as_ref() else {
-            return;
-        };
-        let used: Vec<String> = draft
-            .columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect();
-        let next = self
-            .schema
-            .columns
-            .iter()
-            .find(|column| !used.contains(&column.name))
-            .map(|column| column.name.clone())
-            .unwrap_or_default();
-        let row = draft.columns.len();
-        if let Some(draft) = self.index_fields_draft.as_mut() {
-            draft.columns.push(IndexColumnDef::new(next));
+            field.member = !field.member;
             draft.selected = Some(row);
         }
         self.rebuild_index_field_inputs(cx);
         cx.notify();
     }
 
-    /// Remove the selected draft row (the last one when nothing is selected).
-    pub(super) fn remove_index_draft_column(&mut self, cx: &mut Context<'_, Self>) {
+    /// Flip one draft field between `ASC` and `DESC`.
+    pub(super) fn toggle_index_draft_sort(&mut self, draft_row: usize, cx: &mut Context<'_, Self>) {
+        if let Some(draft) = self.index_fields_draft.as_mut()
+            && let Some(field) = draft.fields.get_mut(draft_row)
+        {
+            field.descending = !field.descending;
+        }
+        cx.notify();
+    }
+
+    fn set_index_draft_prefix(&mut self, draft_row: usize, text: &str, cx: &mut Context<'_, Self>) {
+        if let Some(draft) = self.index_fields_draft.as_mut()
+            && let Some(field) = draft.fields.get_mut(draft_row)
+        {
+            field.prefix_length = text.to_string();
+        }
+        cx.notify();
+    }
+
+    /// The footer's `+`: add the selected field to the index, or the first field the index does
+    /// not have when the caret is not on one.
+    pub(super) fn add_index_draft_column(&mut self, cx: &mut Context<'_, Self>) {
         let Some(draft) = self.index_fields_draft.as_mut() else {
             return;
         };
-        if draft.columns.is_empty() {
-            return;
-        }
         let row = draft
             .selected
-            .unwrap_or(draft.columns.len() - 1)
-            .min(draft.columns.len() - 1);
-        draft.columns.remove(row);
-        draft.selected = if draft.columns.is_empty() {
-            None
-        } else {
-            Some(row.min(draft.columns.len() - 1))
+            .filter(|row| draft.fields.get(*row).is_some_and(|field| !field.member))
+            .or_else(|| draft.fields.iter().position(|field| !field.member));
+        let Some(row) = row else {
+            return;
         };
+        draft.fields[row].member = true;
+        draft.selected = Some(row);
         self.rebuild_index_field_inputs(cx);
         cx.notify();
     }
 
-    /// Move the selected draft row by one position (`-1` towards the first column).
+    /// The footer's `−`: take the selected field out of the index (the last one when the caret is
+    /// not on a field of it).
+    pub(super) fn remove_index_draft_column(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(draft) = self.index_fields_draft.as_mut() else {
+            return;
+        };
+        let row = draft
+            .selected
+            .filter(|row| draft.fields.get(*row).is_some_and(|field| field.member))
+            .or_else(|| draft.fields.iter().rposition(|field| field.member));
+        let Some(row) = row else {
+            return;
+        };
+        draft.fields[row].member = false;
+        draft.selected = Some(row);
+        self.rebuild_index_field_inputs(cx);
+        cx.notify();
+    }
+
+    /// Move the selected draft row by one position (`-1` towards the top of the list), which is how
+    /// the index's field order is set.
     pub(super) fn move_index_draft_column(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
         let Some(draft) = self.index_fields_draft.as_mut() else {
             return;
@@ -2411,11 +2395,11 @@ impl TableDesignView {
             return;
         };
         let target = row as isize + delta;
-        if target < 0 || target as usize >= draft.columns.len() {
+        if target < 0 || target as usize >= draft.fields.len() {
             return;
         }
         let target = target as usize;
-        draft.columns.swap(row, target);
+        draft.fields.swap(row, target);
         draft.selected = Some(target);
         self.rebuild_index_field_inputs(cx);
         cx.notify();

@@ -1732,17 +1732,18 @@ impl TableDesignView {
         }
     }
 
-    /// The index's 字段 editor: its columns in order, each with the engine's per-column options
-    /// (排序 for every engine, 子部分 for MySQL/MariaDB), reordered with ↑ ↓ and removed with −.
+    /// The index's 字段 editor, shaped like Navicat's: one row per *column of the table* with a check
+    /// box, its 排序 and its 子部分 (the engine's own per-column options), and the footer's ↑ ↓ + − plus
+    /// 取消 / 确定.
     ///
     /// Everything edits a draft; 确定 installs it and 取消 (or a click outside) throws it away, so the
-    /// grid never shows a half-made change. The 主键 row opens here too — its draft edits the 主键
+    /// grid never shows a half-made change. The 主键 row opens here too — its draft ticks the 主键
     /// flags, which is where the model keeps the key — and therefore carries no per-column options.
     ///
-    /// The panel is sized from its own columns — the grid's 字段 column is narrower than 字段 + 排序 +
-    /// 子部分, which is what used to clip 子部分 — and from the room the view has: it opens under the
+    /// The panel is sized from the table's own names — a long field (CUSTOMER_GRP_SCH_DETAIL_ID) is
+    /// shown in full instead of being wrapped — and from the room the view has: it opens under the
     /// cell, or above it when that is where the space is, and the list takes whatever height is left
-    /// so the footer's 取消 / 确定 are never pushed out of the window.
+    /// so the footer's buttons are never pushed out of the window.
     fn render_index_fields_popup(
         &self,
         _window: &mut Window,
@@ -1774,16 +1775,13 @@ impl TableDesignView {
                 .designer
                 .index_columns
                 .contains(&DesignerIndexColumn::PrefixLength);
-        let picker_open = self.index_field_picker.is_some();
-        let width = index_fields_panel_width(&self.designer, draft.primary);
-        let reserved = INDEX_FIELDS_CHROME_HEIGHT
-            + if picker_open {
-                INDEX_FIELDS_PICKER_HEIGHT
-            } else {
-                0.0
-            };
-        let below = view_height - anchor_y - reserved;
-        let above = anchor_y - DESIGN_ROW_HEIGHT - reserved;
+        let width = index_fields_panel_width(&self.designer, &self.schema.columns, draft.primary);
+        // The row's own name cell, and what the header (which has no ▶ or check box) offsets its
+        // 字段 label by so the 排序 / 子部分 headings line up with the cells.
+        let name_width = index_fields_name_width(&self.schema.columns);
+        let lead_width = INDEX_FIELD_LEAD_WIDTH;
+        let below = view_height - anchor_y - INDEX_FIELDS_CHROME_HEIGHT;
+        let above = anchor_y - DESIGN_ROW_HEIGHT - INDEX_FIELDS_CHROME_HEIGHT;
         // With no measurement yet (the view's first frame) opening "above" would place the panel
         // off the window, so a missing box always falls back to opening below the cell.
         let open_up = view_height > 0.0 && below < INDEX_FIELDS_LIST_MIN_HEIGHT && above > below;
@@ -1820,7 +1818,7 @@ impl TableDesignView {
             .text_color(rgb(theme.text_muted))
             .child(
                 div()
-                    .w(px(INDEX_FIELD_NAME_WIDTH))
+                    .w(px(name_width + lead_width))
                     .flex_none()
                     .child(t!("design.index.fields").to_string()),
             );
@@ -1846,48 +1844,10 @@ impl TableDesignView {
             .min_h(px(24.0))
             .max_h(px(list_height))
             .overflow_y_scroll();
-        for (row, column) in draft.columns.iter().enumerate() {
+        for (row, field) in draft.fields.iter().enumerate() {
             let selected = draft.selected == Some(row);
-            // The name cell is the row's drop-down: clicking it opens the panel's field list (an
-            // in-panel list rather than a floating menu, which this panel would treat as a click
-            // outside and close) with a search box to find the column by typing.
-            let expanded = self.index_field_picker == Some(row);
-            let mut name_cell = div()
-                .id(SharedString::from(format!("index-field-name-{row}")))
-                .flex()
-                .flex_row()
-                .items_center()
-                .w(px(INDEX_FIELD_NAME_WIDTH))
-                .h(px(20.0))
-                .flex_none()
-                .rounded(px(3.0))
-                .border_1()
-                .border_color(rgb(theme.border))
-                .bg(rgb(theme.input_bg))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _event, window, cx| {
-                    this.toggle_index_field_picker(row, window, cx)
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .px_1()
-                        .overflow_hidden()
-                        .child(column.name.clone()),
-                )
-                .child(
-                    svg()
-                        .path("icons/chevron-down.svg")
-                        .w(px(10.0))
-                        .h(px(10.0))
-                        .flex_none()
-                        .mr_1()
-                        .text_color(rgb(theme.text_muted)),
-                );
-            if expanded {
-                name_cell = name_cell.border_color(rgb(theme.primary));
-            }
+            // A row is the whole cell: ticking its check box adds (or removes) the field, and
+            // clicking it moves the ▶ marker the footer's ↑ ↓ + − work from.
             let mut line = div()
                 .id(SharedString::from(format!("index-field-row-{row}")))
                 .flex()
@@ -1895,16 +1855,59 @@ impl TableDesignView {
                 .items_center()
                 .gap_2()
                 .px_2()
-                .h(px(26.0))
+                .h(px(DESIGN_ROW_HEIGHT))
                 .flex_none()
                 .cursor_pointer()
                 .when(selected, |style| style.bg(rgb(theme.tree_selected_bg)))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.select_index_draft_row(row, cx)
                 }))
-                .child(name_cell);
-            if sort {
-                let descending = column.descending;
+                .child(
+                    // The row marker, as the grids' own gutter draws it.
+                    div()
+                        .w(px(10.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(selected, |marker| {
+                            marker.child(
+                                svg()
+                                    .path("icons/row_marker.svg")
+                                    .w(px(7.0))
+                                    .h(px(7.0))
+                                    .flex_none()
+                                    .text_color(rgb(theme.primary)),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("index-field-check-{row}")))
+                        .flex_none()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.toggle_index_draft_member(row, cx)
+                        }))
+                        .child(checkbox_box(field.member, theme)),
+                )
+                .child(
+                    // The field's own name, never wrapped (the column is fitted to the table's
+                    // longest one) and never clipped away from the caret.
+                    div()
+                        .w(px(name_width))
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_color(rgb(if field.member {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        }))
+                        .child(field.name.clone()),
+                );
+            if sort && field.member {
+                let descending = field.descending;
                 line = line.child(
                     div()
                         .id(SharedString::from(format!("index-field-sort-{row}")))
@@ -1924,6 +1927,8 @@ impl TableDesignView {
                         }))
                         .child(if descending { "DESC" } else { "ASC" }.to_string()),
                 );
+            } else if sort {
+                line = line.child(div().w(px(INDEX_FIELD_OPTION_WIDTH)).flex_none());
             }
             if prefix {
                 let cell: AnyElement = match self.index_field_prefix_inputs.get(&row) {
@@ -1940,86 +1945,6 @@ impl TableDesignView {
             list = list.child(line);
         }
         panel = panel.child(list);
-
-        if self.index_field_picker.is_some() {
-            // The field list sits under the rows as the panel's own sub-list. It is not nested in
-            // the rows' scroller — a wheel event reaches *every* scrollable hitbox under the cursor,
-            // so nesting one inside another would scroll both.
-            panel = panel.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_none()
-                    .border_b_1()
-                    .border_color(rgb(theme.border))
-                    .bg(rgb(theme.dialog_bg))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .py_1()
-                            .border_b_1()
-                            .border_color(rgb(theme.border))
-                            .child({
-                                let search: AnyElement = match self.index_field_search.clone() {
-                                    Some(input) => {
-                                        div().h(px(20.0)).child(input).into_any_element()
-                                    }
-                                    None => div().h(px(20.0)).into_any_element(),
-                                };
-                                search
-                            }),
-                    )
-                    .child({
-                        let mut options = div()
-                            .id("design-index-field-options")
-                            .flex()
-                            .flex_col()
-                            .flex_none()
-                            .max_h(px(INDEX_FIELDS_PICKER_HEIGHT - INDEX_FIELDS_SEARCH_HEIGHT))
-                            .overflow_y_scroll();
-                        for (row, column) in draft.columns.iter().enumerate() {
-                            if self.index_field_picker != Some(row) {
-                                continue;
-                            }
-                            for name in self.index_field_options() {
-                                let picked = name == column.name;
-                                let option_name = name.clone();
-                                options = options.child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "index-field-option-{row}-{name}"
-                                        )))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_1()
-                                        .h(px(20.0))
-                                        .px_2()
-                                        .flex_none()
-                                        .cursor_pointer()
-                                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                                            this.set_index_draft_name(row, &option_name, cx)
-                                        }))
-                                        .child(name)
-                                        .child(
-                                            svg()
-                                                .path("icons/check.svg")
-                                                .w(px(12.0))
-                                                .h(px(12.0))
-                                                .flex_none()
-                                                .text_color(rgb(theme.tree_selected_text))
-                                                .opacity(if picked { 1.0 } else { 0.0 }),
-                                        ),
-                                );
-                            }
-                        }
-                        options
-                    }),
-            );
-        }
 
         let mut footer = div()
             .flex()
