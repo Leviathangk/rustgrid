@@ -2415,13 +2415,19 @@ impl TableDesignView {
     }
 
     pub(super) fn preview_sql(&self) -> String {
-        // A brand-new table has no name until the first save, so there is nothing to preview yet.
-        if self.is_new && self.table.is_empty() {
-            return String::new();
-        }
+        // A brand-new table has no name until the app asks for one on save, but the columns and
+        // indexes the user is already defining are worth previewing, so the statement is built
+        // against a placeholder name (`new_table`) — it is not stored anywhere and the preview
+        // switches to the real name as soon as the create has run.
+        let placeholder = t!("design.unnamed_table").to_string();
+        let table = if self.table.is_empty() {
+            placeholder.as_str()
+        } else {
+            self.table.as_str()
+        };
         self.connection.table_schema_sql(
             &self.database,
-            &self.table,
+            table,
             self.original.as_ref(),
             &self.schema,
         )
