@@ -205,6 +205,11 @@ not a later refactor.
 - No `DATABASE_URL` or sqlx offline cache: queries use the **runtime** API (`sqlx::query`,
   not `sqlx::query!`). Do not add the `macros` feature.
 - `Cargo.lock` is committed (this is an application, not a library). No CI yet.
+- **Never move the version on your own.** The workspace version in the root `Cargo.toml`, the git
+  tags and the GitHub releases change **only when the maintainer asks for that version** — do not
+  bump one because changes landed, do not pick the number yourself, and do not tag, re-tag or delete
+  a release unbidden. Write a version's section when (and only when) that version is bumped on
+  request.
 - **Every version change is recorded in both changelogs — no exceptions.** The moment the workspace
   version in the root `Cargo.toml` changes, the same commit writes that version's section into
   **both** `CHANGELOG.md` and `CHANGELOG_zh.md` (newest first, Keep-a-Changelog headings — Added /

@@ -9,16 +9,22 @@ All notable changes to RustGrid are documented in this file. The format is based
 UI labels are quoted as the app shows them, so this file quotes the English strings;
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) quotes the 简体中文 ones.
 
-## [0.0.14] - 2026-10-16
+## [0.0.13] - 2026-10-16
 
 ### Added
 
+- Each engine's designer shows its own shape: SQL Server gets Collation / Sparse, Size / Scale / Computed
+  and Unique Keys / Checks tabs; SQLite, PostgreSQL and Oracle drop the pages they lack.
+- SQL Server's designer edits unique constraints and check constraints as well.
 - The index field editor is Navicat's field list: tick the fields, drag them into order, set Sort / Prefix.
 - The designer's fields grid navigates with Tab / Shift+Tab, and its Type drop-down works from the keyboard.
 - SQL Preview panes are selectable and copyable — the designer's, the user window's and Object Privileges'.
 
 ### Changed
 
+- An index column carries its own options (`DESC`, MySQL's prefix) and round-trips them.
+- The Fields / Referenced Fields cells are drop-downs: click the cell, no "..." button.
+- The designer's field details, field list and Options page are no longer MySQL-shaped on every engine.
 - The light palette reads like Navicat's: white chrome and visible separators instead of grey fills.
 - The Indexes grid lists secondary indexes only; the primary key is managed from the Fields tab.
 - The strip in front of the first field is narrower, and the designer's labels share one left edge.
@@ -27,31 +33,14 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 
 ### Fixed
 
-- Saving a table's structure reports success and closes the open cell editor; a save with nothing to change says so.
+- The designer's grids scroll with the mouse wheel.
+- Auto Increment appears only on the types an engine accepts, never as a dead control.
+- Saving a table's structure reports success and closes the open cell editor; a save with nothing to change
+  says so.
 - A changed index survives Save on every engine.
 - Adding a field, unique key or check starts unnamed, scrolled into view and ready to type.
 - The index field editor no longer opens off-screen, and its Index Type column is no longer clipped.
 - A new table's SQL Preview works before the table has a name.
-
-## [0.0.13] - 2026-10-16
-
-### Added
-
-- Each engine's designer shows its own shape: SQL Server gets Collation / Sparse, Size / Scale / Computed
-  and Unique Keys / Checks tabs; SQLite, PostgreSQL and Oracle drop the pages they lack.
-- SQL Server's designer edits unique constraints and check constraints as well.
-- The index field editor is a draft panel: pick the fields and their Sort / Prefix, then OK to apply.
-
-### Changed
-
-- An index column carries its own options (`DESC`, MySQL's prefix) and round-trips them.
-- The Fields / Referenced Fields cells are drop-downs: click the cell, no "..." button.
-- The designer's field details, field list and Options page are no longer MySQL-shaped on every engine.
-
-### Fixed
-
-- The designer's grids scroll with the mouse wheel.
-- Auto Increment appears only on the types an engine accepts, never as a dead control.
 
 ## [0.0.12] - 2026-10-15
 
