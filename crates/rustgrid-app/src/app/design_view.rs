@@ -2,6 +2,7 @@ use super::design::*;
 use super::*;
 
 use gpui::HitboxBehavior;
+use gpui_kit::base::SelectableText;
 use rustgrid_core::{
     ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerOptionField,
     DesignerTab,
@@ -142,7 +143,7 @@ impl TableDesignView {
                     t!("design.add_field").to_string(),
                     fields,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.add_field(cx)),
+                    cx.listener(|this, _event, window, cx| this.begin_empty_field(window, cx)),
                 ))
                 .child(ui::toolbar_item(
                     "design-insert-field",
@@ -150,7 +151,7 @@ impl TableDesignView {
                     t!("design.insert_field").to_string(),
                     fields && selected,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.insert_field(cx)),
+                    cx.listener(|this, _event, window, cx| this.begin_inserted_field(window, cx)),
                 ))
                 .child(ui::toolbar_item(
                     "design-delete-field",
@@ -196,7 +197,7 @@ impl TableDesignView {
                     t!("design.add_index").to_string(),
                     indexes,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.add_index(cx)),
+                    cx.listener(|this, _event, window, cx| this.begin_empty_index(window, cx)),
                 ))
                 .child(ui::toolbar_item(
                     "design-delete-index",
@@ -217,7 +218,9 @@ impl TableDesignView {
                     t!("design.add_foreign_key").to_string(),
                     foreign_keys,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.add_foreign_key(cx)),
+                    cx.listener(|this, _event, window, cx| {
+                        this.begin_empty_foreign_key(window, cx)
+                    }),
                 ))
                 .child(ui::toolbar_item(
                     "design-delete-fk",
@@ -238,7 +241,7 @@ impl TableDesignView {
                     t!("design.add_unique_key").to_string(),
                     unique_keys,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.add_unique_key(cx)),
+                    cx.listener(|this, _event, window, cx| this.begin_empty_unique_key(window, cx)),
                 ))
                 .child(ui::toolbar_item(
                     "design-delete-unique-key",
@@ -259,7 +262,7 @@ impl TableDesignView {
                     t!("design.add_check").to_string(),
                     checks,
                     theme,
-                    cx.listener(|this, _event, _window, cx| this.add_check(cx)),
+                    cx.listener(|this, _event, window, cx| this.begin_empty_check(window, cx)),
                 ))
                 .child(ui::toolbar_item(
                     "design-delete-check",
@@ -1517,7 +1520,15 @@ impl TableDesignView {
             .font_family("Consolas")
             .text_size(px(12.0))
             .text_color(rgb(color))
-            .child(div().whitespace_nowrap().child(text))
+            // The script is read-only text the user must copy, so it renders through
+            // `SelectableText` (mouse-drag selects, Ctrl+C copies) under a text cursor, exactly as
+            // the query editor's 信息 error does.
+            .cursor_text()
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .child(SelectableText::new("design-sql-text", text)),
+            )
             .into_any_element()
     }
 
@@ -2411,6 +2422,17 @@ impl TableDesignView {
             | DesignerTab::Comment
             | DesignerTab::Sql => 0,
         }
+    }
+
+    /// Bring one row of the active tab's grid into view.
+    ///
+    /// A `uniform_list` only ever scrolls through `scroll_to_item` (see [`Self::design_scroll`]), so a
+    /// row added at the end by 添加字段 / 添加索引 has to ask to be revealed itself. `Nearest` turns
+    /// into a scroll-to-bottom for a row below the viewport, which is applied on the list's next
+    /// prepaint — by then it knows the new row count, so the grid lands on the row just added.
+    pub(super) fn reveal_design_row(&self, row: usize) {
+        self.list_scroll
+            .scroll_to_item(row, ScrollStrategy::Nearest);
     }
 
     /// The row list's scroll extent as `(viewport_height, max_scroll)`.

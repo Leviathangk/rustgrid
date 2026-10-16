@@ -327,21 +327,6 @@ fn toggle_list(list: &mut Vec<String>, value: &str) {
     }
 }
 
-/// `base`, or `base_1` / `base_2` / ... — the first name `taken` does not already use.
-fn unique_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
-    if !taken(base) {
-        return base.to_string();
-    }
-    let mut counter = 1;
-    loop {
-        let candidate = format!("{base}_{counter}");
-        if !taken(&candidate) {
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
 /// A live in-place editor over one text cell of the index grid.
 pub(super) struct IndexEdit {
     pub(super) row: usize,
@@ -1195,19 +1180,11 @@ impl TableDesignView {
 
     // -- Unique keys (SQL Server's 唯一键; MySQL reports a unique index as an 索引) ----------------
 
-    /// A unique-key name that is not taken yet.
-    fn unique_key_name(&self) -> String {
-        unique_name(&t!("design.new_unique_key"), |candidate| {
-            self.schema
-                .unique_keys
-                .iter()
-                .any(|key| key.name == candidate)
-        })
-    }
-
     pub(super) fn add_unique_key(&mut self, cx: &mut Context<'_, Self>) {
+        // A new row carries no invented name (`new_unique_key`): the name is the user's, and the
+        // row that 添加唯一键 creates opens straight into its name cell for typing.
         let key = UniqueKeyDef {
-            name: self.unique_key_name(),
+            name: String::new(),
             columns: Vec::new(),
         };
         self.schema.unique_keys.push(key);
@@ -1217,6 +1194,7 @@ impl TableDesignView {
             .rows
             .insert(self.schema.unique_keys.len() - 1);
         self.unique_key_rows.anchor = self.selected_unique_key;
+        self.reveal_design_row(self.schema.unique_keys.len() - 1);
         self.mark_dirty(cx);
     }
 
@@ -1375,7 +1353,8 @@ impl TableDesignView {
         self.mark_dirty(cx);
     }
 
-    /// Create a unique key from the grid's blank placeholder row.
+    /// Append a unique key (toolbar's 添加唯一键 or the grid's blank placeholder row), then edit its
+    /// name.
     pub(super) fn begin_empty_unique_key(
         &mut self,
         window: &mut Window,
@@ -1388,19 +1367,10 @@ impl TableDesignView {
 
     // -- Check constraints (SQL Server's 检查) ---------------------------------------------------
 
-    /// A check-constraint name that is not taken yet.
-    fn check_name(&self) -> String {
-        unique_name(&t!("design.new_check"), |candidate| {
-            self.schema
-                .checks
-                .iter()
-                .any(|check| check.name == candidate)
-        })
-    }
-
     pub(super) fn add_check(&mut self, cx: &mut Context<'_, Self>) {
+        // Like 添加字段, a new check starts unnamed and opens its name cell for editing.
         let check = CheckDef {
-            name: self.check_name(),
+            name: String::new(),
             expression: String::new(),
         };
         self.schema.checks.push(check);
@@ -1408,6 +1378,7 @@ impl TableDesignView {
         self.check_rows.rows.clear();
         self.check_rows.rows.insert(self.schema.checks.len() - 1);
         self.check_rows.anchor = self.selected_check;
+        self.reveal_design_row(self.schema.checks.len() - 1);
         self.mark_dirty(cx);
     }
 
@@ -1532,26 +1503,19 @@ impl TableDesignView {
         }
     }
 
-    /// Create a check constraint from the grid's blank placeholder row.
+    /// Append a check constraint (toolbar's 添加检查 or the grid's blank placeholder row), then edit
+    /// its name.
     pub(super) fn begin_empty_check(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let row = self.schema.checks.len();
         self.add_check(cx);
         self.begin_check_edit(row, CheckColumn::Name, window, cx);
     }
 
-    fn unique_field_name(&self) -> String {
-        unique_name(&t!("design.new_field"), |candidate| {
-            self.schema
-                .columns
-                .iter()
-                .any(|column| column.name == candidate)
-        })
-    }
-
     fn insert_field_at(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         // Default to `int` when the engine offers it (MySQL); otherwise use the engine's first
-        // type, so SQLite defaults to `INTEGER`. Length/decimals stay empty (unset) and render
-        // blank, matching a column loaded from an existing table.
+        // type, so SQLite defaults to `INTEGER`. The name stays empty — the row is either opened
+        // for editing straight away (添加字段 / 插入字段) or typed into by hand — and
+        // length/decimals stay empty (unset) too, matching a column loaded from an existing table.
         let data_type = self
             .column_types
             .iter()
@@ -1561,7 +1525,7 @@ impl TableDesignView {
             .unwrap_or("int")
             .to_string();
         let column = ColumnDef {
-            name: self.unique_field_name(),
+            name: String::new(),
             data_type,
             nullable: true,
             ..ColumnDef::default()
@@ -1572,18 +1536,24 @@ impl TableDesignView {
         self.field_rows.rows.clear();
         self.field_rows.rows.insert(index);
         self.field_rows.anchor = Some(index);
+        self.reveal_design_row(index);
         self.sync_selected_input(cx);
         self.mark_dirty(cx);
     }
 
+    /// Append a blank field — the first row of a brand-new table (there is no window to open an
+    /// editor with). The toolbar's 添加字段 goes through [`Self::begin_empty_field`], which also
+    /// puts the caret in the new row's 列名 cell.
     pub(super) fn add_field(&mut self, cx: &mut Context<'_, Self>) {
         let index = self.schema.columns.len();
         self.insert_field_at(index, cx);
     }
 
-    pub(super) fn insert_field(&mut self, cx: &mut Context<'_, Self>) {
+    /// Create a field just below the selected one (插入字段), then edit its name.
+    pub(super) fn begin_inserted_field(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let index = self.selected_field.map(|index| index + 1).unwrap_or(0);
         self.insert_field_at(index, cx);
+        self.begin_edit(index, FieldColumn::Name, window, cx);
     }
 
     pub(super) fn delete_field(&mut self, cx: &mut Context<'_, Self>) {
@@ -1659,6 +1629,7 @@ impl TableDesignView {
         self.index_rows.rows.clear();
         self.index_rows.rows.insert(self.schema.indexes.len() - 1);
         self.index_rows.anchor = self.selected_index;
+        self.reveal_design_row(self.schema.indexes.len() - 1);
         self.mark_dirty(cx);
     }
 
@@ -2097,6 +2068,7 @@ impl TableDesignView {
         self.fk_rows.rows.clear();
         self.fk_rows.rows.insert(self.schema.foreign_keys.len() - 1);
         self.fk_rows.anchor = self.selected_fk;
+        self.reveal_design_row(self.schema.foreign_keys.len() - 1);
         self.mark_dirty(cx);
     }
 
@@ -2414,21 +2386,24 @@ impl TableDesignView {
         }
     }
 
-    /// Create a field from the fields grid's blank placeholder row, then edit its name.
+    /// Append a field — from the toolbar's 添加字段 or the grid's blank placeholder row — and edit
+    /// its name straight away, so the blank row the user just created is ready to type into.
     pub(super) fn begin_empty_field(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let row = self.schema.columns.len();
         self.insert_field_at(row, cx);
         self.begin_edit(row, FieldColumn::Name, window, cx);
     }
 
-    /// Create an index from the index grid's blank placeholder row, then edit its name.
+    /// Append an index — from the toolbar's 添加索引 or the index grid's blank placeholder row —
+    /// then edit its name.
     pub(super) fn begin_empty_index(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let row = self.schema.indexes.len();
         self.add_index(cx);
         self.begin_index_edit(row, IndexColumn::Name, window, cx);
     }
 
-    /// Create a foreign key from its grid's blank placeholder row, then edit its name.
+    /// Append a foreign key (toolbar's 添加外键 or the grid's blank placeholder row), then edit its
+    /// name.
     pub(super) fn begin_empty_foreign_key(
         &mut self,
         window: &mut Window,
