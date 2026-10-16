@@ -2878,7 +2878,17 @@ impl TableDesignView {
             &self.schema,
         );
         if sql.trim().is_empty() {
+            // Nothing to apply. 保存 stays enabled even with a clean working copy, so pressing it a
+            // second time must not look like a dropped click: close the edit that asked for the save
+            // and say there was nothing to do.
             self.dirty = false;
+            self.clear_editors();
+            self.request_focus(cx);
+            if let Some(app) = self.app.upgrade() {
+                app.update(cx, |app, cx| {
+                    app.toast(ToastKind::Info, t!("design.no_changes").to_string(), cx)
+                });
+            }
             cx.notify();
             return;
         }
@@ -2918,6 +2928,12 @@ impl TableDesignView {
                 match result {
                     Ok(()) => {
                         view.dirty = false;
+                        // The in-place editor that started the save is still open — pressing the
+                        // toolbar's 保存 does not move focus off it — and the reload below replaces
+                        // the working copy under it, so close the editor first (the text is already
+                        // in the working copy; every editor writes on change).
+                        view.clear_editors();
+                        view.request_focus(cx);
                         view.load_schema(cx);
                     }
                     Err(error) => view.report_error(error.to_string(), cx),
@@ -2928,6 +2944,7 @@ impl TableDesignView {
             if succeeded && let Some(app) = app.upgrade() {
                 app.update(cx, |app, cx| {
                     app.refresh_table_grids(&connection, &database, &table, cx);
+                    app.toast(ToastKind::Success, t!("design.saved").to_string(), cx);
                 });
             }
         })
@@ -2974,6 +2991,10 @@ impl TableDesignView {
                 match result {
                     Ok(()) => {
                         view.dirty = false;
+                        // Same as an existing table's save: close the in-place editor before the
+                        // reload replaces the working copy, and keep Ctrl+S working afterwards.
+                        view.clear_editors();
+                        view.request_focus(cx);
                         view.load_schema(cx);
                     }
                     Err(error) => view.report_error(error.to_string(), cx),
@@ -2984,6 +3005,7 @@ impl TableDesignView {
             if succeeded && let Some(app) = app.upgrade() {
                 app.update(cx, |app, cx| {
                     app.reload_database_tables(&connection, &database, cx);
+                    app.toast(ToastKind::Success, t!("design.saved").to_string(), cx);
                 });
             }
         })
