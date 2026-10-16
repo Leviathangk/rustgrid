@@ -208,9 +208,12 @@ not a later refactor.
 - **Every version change is recorded in both changelogs — no exceptions.** The moment the workspace
   version in the root `Cargo.toml` changes, the same commit writes that version's section into
   **both** `CHANGELOG.md` and `CHANGELOG_zh.md` (newest first, Keep-a-Changelog headings — Added /
-  Changed / Fixed, translated in the Chinese file) describing what the version brings. **Each file
-  stays in its own language**: `CHANGELOG.md` is English throughout — a UI label is quoted in its
-  English form as `locales/en.yml` has it (选项 → 关于 is written `Options → About`) — and
+  Changed / Fixed, translated in the Chinese file) describing what the version brings. **Keep entries
+  short: one line per change, user-visible outcome only** — no implementation detail, no file names,
+  no restating the issue; the section becomes the GitHub release notes verbatim, so a long entry
+  makes an overlong release. **Each file stays in its own language**: `CHANGELOG.md` is English
+  throughout — a UI label is quoted in its English form as `locales/en.yml` has it (选项 → 关于 is
+  written `Options → About`) — and
   `CHANGELOG_zh.md` is Chinese throughout. The only exceptions are the language-switcher line, the
   name of the other language, engine/product names, identifiers, file paths and code spans. Never
   paste a Chinese label into the English file (or an English label into the Chinese one) just because
