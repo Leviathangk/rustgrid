@@ -12,7 +12,9 @@ use rustgrid_core::{
 /// A row of the field grid, shared by the header and every row.
 pub(super) const DESIGN_ROW_HEIGHT: f32 = 24.0;
 pub(super) const DESIGN_HEADER_HEIGHT: f32 = 24.0;
-pub(super) const DESIGN_GUTTER_WIDTH: f32 = 22.0;
+/// The row-header strip of every designer grid: the row marker's column, as narrow as the marker
+/// needs (the same 16px the table grid's gutter uses, `GRID_GUTTER_WIDTH`).
+pub(super) const DESIGN_GUTTER_WIDTH: f32 = 16.0;
 pub(super) const FIELD_NAME_WIDTH: f32 = 246.0;
 pub(super) const FIELD_TYPE_WIDTH: f32 = 178.0;
 pub(super) const FIELD_LENGTH_WIDTH: f32 = 90.0;

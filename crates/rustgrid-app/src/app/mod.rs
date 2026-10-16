@@ -1799,7 +1799,10 @@ const FILTER_CONTENT_WIDTH_MAX: f32 = 700.0;
 /// Clamp for a column dragged to its narrowest/widest.
 const MIN_COLUMN_WIDTH: f32 = 32.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
-const GRID_GUTTER_WIDTH: f32 = 22.0;
+/// The row-header strip the table grid draws before its first column. It holds the current row's
+/// marker and a full-row selection's tint and nothing else, so it stays as narrow as the marker
+/// needs (the designer grids use the same 16px, `DESIGN_GUTTER_WIDTH`).
+const GRID_GUTTER_WIDTH: f32 = 16.0;
 /// Thickness of the app-drawn grid scrollbars (matches `ui::vscrollbar_track` / `hscrollbar_track`).
 const GRID_SCROLLBAR_THICKNESS: f32 = 14.0;
 /// Cap used when "Limit Records" is unchecked, standing in for an unlimited fetch.
