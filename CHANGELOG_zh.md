@@ -6,6 +6,51 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.0.13] - 2026-10-16
+
+### 新增
+
+- **设计表界面按引擎区分**：驱动现在声明自己引擎的「设计表」长什么样——显示哪些子标签页、每个
+  字段有哪些属性控件、字段列表有哪些列、选项页有哪些行（`DriverDescriptor::table_designer`），
+  设计器按该声明渲染，不再是一套写死的 MySQL 布局。SQL Server 因此有了自己的设计器：字段详情
+  面板是 排序规则 / 稀疏 而不是 自动递增 / 无符号 / 填充零，字段列表是 大小 / 比例 / 计算列，
+  并新增 **唯一键** 与 **检查** 两个标签页。SQLite 去掉了 选项 / 注释（它本身没有），
+  PostgreSQL 的 选项 只保留 注释，Oracle 去掉 选项。
+- SQL Server 设计器可读取、编辑并写回唯一约束（`sys.key_constraints`）与检查约束
+  （`sys.check_constraints`）：建表时写入 `CREATE TABLE`，改动时用
+  `ALTER TABLE … ADD/DROP CONSTRAINT` 同步；同时支持按列的 排序规则（`COLLATE`）、`SPARSE`
+  稀疏列与计算列（`AS (…) [PERSISTED]`）。
+- **索引的 字段 编辑器改成草稿面板**（与 Navicat 一致）：已选字段按顺序列出，每行带该引擎自己的按列
+  选项——所有引擎都有 排序（`ASC` / `DESC`），MySQL/MariaDB 另有 子部分（`code(10)`）——左下是
+  ↑ ↓ + −，右下是 取消 / 确定。名称、排序、子部分、顺序、增删全都只落在草稿上，确定才生效，所以表格
+  里不会出现「改了一半」的状态。主键那一行也能打开它：它的字段就是 字段 页里勾选的 主键，因此该草稿
+  改的是这些勾选、不带按列选项。
+
+### 变更
+
+- 索引的列现在自带选项：`IndexDef` 的列是 `IndexColumnDef`（`descending`、`prefix_length`），
+  而不是纯名字，所以 `DESC` 与 MySQL 的子部分能完整往返。读取来源分别是
+  `information_schema.statistics`（`COLLATION`、`SUB_PART`）、`sys.index_columns.is_descending_key`、
+  `pg_index.indoption`、`all_ind_columns.descend` 与 `PRAGMA index_xinfo`，写回时体现在列上
+  （`code(10) DESC`）。
+- 设计器的字段单元格（索引 的 字段、外键 的 字段 / 被引用的字段、唯一键 的 字段）改为下拉框：点这一格
+  任意位置即展开字段列表，不再需要点后方的小按钮。外键 / 唯一键的列表保留复选框（它们本来就是多列），
+  并且都贴在所点那一行下方展开（每行各自记录锚点）。
+- 设计器的字段详情面板、字段列表与 选项 页不再按 MySQL 写死：`ColumnDef` 增加 `sparse`，
+  `TableSchema` 增加 `unique_keys` / `checks`，各引擎只填自己有的部分。
+
+### 修复
+
+- **设计表的表格可以用鼠标滚轮滚动了。** 字段 / 索引 / 外键（以及新增的 唯一键 / 检查）列表原本滚不动：
+  gpui 的 `uniform_list` 本身不注册滚轮处理，只能通过 `scroll_to_item` 驱动，而这正是「打开表」网格滚轮
+  在做的事。现在设计器改用同一套交互：一个滚轮步进把选中行上下移动一行并滚动到可见位置，横向手势平移
+  列，指向网格上方浮层（下拉、字段选择弹窗）的手势则留给浮层；纵向滚动条滑块跟随行位置，拖动会落到该
+  位置所在的行。
+- **自动递增只在该引擎允许的地方出现。** 各引擎都有限制——SQL Server 一张表最多一个 `IDENTITY`、只能
+  是数值类型，且 `ALTER COLUMN` 无法给表里已有的字段加 `IDENTITY`——所以字段详情面板直接**不显示**它，
+  而不是显示一个点了没用的控件（新增字段或新建表时才出现）。勾选时会从原来那列上移走；把字段类型改成
+  不能自增的类型会自动取消，SQL 预览不会出现非法语句。
+
 ## [0.0.12] - 2026-10-15
 
 ### 新增

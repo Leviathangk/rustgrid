@@ -9,6 +9,61 @@ All notable changes to RustGrid are documented in this file. The format is based
 UI labels are quoted as the app shows them, so this file quotes the English strings;
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) quotes the 简体中文 ones.
 
+## [0.0.13] - 2026-10-16
+
+### Added
+
+- **An engine-shaped table designer.** A driver now declares what its engine's designer shows —
+  which sub-tabs, which per-column controls, which field-list columns and which table options
+  (`DriverDescriptor::table_designer`) — and the designer renders that spec instead of one
+  hard-coded MySQL layout. SQL Server therefore gets its own designer: Collation and Sparse in the
+  field details panel instead of Auto Increment / Unsigned / Fill Zero, the Size / Scale / Computed
+  field columns, and the new **Unique Keys** and **Checks** tabs. SQLite drops Options and Comment
+  (it has neither), PostgreSQL's Options keeps the comment only, and Oracle drops Options.
+- SQL Server's designer reads, edits and writes unique constraints (`sys.key_constraints`) and
+  check constraints (`sys.check_constraints`), building them into `CREATE TABLE` and reconciling
+  them with `ALTER TABLE … ADD/DROP CONSTRAINT`, plus a per-column collation (`COLLATE`), `SPARSE`
+  columns and computed columns (`AS (…) [PERSISTED]`).
+- **The index field editor is a draft panel**, like Navicat's: the chosen fields in order, each with
+  the engine's own per-column options — Sort (`ASC` / `DESC`) on every engine and MySQL/MariaDB's
+  Prefix (index only a leading part of the column, `code(10)`) — with ↑ ↓ + − on the left and Cancel
+  / OK on the right. Every edit (name, sort order, prefix, order, add, remove) stays on the draft
+  until OK, so the grid never shows a half-made change. The Primary Key row opens it as well: its
+  columns are the Primary Key flags from the Fields tab, so that draft edits those flags and carries
+  no per-column options.
+
+### Changed
+
+- An index column carries its own options now: `IndexDef`'s columns are `IndexColumnDef`
+  (`descending`, `prefix_length`) instead of plain names, so `DESC` and MySQL's prefix survive a
+  round trip. They are read from `information_schema.statistics` (`COLLATION`, `SUB_PART`),
+  `sys.index_columns.is_descending_key`, `pg_index.indoption`, `all_ind_columns.descend` and
+  `PRAGMA index_xinfo`, and written back as part of the column (`code(10) DESC`).
+- The designer's field cells (the Fields cell under Indexes, the Fields and Referenced Fields cells
+  under Foreign Keys, and the Fields cell under Unique Keys) are drop-downs: clicking anywhere in
+  the cell opens the field list — the "..." button is gone. A foreign key's or unique key's list
+  keeps its check boxes, since those hold more than one column, and every cell opens flush under the
+  row you clicked (each row records its own anchor).
+- The designer's field details panel, field list and Options page are no longer written against
+  MySQL: `ColumnDef` carries `sparse` and `TableSchema` carries `unique_keys` / `checks`, and each
+  engine fills in only what it has.
+
+### Fixed
+
+- **The table designer's grids scroll with the mouse wheel.** Its field/index/foreign-key (and the
+  new unique-key/check) lists never moved under the wheel: a gpui `uniform_list` registers no
+  scroll-wheel handler of its own, so its offset has to be driven through `scroll_to_item` — which
+  is exactly what the table grid's wheel does. The designer now uses that same interaction: a notch
+  moves the selected row by one and brings it into view, a horizontal gesture pans the columns, and
+  a gesture aimed at an overlay above the grid (a drop-down, a picker popup) is left to it. The
+  vertical scrollbar's thumb follows the rows and dragging it lands on the row at that position.
+- **Auto Increment is offered only where the engine accepts it.** Every engine restricts it — SQL
+  Server has a single `IDENTITY` column per table, only on a numeric type, and `ALTER COLUMN` cannot
+  give a column the table already has one — so the field details panel **leaves the control out**
+  rather than showing a dead one (it is there on a newly added column, or in a new table). Ticking it
+  takes it off whichever column had it, and changing a column to a type that cannot carry one drops
+  it, so the SQL Preview never shows an invalid statement.
+
 ## [0.0.12] - 2026-10-15
 
 ### Added
