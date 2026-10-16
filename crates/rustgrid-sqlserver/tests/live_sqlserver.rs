@@ -506,3 +506,185 @@ async fn manages_a_login_with_mapping_and_securables() {
 
     connection.close().await.unwrap();
 }
+
+/// The table designer's write path: create a table from a `TableSchema`, read it back, alter it and
+/// read it again — including SQL Server's per-column `DESC` and its unique/check constraints.
+#[tokio::test]
+#[ignore = "requires a live SQL Server (RUSTGRID_SQLSERVER_*)"]
+async fn designer_round_trips_a_table() {
+    use rustgrid_core::{CheckDef, ColumnDef, IndexColumnDef, IndexDef, TableSchema, UniqueKeyDef};
+
+    let (connection, database) = scratch_database().await;
+    let table = "dbo.rustgrid_designer";
+    let _ = connection.drop_table(&database, table).await;
+
+    let mut schema = TableSchema {
+        columns: vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                primary_key: true,
+                auto_increment: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "code".to_string(),
+                data_type: "nvarchar".to_string(),
+                length: "64".to_string(),
+                nullable: true,
+                collation: "Latin1_General_CI_AS".to_string(),
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "amount".to_string(),
+                data_type: "decimal".to_string(),
+                length: "10".to_string(),
+                decimals: "2".to_string(),
+                nullable: true,
+                comment: "the amount".to_string(),
+                ..ColumnDef::default()
+            },
+        ],
+        ..TableSchema::default()
+    };
+    schema.indexes.push(IndexDef {
+        name: "ix_code".to_string(),
+        columns: vec![
+            IndexColumnDef {
+                name: "code".to_string(),
+                descending: true,
+                prefix_length: String::new(),
+            },
+            IndexColumnDef::new("amount"),
+        ],
+        unique: false,
+        primary: false,
+        index_type: "NONCLUSTERED".to_string(),
+        comment: String::new(),
+    });
+    schema.unique_keys.push(UniqueKeyDef {
+        name: "uq_code".to_string(),
+        columns: vec!["code".to_string()],
+    });
+    schema.checks.push(CheckDef {
+        name: "ck_amount".to_string(),
+        expression: "[amount]>(0)".to_string(),
+    });
+    connection
+        .save_table_schema(&database, table, None, &schema)
+        .await
+        .expect("create the table");
+
+    let loaded = connection
+        .table_schema(&database, table)
+        .await
+        .expect("read the table back");
+    assert!(
+        loaded
+            .columns
+            .iter()
+            .any(|column| column.name == "id" && column.primary_key && column.auto_increment),
+        "the identity column did not round trip: {:?}",
+        loaded.columns
+    );
+    assert!(
+        loaded.columns.iter().any(|column| column.name == "code"
+            && column
+                .collation
+                .eq_ignore_ascii_case("Latin1_General_CI_AS")),
+        "the column collation did not round trip: {:?}",
+        loaded.columns
+    );
+    let index = loaded
+        .indexes
+        .iter()
+        .find(|index| index.name == "ix_code")
+        .unwrap_or_else(|| panic!("ix_code is missing: {:?}", loaded.indexes));
+    assert_eq!(index.columns.len(), 2, "{:?}", index.columns);
+    assert!(
+        index.columns[0].descending,
+        "the descending sort did not round trip: {:?}",
+        index.columns
+    );
+    assert!(
+        loaded
+            .unique_keys
+            .iter()
+            .any(|key| key.name == "uq_code" && key.columns == ["code".to_string()]),
+        "the unique key did not round trip: {:?}",
+        loaded.unique_keys
+    );
+    assert!(
+        loaded
+            .checks
+            .iter()
+            .any(|check| check.name == "ck_amount" && !check.expression.trim().is_empty()),
+        "the check constraint did not round trip: {:?}",
+        loaded.checks
+    );
+
+    // Alter: a new column, the index back to ascending, the unique key widened and the check
+    // constraint dropped (by leaving it out of the modified schema).
+    let mut modified = loaded.clone();
+    modified.columns.push(ColumnDef {
+        name: "note".to_string(),
+        data_type: "nvarchar".to_string(),
+        length: "50".to_string(),
+        nullable: true,
+        ..ColumnDef::default()
+    });
+    let index = modified
+        .indexes
+        .iter_mut()
+        .find(|index| index.name == "ix_code")
+        .expect("ix_code");
+    index.columns = vec![IndexColumnDef::new("code"), IndexColumnDef::new("amount")];
+    modified.unique_keys = vec![UniqueKeyDef {
+        name: "uq_code".to_string(),
+        columns: vec!["code".to_string(), "amount".to_string()],
+    }];
+    modified.checks.clear();
+    connection
+        .save_table_schema(&database, table, Some(&loaded), &modified)
+        .await
+        .expect("alter the table");
+
+    let reloaded = connection
+        .table_schema(&database, table)
+        .await
+        .expect("read the altered table back");
+    assert!(reloaded.columns.iter().any(|column| column.name == "note"));
+    let index = reloaded
+        .indexes
+        .iter()
+        .find(|index| index.name == "ix_code")
+        .expect("ix_code after the alter");
+    assert!(
+        !index.columns[0].descending,
+        "the ascending sort did not round trip: {:?}",
+        index.columns
+    );
+    assert!(
+        reloaded
+            .unique_keys
+            .iter()
+            .any(|key| key.name == "uq_code" && key.columns.len() == 2),
+        "the widened unique key did not round trip: {:?}",
+        reloaded.unique_keys
+    );
+    assert!(
+        !reloaded
+            .checks
+            .iter()
+            .any(|check| check.name == "ck_amount"),
+        "the dropped check constraint is still there: {:?}",
+        reloaded.checks
+    );
+
+    connection
+        .drop_table(&database, table)
+        .await
+        .expect("drop the scratch table");
+    connection.close().await.unwrap();
+}

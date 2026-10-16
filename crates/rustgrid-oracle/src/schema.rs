@@ -76,7 +76,9 @@ fn index_sql(schema: &str, table: &str, index: &IndexDef) -> String {
     format!(
         "CREATE {}INDEX {} ON {} ({columns})",
         if index.unique { "UNIQUE " } else { "" },
-        quote_identifier(&index.name),
+        // Oracle creates an index in the *connected* user's schema, but an index belongs to its
+        // table's schema (and `DROP INDEX` names it that way), so it is qualified here.
+        qualify(schema, &index.name),
         qualify(schema, table)
     )
 }
@@ -430,8 +432,15 @@ pub(crate) fn table_schema_sql(
         .map(|index| (index.name.as_str(), index))
         .collect();
     for index in modified.indexes.iter().filter(|index| !index.primary) {
-        if !original_indexes.contains_key(index.name.as_str()) {
-            statements.push(index_sql(schema, table, index));
+        match original_indexes.get(index.name.as_str()) {
+            None => statements.push(index_sql(schema, table, index)),
+            // Oracle cannot alter an index in place, so a changed one is dropped and created again —
+            // otherwise an edit (a new column, a `DESC`) would be silently lost.
+            Some(previous) if **previous != *index => {
+                statements.push(format!("DROP INDEX {}", qualify(schema, &index.name)));
+                statements.push(index_sql(schema, table, index));
+            }
+            Some(_) => {}
         }
     }
     for index in original.indexes.iter().filter(|index| !index.primary) {

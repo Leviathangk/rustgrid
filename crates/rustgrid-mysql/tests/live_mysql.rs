@@ -127,6 +127,151 @@ async fn live_multi_statement_returns_every_result_set() {
     connection.close().await.expect("close");
 }
 
+/// The table designer's write path: create a table from a `TableSchema`, read it back, alter it and
+/// read it again — including MySQL's per-column index options (子部分 / `DESC`).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a live MySQL server (set RUSTGRID_MYSQL_PASSWORD)"]
+async fn live_designer_round_trips_a_table() {
+    use rustgrid_core::{ColumnDef, IndexColumnDef, IndexDef, TableSchema};
+
+    let driver = rustgrid_mysql::MysqlDriver::new();
+    let connection = driver
+        .connect(&config())
+        .await
+        .expect("connect to the live server");
+
+    let database = "rustgrid_live";
+    connection
+        .execute_query(None, &format!("CREATE DATABASE IF NOT EXISTS `{database}`"))
+        .await
+        .expect("create the scratch database");
+
+    let table = "rustgrid_designer";
+    let _ = connection.drop_table(database, table).await;
+
+    let mut schema = TableSchema {
+        columns: vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                primary_key: true,
+                auto_increment: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "code".to_string(),
+                data_type: "varchar".to_string(),
+                length: "64".to_string(),
+                nullable: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "amount".to_string(),
+                data_type: "decimal".to_string(),
+                length: "10".to_string(),
+                decimals: "2".to_string(),
+                nullable: true,
+                comment: "the amount".to_string(),
+                ..ColumnDef::default()
+            },
+        ],
+        ..TableSchema::default()
+    };
+    schema.indexes.push(IndexDef {
+        name: "ix_code".to_string(),
+        columns: vec![
+            IndexColumnDef {
+                name: "code".to_string(),
+                descending: true,
+                prefix_length: "10".to_string(),
+            },
+            IndexColumnDef::new("amount"),
+        ],
+        unique: false,
+        primary: false,
+        index_type: "BTREE".to_string(),
+        comment: String::new(),
+    });
+    connection
+        .save_table_schema(database, table, None, &schema)
+        .await
+        .expect("create the table");
+
+    let loaded = connection
+        .table_schema(database, table)
+        .await
+        .expect("read the table back");
+    assert!(
+        loaded
+            .columns
+            .iter()
+            .any(|column| column.name == "id" && column.primary_key && column.auto_increment),
+        "the identity column did not round trip: {:?}",
+        loaded.columns
+    );
+    let index = loaded
+        .indexes
+        .iter()
+        .find(|index| index.name == "ix_code")
+        .unwrap_or_else(|| panic!("ix_code is missing: {:?}", loaded.indexes));
+    assert_eq!(index.columns.len(), 2, "{:?}", index.columns);
+    assert_eq!(index.columns[0].name, "code");
+    assert!(
+        index.columns[0].descending,
+        "the descending sort did not round trip: {:?}",
+        index.columns
+    );
+    assert_eq!(index.columns[0].prefix_length, "10");
+    assert_eq!(index.columns[1].name, "amount");
+
+    // Alter: a new column, and the index back to an ascending whole-column list.
+    let mut modified = loaded.clone();
+    modified.columns.push(ColumnDef {
+        name: "note".to_string(),
+        data_type: "varchar".to_string(),
+        length: "50".to_string(),
+        nullable: true,
+        ..ColumnDef::default()
+    });
+    let index = modified
+        .indexes
+        .iter_mut()
+        .find(|index| index.name == "ix_code")
+        .expect("ix_code");
+    index.columns = vec![IndexColumnDef::new("code"), IndexColumnDef::new("amount")];
+    connection
+        .save_table_schema(database, table, Some(&loaded), &modified)
+        .await
+        .expect("alter the table");
+
+    let reloaded = connection
+        .table_schema(database, table)
+        .await
+        .expect("read the altered table back");
+    assert!(reloaded.columns.iter().any(|column| column.name == "note"));
+    let index = reloaded
+        .indexes
+        .iter()
+        .find(|index| index.name == "ix_code")
+        .expect("ix_code after the alter");
+    assert!(
+        !index.columns[0].descending,
+        "the ascending sort did not round trip: {:?}",
+        index.columns
+    );
+    assert!(
+        index.columns[0].prefix_length.is_empty(),
+        "the prefix should be gone: {:?}",
+        index.columns
+    );
+
+    connection
+        .drop_table(database, table)
+        .await
+        .expect("drop the scratch table");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a live MySQL server"]
 async fn live_auth_failure_maps_to_authentication() {

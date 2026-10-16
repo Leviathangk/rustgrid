@@ -355,3 +355,148 @@ async fn round_trips_a_live_postgresql() {
         .await;
     connection.close().await.unwrap();
 }
+
+/// The table designer's write path: create a table from a `TableSchema`, read it back, alter it and
+/// read it again — including a per-column `DESC` in the index.
+#[tokio::test]
+#[ignore = "requires a live PostgreSQL (RUSTGRID_PG_*)"]
+async fn designer_round_trips_a_table() {
+    use rustgrid_core::{ColumnDef, IndexColumnDef, IndexDef, TableSchema};
+
+    let config = config();
+    let database = config
+        .database
+        .clone()
+        .unwrap_or_else(|| "postgres".to_string());
+    let connection = PostgresDriver::new()
+        .connect(&config)
+        .await
+        .expect("connect");
+
+    let table = "public.rustgrid_designer";
+    let _ = connection.drop_table(&database, table).await;
+
+    let mut schema = TableSchema {
+        columns: vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                nullable: false,
+                primary_key: true,
+                auto_increment: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "code".to_string(),
+                data_type: "character varying".to_string(),
+                length: "64".to_string(),
+                nullable: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "amount".to_string(),
+                data_type: "numeric".to_string(),
+                length: "10".to_string(),
+                decimals: "2".to_string(),
+                nullable: true,
+                comment: "the amount".to_string(),
+                ..ColumnDef::default()
+            },
+        ],
+        ..TableSchema::default()
+    };
+    schema.indexes.push(IndexDef {
+        name: "ix_code".to_string(),
+        columns: vec![
+            IndexColumnDef {
+                name: "code".to_string(),
+                descending: true,
+                prefix_length: String::new(),
+            },
+            IndexColumnDef::new("amount"),
+        ],
+        unique: false,
+        primary: false,
+        index_type: String::new(),
+        comment: String::new(),
+    });
+    connection
+        .save_table_schema(&database, table, None, &schema)
+        .await
+        .expect("create the table");
+
+    let loaded = connection
+        .table_schema(&database, table)
+        .await
+        .expect("read the table back");
+    assert!(
+        loaded
+            .columns
+            .iter()
+            .any(|column| column.name == "id" && column.primary_key && column.auto_increment),
+        "the identity column did not round trip: {:?}",
+        loaded.columns
+    );
+    assert!(
+        loaded
+            .columns
+            .iter()
+            .any(|column| column.name == "amount" && column.comment == "the amount"),
+        "the column comment did not round trip: {:?}",
+        loaded.columns
+    );
+    let index = loaded
+        .indexes
+        .iter()
+        .find(|index| index.name == "ix_code")
+        .unwrap_or_else(|| panic!("ix_code is missing: {:?}", loaded.indexes));
+    assert_eq!(index.columns.len(), 2, "{:?}", index.columns);
+    assert!(
+        index.columns[0].descending,
+        "the descending sort did not round trip: {:?}",
+        index.columns
+    );
+    assert_eq!(index.columns[1].name, "amount");
+
+    // Alter: a new column, and the index back to an ascending list.
+    let mut modified = loaded.clone();
+    modified.columns.push(ColumnDef {
+        name: "note".to_string(),
+        data_type: "character varying".to_string(),
+        length: "50".to_string(),
+        nullable: true,
+        ..ColumnDef::default()
+    });
+    let index = modified
+        .indexes
+        .iter_mut()
+        .find(|index| index.name == "ix_code")
+        .expect("ix_code");
+    index.columns = vec![IndexColumnDef::new("code"), IndexColumnDef::new("amount")];
+    connection
+        .save_table_schema(&database, table, Some(&loaded), &modified)
+        .await
+        .expect("alter the table");
+
+    let reloaded = connection
+        .table_schema(&database, table)
+        .await
+        .expect("read the altered table back");
+    assert!(reloaded.columns.iter().any(|column| column.name == "note"));
+    let index = reloaded
+        .indexes
+        .iter()
+        .find(|index| index.name == "ix_code")
+        .expect("ix_code after the alter");
+    assert!(
+        !index.columns[0].descending,
+        "the ascending sort did not round trip: {:?}",
+        index.columns
+    );
+
+    connection
+        .drop_table(&database, table)
+        .await
+        .expect("drop the scratch table");
+    connection.close().await.unwrap();
+}

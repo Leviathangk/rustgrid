@@ -543,8 +543,15 @@ pub(crate) fn table_schema_sql(
         .map(|index| (index.name.as_str(), index))
         .collect();
     for index in modified.indexes.iter().filter(|index| !index.primary) {
-        if !original_indexes.contains_key(index.name.as_str()) {
-            statements.push(index_sql(schema_name, table, index));
+        match original_indexes.get(index.name.as_str()) {
+            None => statements.push(index_sql(schema_name, table, index)),
+            // PostgreSQL cannot alter an index in place, so a changed one is dropped and created
+            // again — otherwise an edit (a new column, a `DESC`, uniqueness) would be silently lost.
+            Some(previous) if **previous != *index => {
+                statements.push(format!("DROP INDEX {}", qualify(schema_name, &index.name)));
+                statements.push(index_sql(schema_name, table, index));
+            }
+            Some(_) => {}
         }
     }
     for index in original.indexes.iter().filter(|index| !index.primary) {

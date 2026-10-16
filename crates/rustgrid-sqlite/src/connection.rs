@@ -874,9 +874,23 @@ impl Connection for SqliteConnection {
                     .map(|index| (index.name.as_str(), index))
                     .collect();
                 for index in &modified.indexes {
-                    if !index.primary && !original_indexes.contains_key(index.name.as_str()) {
-                        statements
-                            .extend(create_index_statements(table, std::slice::from_ref(index)));
+                    if index.primary {
+                        continue;
+                    }
+                    match original_indexes.get(index.name.as_str()) {
+                        None => statements
+                            .extend(create_index_statements(table, std::slice::from_ref(index))),
+                        // SQLite cannot alter an index: a changed one is dropped and created again —
+                        // otherwise an edit (a new column, a `DESC`) would be silently lost.
+                        Some(previous) if **previous != *index => {
+                            statements
+                                .push(format!("DROP INDEX {}", quote_identifier(&index.name)));
+                            statements.extend(create_index_statements(
+                                table,
+                                std::slice::from_ref(index),
+                            ));
+                        }
+                        Some(_) => {}
                     }
                 }
                 for index in &original.indexes {

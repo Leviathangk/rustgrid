@@ -208,3 +208,134 @@ async fn round_trips_a_sqlite_database() {
     connection.close().await.unwrap();
     let _ = std::fs::remove_file(&path);
 }
+
+/// The table designer's write path against a real file: create a table from a `TableSchema`, read it
+/// back, alter it and read it again — including a per-column `DESC` in the index.
+#[tokio::test]
+async fn designer_round_trips_a_table() {
+    use rustgrid_core::{ColumnDef, IndexColumnDef, IndexDef, TableSchema};
+
+    let path = std::env::temp_dir().join(format!(
+        "rustgrid-sqlite-designer-{}-{:?}.db",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    // SQLite treats an empty file as a valid empty database; create it so the driver's
+    // `create_if_missing(false)` opens it.
+    std::fs::File::create(&path).expect("create the test database file");
+    let path = path.to_string_lossy().into_owned();
+    let connection = SqliteDriver::new()
+        .connect(&config(&path))
+        .await
+        .expect("connect");
+
+    let mut schema = TableSchema {
+        columns: vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+                primary_key: true,
+                auto_increment: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "code".to_string(),
+                data_type: "VARCHAR".to_string(),
+                length: "64".to_string(),
+                nullable: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "amount".to_string(),
+                data_type: "REAL".to_string(),
+                nullable: true,
+                ..ColumnDef::default()
+            },
+        ],
+        ..TableSchema::default()
+    };
+    schema.indexes.push(IndexDef {
+        name: "ix_code".to_string(),
+        columns: vec![
+            IndexColumnDef {
+                name: "code".to_string(),
+                descending: true,
+                prefix_length: String::new(),
+            },
+            IndexColumnDef::new("amount"),
+        ],
+        unique: false,
+        primary: false,
+        index_type: "BTREE".to_string(),
+        comment: String::new(),
+    });
+    connection
+        .save_table_schema("main", "items", None, &schema)
+        .await
+        .expect("create the table");
+
+    let loaded = connection
+        .table_schema("main", "items")
+        .await
+        .expect("read");
+    assert!(
+        loaded
+            .columns
+            .iter()
+            .any(|column| column.name == "id" && column.primary_key && column.auto_increment),
+        "the identity column did not round trip: {:?}",
+        loaded.columns
+    );
+    let index = loaded
+        .indexes
+        .iter()
+        .find(|index| index.name == "ix_code")
+        .unwrap_or_else(|| panic!("ix_code is missing: {:?}", loaded.indexes));
+    assert_eq!(index.columns.len(), 2, "{:?}", index.columns);
+    assert!(
+        index.columns[0].descending,
+        "the descending sort did not round trip: {:?}",
+        index.columns
+    );
+
+    // Alter: a new column, and the index back to an ascending list.
+    let mut modified = loaded.clone();
+    modified.columns.push(ColumnDef {
+        name: "note".to_string(),
+        data_type: "TEXT".to_string(),
+        nullable: true,
+        ..ColumnDef::default()
+    });
+    let index = modified
+        .indexes
+        .iter_mut()
+        .find(|index| index.name == "ix_code")
+        .expect("ix_code");
+    index.columns = vec![IndexColumnDef::new("code"), IndexColumnDef::new("amount")];
+    connection
+        .save_table_schema("main", "items", Some(&loaded), &modified)
+        .await
+        .expect("alter the table");
+
+    let reloaded = connection
+        .table_schema("main", "items")
+        .await
+        .expect("read the altered table");
+    assert!(reloaded.columns.iter().any(|column| column.name == "note"));
+    let index = reloaded
+        .indexes
+        .iter()
+        .find(|index| index.name == "ix_code")
+        .expect("ix_code after the alter");
+    assert!(
+        !index.columns[0].descending,
+        "the ascending sort did not round trip: {:?}",
+        index.columns
+    );
+
+    connection.drop_table("main", "items").await.expect("drop");
+    connection.close().await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}

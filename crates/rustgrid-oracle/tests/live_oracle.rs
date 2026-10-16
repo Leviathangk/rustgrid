@@ -151,6 +151,134 @@ fn edits_a_table() {
     });
 }
 
+/// The table designer's write path: create a table from a `TableSchema`, read it back, alter it and
+/// read it again — including a per-column `DESC` in the index.
+#[test]
+#[ignore = "requires a live Oracle server (RUSTGRID_ORACLE_PASSWORD)"]
+fn designer_round_trips_a_table() {
+    use rustgrid_core::{ColumnDef, IndexColumnDef, IndexDef, TableSchema};
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let driver = OracleDriver::new();
+        let connection = driver.connect(&config()).await.expect("connect");
+        let table = "APP.RG_DESIGNER";
+        let _ = connection.drop_table("", table).await;
+
+        let mut schema = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "ID".to_string(),
+                    data_type: "NUMBER".to_string(),
+                    length: "10".to_string(),
+                    nullable: false,
+                    primary_key: true,
+                    auto_increment: true,
+                    ..ColumnDef::default()
+                },
+                ColumnDef {
+                    name: "CODE".to_string(),
+                    data_type: "VARCHAR2".to_string(),
+                    length: "50".to_string(),
+                    nullable: true,
+                    ..ColumnDef::default()
+                },
+                ColumnDef {
+                    name: "AMOUNT".to_string(),
+                    data_type: "NUMBER".to_string(),
+                    length: "10".to_string(),
+                    decimals: "2".to_string(),
+                    nullable: true,
+                    comment: "the amount".to_string(),
+                    ..ColumnDef::default()
+                },
+            ],
+            ..TableSchema::default()
+        };
+        schema.indexes.push(IndexDef {
+            name: "IX_CODE".to_string(),
+            columns: vec![
+                IndexColumnDef {
+                    name: "CODE".to_string(),
+                    descending: true,
+                    prefix_length: String::new(),
+                },
+                IndexColumnDef::new("AMOUNT"),
+            ],
+            unique: false,
+            primary: false,
+            index_type: String::new(),
+            comment: String::new(),
+        });
+        connection
+            .save_table_schema("", table, None, &schema)
+            .await
+            .expect("create the table");
+
+        let loaded = connection
+            .table_schema("", table)
+            .await
+            .expect("read the table back");
+        assert!(
+            loaded
+                .columns
+                .iter()
+                .any(|column| column.name == "ID" && column.primary_key && column.auto_increment),
+            "the identity column did not round trip: {:?}",
+            loaded.columns
+        );
+        let index = loaded
+            .indexes
+            .iter()
+            .find(|index| index.name == "IX_CODE")
+            .unwrap_or_else(|| panic!("IX_CODE is missing: {:?}", loaded.indexes));
+        assert_eq!(index.columns.len(), 2, "{:?}", index.columns);
+        assert!(
+            index.columns[0].descending,
+            "the descending sort did not round trip: {:?}",
+            index.columns
+        );
+
+        // Alter: a new column, and the index back to an ascending list.
+        let mut modified = loaded.clone();
+        modified.columns.push(ColumnDef {
+            name: "NOTE".to_string(),
+            data_type: "VARCHAR2".to_string(),
+            length: "50".to_string(),
+            nullable: true,
+            ..ColumnDef::default()
+        });
+        let index = modified
+            .indexes
+            .iter_mut()
+            .find(|index| index.name == "IX_CODE")
+            .expect("IX_CODE");
+        index.columns = vec![IndexColumnDef::new("CODE"), IndexColumnDef::new("AMOUNT")];
+        connection
+            .save_table_schema("", table, Some(&loaded), &modified)
+            .await
+            .expect("alter the table");
+
+        let reloaded = connection
+            .table_schema("", table)
+            .await
+            .expect("read the altered table back");
+        assert!(reloaded.columns.iter().any(|column| column.name == "NOTE"));
+        let index = reloaded
+            .indexes
+            .iter()
+            .find(|index| index.name == "IX_CODE")
+            .expect("IX_CODE after the alter");
+        assert!(
+            !index.columns[0].descending,
+            "the ascending sort did not round trip: {:?}",
+            index.columns
+        );
+
+        connection.drop_table("", table).await.expect("drop");
+    });
+}
+
 /// The `连接类型 = SID` path: the database field carries a SID and the driver builds a connect
 /// descriptor (`(DESCRIPTION=…(CONNECT_DATA=(SID=…)))`), which the live listener must accept.
 #[test]
