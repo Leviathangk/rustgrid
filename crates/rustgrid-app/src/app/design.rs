@@ -43,18 +43,20 @@ pub(super) const INDEX_COMMENT_WIDTH: f32 = 240.0;
 // The index field editor's per-row controls.
 pub(super) const INDEX_FIELD_NAME_WIDTH: f32 = 200.0;
 pub(super) const INDEX_FIELD_OPTION_WIDTH: f32 = 80.0;
-/// What a row leads its name with: the drag handle (14), the check box (14) and the `px_2` / `gap_2`
-/// spacing around them. The heading row, which has neither, offsets its 排序 / 子部分 labels by the same
-/// amount so they line up with the rows' cells.
-pub(super) const INDEX_FIELD_LEAD_WIDTH: f32 = 60.0;
+/// What a row leads its name with, after the panel's own padding: the drag handle (14), the check
+/// box (14) and the `gap_2` spacing around them. The heading row offsets its 排序 / 子部分 labels by the
+/// same amount, so they line up with the rows' cells.
+pub(super) const INDEX_FIELD_LEAD_WIDTH: f32 = 44.0;
+/// The room the heading row's `2/8` count needs at the panel's right edge.
+pub(super) const INDEX_FIELDS_COUNT_WIDTH: f32 = 44.0;
 
 // The index field editor's panel metrics. Its list is as tall as the window allows (up to
 // `INDEX_FIELDS_LIST_HEIGHT`) instead of a fixed 240px that cut the footer off on a short window;
-// `INDEX_FIELDS_CHROME_HEIGHT` is everything around the list — the title, the column headings, the
-// search box and the footer.
+// `INDEX_FIELDS_CHROME_HEIGHT` is everything around the list — the heading row, the search box and
+// the footer.
 pub(super) const INDEX_FIELDS_LIST_HEIGHT: f32 = 420.0;
 pub(super) const INDEX_FIELDS_LIST_MIN_HEIGHT: f32 = 120.0;
-pub(super) const INDEX_FIELDS_CHROME_HEIGHT: f32 = 116.0;
+pub(super) const INDEX_FIELDS_CHROME_HEIGHT: f32 = 100.0;
 
 // The foreign-key grid's columns.
 pub(super) const FK_NAME_WIDTH: f32 = 180.0;
@@ -458,8 +460,9 @@ pub(super) fn index_fields_name_width(columns: &[ColumnDef]) -> f32 {
     INDEX_FIELD_NAME_WIDTH.max(longest + 8.0)
 }
 
-/// The width of the whole editor: the 字段 column, the ▶ marker and check box the rows lead with,
-/// the engine's per-column option cells (MySQL's 排序 + 子部分) and the panel's own padding.
+/// The width of the whole editor: the 字段 column, the drag handle and check box the rows lead with,
+/// the engine's per-column option cells (MySQL's 排序 + 子部分), the heading row's count and the
+/// panel's own padding.
 pub(super) fn index_fields_panel_width(
     designer: &TableDesignerSpec,
     columns: &[ColumnDef],
@@ -473,6 +476,7 @@ pub(super) fn index_fields_panel_width(
     index_fields_name_width(columns)
         + INDEX_FIELD_LEAD_WIDTH
         + options * (INDEX_FIELD_OPTION_WIDTH + 8.0)
+        + INDEX_FIELDS_COUNT_WIDTH
         + 24.0
 }
 

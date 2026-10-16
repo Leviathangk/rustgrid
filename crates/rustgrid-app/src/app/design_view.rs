@@ -1819,55 +1819,35 @@ impl TableDesignView {
             panel = panel.top(anchor.y);
         }
 
-        let header = div()
+        // One heading row, like the tables' own headers: the field group's name (spanning the drag
+        // handle / check box / name cells), then the engine's own option cells, with the
+        // ticked-of-total count at the panel's right edge.
+        let mut header = div()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
+            .gap_2()
             .px_2()
             .h(px(24.0))
             .flex_none()
             .bg(rgb(theme.dialog_face))
             .border_b_1()
             .border_color(rgb(theme.border))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(theme.text))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(theme.text))
+                    .w(px(name_width + lead_width))
+                    .flex_none()
                     .child(t!("design.index.fields").to_string()),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(format!("{member_count}/{total}")),
-            );
-        panel = panel.child(header);
-
-        let mut columns = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .h(px(20.0))
-            .flex_none()
-            .bg(rgb(theme.dialog_face))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .text_size(px(11.0))
-            .text_color(rgb(theme.text_muted))
-            .child(
-                // The panel's title already names the field list, so this row only heads the
-                // engine's own option cells — the gap lines them up with the rows' cells.
-                div().w(px(name_width + lead_width)).flex_none(),
             );
         for option in [DesignerIndexColumn::Sort, DesignerIndexColumn::PrefixLength] {
             if (option == DesignerIndexColumn::Sort && sort)
                 || (option == DesignerIndexColumn::PrefixLength && prefix)
             {
-                columns = columns.child(
+                header = header.child(
                     div()
                         .w(px(INDEX_FIELD_OPTION_WIDTH))
                         .flex_none()
@@ -1875,7 +1855,14 @@ impl TableDesignView {
                 );
             }
         }
-        panel = panel.child(columns);
+        header = header.child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(rgb(theme.text_muted))
+                .child(format!("{member_count}/{total}")),
+        );
+        panel = panel.child(header);
 
         panel = panel.child(
             div()
