@@ -73,9 +73,18 @@ fn index_sql(schema: &str, table: &str, index: &IndexDef) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    // `CREATE [UNIQUE|BITMAP] INDEX` — Oracle's two kinds are exclusive, so a bitmap index takes
+    // the keyword and nothing else; any other type (a function-based index, say) falls back to the
+    // plain form rather than inventing syntax.
+    let kind = if index.unique {
+        "UNIQUE "
+    } else if index.index_type.trim().eq_ignore_ascii_case("BITMAP") {
+        "BITMAP "
+    } else {
+        ""
+    };
     format!(
-        "CREATE {}INDEX {} ON {} ({columns})",
-        if index.unique { "UNIQUE " } else { "" },
+        "CREATE {kind}INDEX {} ON {} ({columns})",
         // Oracle creates an index in the *connected* user's schema, but an index belongs to its
         // table's schema (and `DROP INDEX` names it that way), so it is qualified here.
         qualify(schema, &index.name),

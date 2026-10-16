@@ -5,9 +5,10 @@ use rustgrid_core::{
     AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldChoice,
     ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec,
     ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
-    DatabaseEditorTab, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerTab,
-    Driver, DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
+    DatabaseEditorTab, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
+    DesignerIndexKind, DesignerTab, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
+    DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec, TlsMode,
+    UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -132,7 +133,6 @@ impl Driver for SqlServerDriver {
                     DesignerTab::ForeignKeys,
                     DesignerTab::UniqueKeys,
                     DesignerTab::Checks,
-                    DesignerTab::Triggers,
                     DesignerTab::Sql,
                 ],
                 column_options: vec![
@@ -162,6 +162,31 @@ impl Driver for SqlServerDriver {
                 },
                 // SQL Server indexes sort per column; 子部分 is MySQL's.
                 index_columns: vec![DesignerIndexColumn::Sort],
+                // SQL Server's own kinds: an index is clustered or not, and either may be unique
+                // (`CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX`). It has no index comment.
+                index_kinds: vec![
+                    DesignerIndexKind {
+                        label: "NONCLUSTERED",
+                        unique: false,
+                        types: Some(&["NONCLUSTERED"]),
+                    },
+                    DesignerIndexKind {
+                        label: "UNIQUE NONCLUSTERED",
+                        unique: true,
+                        types: Some(&["NONCLUSTERED"]),
+                    },
+                    DesignerIndexKind {
+                        label: "CLUSTERED",
+                        unique: false,
+                        types: Some(&["CLUSTERED"]),
+                    },
+                    DesignerIndexKind {
+                        label: "UNIQUE CLUSTERED",
+                        unique: true,
+                        types: Some(&["CLUSTERED"]),
+                    },
+                ],
+                index_comment: false,
             },
             id: DriverId::new("sqlserver"),
             display_name: "SQL Server".to_string(),

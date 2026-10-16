@@ -724,7 +724,8 @@ impl Connection for SqliteConnection {
                 columns,
                 unique: unique == 1,
                 primary: false,
-                index_type: "BTREE".to_string(),
+                // SQLite has no index *type*: `CREATE [UNIQUE] INDEX` is the whole vocabulary.
+                index_type: String::new(),
                 comment: String::new(),
             });
         }

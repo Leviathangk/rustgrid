@@ -7,7 +7,7 @@
 
 use crate::capability::DriverCapabilities;
 use crate::driver::DatabaseEditorSpec;
-use crate::model::DriverId;
+use crate::model::{DriverId, IndexDef};
 
 /// How a driver's icon is drawn in the connection tree and menus.
 ///
@@ -255,8 +255,6 @@ pub enum DesignerTab {
     UniqueKeys,
     /// Check constraints.
     Checks,
-    /// Triggers.
-    Triggers,
     /// Table-level storage options.
     Options,
     /// The table's comment.
@@ -267,13 +265,12 @@ pub enum DesignerTab {
 
 impl DesignerTab {
     /// Every tab, in the designer's default order.
-    pub const ALL: [DesignerTab; 9] = [
+    pub const ALL: [DesignerTab; 8] = [
         DesignerTab::Fields,
         DesignerTab::Indexes,
         DesignerTab::ForeignKeys,
         DesignerTab::UniqueKeys,
         DesignerTab::Checks,
-        DesignerTab::Triggers,
         DesignerTab::Options,
         DesignerTab::Comment,
         DesignerTab::Sql,
@@ -287,7 +284,6 @@ impl DesignerTab {
             DesignerTab::ForeignKeys => "design.tab.foreign_keys",
             DesignerTab::UniqueKeys => "design.tab.unique_keys",
             DesignerTab::Checks => "design.tab.checks",
-            DesignerTab::Triggers => "design.tab.triggers",
             DesignerTab::Options => "design.tab.options",
             DesignerTab::Comment => "design.tab.comment",
             DesignerTab::Sql => "design.tab.sql",
@@ -302,7 +298,6 @@ impl DesignerTab {
             DesignerTab::ForeignKeys => "design-tab-foreign-keys",
             DesignerTab::UniqueKeys => "design-tab-unique-keys",
             DesignerTab::Checks => "design-tab-checks",
-            DesignerTab::Triggers => "design-tab-triggers",
             DesignerTab::Options => "design-tab-options",
             DesignerTab::Comment => "design-tab-comment",
             DesignerTab::Sql => "design-tab-sql",
@@ -501,6 +496,34 @@ impl DesignerIndexColumn {
     }
 }
 
+/// One choice of the designer's 索引类型 (index type) cell.
+///
+/// The vocabulary is each engine's own: `label` is the text that engine writes for the kind
+/// (`NORMAL`, `FULLTEXT`, `CLUSTERED`, `BITMAP`, ...) and is drawn verbatim — an index type is the
+/// engine's identifier, not a translatable UI string — so every engine's 索引类型 list is visibly
+/// its own rather than MySQL's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesignerIndexKind {
+    /// The text the 索引类型 cell shows and its drop-down offers, in the engine's own words.
+    pub label: &'static str,
+    /// Whether the kind makes the index `UNIQUE`.
+    pub unique: bool,
+    /// The `IndexDef::index_type` values the kind covers, its first entry being the value stored
+    /// when the kind is picked. More than one entry means the engine's 索引方法 cell refines them
+    /// (MySQL/MariaDB's `NORMAL`/`UNIQUE` cover `BTREE` and `HASH`); `None` means the engine stores
+    /// no type of its own, so uniqueness alone decides the kind (PostgreSQL).
+    pub types: Option<&'static [&'static str]>,
+}
+
+impl DesignerIndexKind {
+    /// The value stored in `IndexDef::index_type` when the kind is picked.
+    pub fn value(self) -> &'static str {
+        self.types
+            .and_then(|types| types.first().copied())
+            .unwrap_or_default()
+    }
+}
+
 /// How the table designer presents one engine's tables.
 ///
 /// The designer is one view shared by every engine; this spec is what makes it engine-correct.
@@ -508,7 +531,8 @@ impl DesignerIndexColumn {
 /// opt in keeps working.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDesignerSpec {
-    /// The sub-tabs shown, in order.
+    /// The sub-tabs shown, in order. 触发器 is deliberately absent: the designer cannot create or
+    /// edit a trigger yet, so it has no tab until it can.
     pub tabs: Vec<DesignerTab>,
     /// The per-column detail controls shown, in order.
     pub column_options: Vec<DesignerColumnOption>,
@@ -518,6 +542,11 @@ pub struct TableDesignerSpec {
     pub option_fields: Vec<DesignerOptionField>,
     /// The per-column options the index field editor shows, in order.
     pub index_columns: Vec<DesignerIndexColumn>,
+    /// The 索引类型 choices, in order: each engine's own index kinds.
+    pub index_kinds: Vec<DesignerIndexKind>,
+    /// Whether the engine's indexes carry a comment (MySQL/MariaDB's `INDEX … COMMENT`); the index
+    /// grid leaves its 注释 column out when they do not.
+    pub index_comment: bool,
     /// Where the engine accepts an auto-increment (identity) column.
     pub auto_increment: AutoIncrementRule,
 }
@@ -530,11 +559,63 @@ impl TableDesignerSpec {
             DesignerTab::Fields,
             DesignerTab::Indexes,
             DesignerTab::ForeignKeys,
-            DesignerTab::Triggers,
             DesignerTab::Options,
             DesignerTab::Comment,
             DesignerTab::Sql,
         ]
+    }
+
+    /// The access methods the index grid's 索引方法 cell offers, or `None` when the engine has none
+    /// and the grid leaves that column out. The methods are one kind's own type list: MySQL/MariaDB
+    /// `NORMAL`/`UNIQUE` cover `BTREE` and `HASH`.
+    pub fn index_methods(&self) -> Option<&'static [&'static str]> {
+        self.index_kinds
+            .iter()
+            .filter_map(|kind| kind.types)
+            .find(|types| types.len() > 1)
+    }
+
+    /// The kind one index row shows: the declared kind whose uniqueness and type match the index.
+    /// `None` when the engine declares no such combination — the row then keeps the engine's own
+    /// `index_type` text (Oracle's `FUNCTION-BASED NORMAL`, SQL Server's columnstore indexes, ...).
+    pub fn index_kind(&self, index: &IndexDef) -> Option<&DesignerIndexKind> {
+        let index_type = index.index_type.trim();
+        self.index_kinds
+            .iter()
+            .find(|kind| {
+                kind.unique == index.unique
+                    && kind.types.is_none_or(|types| {
+                        types.iter().any(|t| t.eq_ignore_ascii_case(index_type))
+                    })
+            })
+            // An index with no type at all (a model that never stored one) still shows its kind,
+            // decided by uniqueness, rather than an empty cell.
+            .or_else(|| {
+                index_type
+                    .is_empty()
+                    .then(|| {
+                        self.index_kinds
+                            .iter()
+                            .find(|kind| kind.unique == index.unique)
+                    })
+                    .flatten()
+            })
+    }
+
+    /// The 索引方法 value one index row shows: the matched kind's own type list when it has more
+    /// than one entry (`BTREE`/`HASH`), with the index's stored type as the current one. `None` for
+    /// a kind the cell does not refine.
+    pub fn index_method(&self, index: &IndexDef) -> Option<&'static str> {
+        let types = self.index_kind(index)?.types?;
+        if types.len() < 2 {
+            return None;
+        }
+        let index_type = index.index_type.trim();
+        types
+            .iter()
+            .copied()
+            .find(|t| t.eq_ignore_ascii_case(index_type))
+            .or_else(|| types.first().copied())
     }
 }
 
@@ -579,6 +660,33 @@ impl Default for TableDesignerSpec {
             },
             // MySQL indexes sort per column and can index a fixed prefix of one (子部分).
             index_columns: vec![DesignerIndexColumn::Sort, DesignerIndexColumn::PrefixLength],
+            // MySQL's own kinds: a plain or unique index is a B-tree (or hash) index, and
+            // FULLTEXT/SPATIAL are kinds of their own.
+            index_kinds: vec![
+                DesignerIndexKind {
+                    label: "NORMAL",
+                    unique: false,
+                    types: Some(&["BTREE", "HASH"]),
+                },
+                DesignerIndexKind {
+                    label: "UNIQUE",
+                    unique: true,
+                    types: Some(&["BTREE", "HASH"]),
+                },
+                DesignerIndexKind {
+                    label: "FULLTEXT",
+                    unique: false,
+                    types: Some(&["FULLTEXT"]),
+                },
+                DesignerIndexKind {
+                    label: "SPATIAL",
+                    unique: false,
+                    types: Some(&["SPATIAL"]),
+                },
+            ],
+            // `INDEX … COMMENT 'x'` is MySQL's; no other engine the designer has a driver for
+            // stores an index comment.
+            index_comment: true,
         }
     }
 }
@@ -653,5 +761,80 @@ mod tests {
         assert!(!spec.column_options.contains(&DesignerColumnOption::Sparse));
         assert!(spec.auto_increment.allows("int"));
         assert!(!spec.auto_increment.allows("varchar"));
+    }
+
+    #[test]
+    fn mysqls_kinds_round_trip_through_the_model() {
+        let spec = TableDesignerSpec::default();
+        let index = |unique, index_type: &str| IndexDef {
+            unique,
+            index_type: index_type.to_string(),
+            ..IndexDef::default()
+        };
+
+        // A plain and a unique index share the B-tree/hash method list; the kind tells them apart.
+        assert_eq!(
+            spec.index_kind(&index(false, "BTREE")).unwrap().label,
+            "NORMAL"
+        );
+        assert_eq!(
+            spec.index_kind(&index(true, "BTREE")).unwrap().label,
+            "UNIQUE"
+        );
+        // The 索引方法 cell refines NORMAL/UNIQUE, so a HASH index is still its kind.
+        assert_eq!(
+            spec.index_kind(&index(false, "HASH")).unwrap().label,
+            "NORMAL"
+        );
+        assert_eq!(spec.index_method(&index(false, "HASH")), Some("HASH"));
+        assert_eq!(spec.index_method(&index(true, "")), Some("BTREE"));
+        // FULLTEXT/SPATIAL are kinds of their own and carry no method.
+        assert_eq!(
+            spec.index_kind(&index(false, "FULLTEXT")).unwrap().label,
+            "FULLTEXT"
+        );
+        assert_eq!(spec.index_method(&index(false, "FULLTEXT")), None);
+        assert_eq!(spec.index_methods(), Some(&["BTREE", "HASH"][..]));
+        assert!(spec.index_comment);
+    }
+
+    #[test]
+    fn an_engine_without_types_keeps_its_kinds_to_uniqueness() {
+        // PostgreSQL stores no index type of its own, so NORMAL/UNIQUE are decided by uniqueness
+        // alone and there is no 索引方法 column.
+        let spec = TableDesignerSpec {
+            index_kinds: vec![
+                DesignerIndexKind {
+                    label: "NORMAL",
+                    unique: false,
+                    types: None,
+                },
+                DesignerIndexKind {
+                    label: "UNIQUE",
+                    unique: true,
+                    types: None,
+                },
+            ],
+            index_comment: false,
+            ..TableDesignerSpec::default()
+        };
+        assert_eq!(
+            spec.index_kind(&IndexDef::default()).unwrap().label,
+            "NORMAL"
+        );
+        assert!(
+            spec.index_kind(&IndexDef {
+                unique: true,
+                ..IndexDef::default()
+            })
+            .is_some()
+        );
+        assert_eq!(spec.index_methods(), None);
+        assert!(
+            spec.index_kind(&IndexDef::default())
+                .unwrap()
+                .value()
+                .is_empty()
+        );
     }
 }

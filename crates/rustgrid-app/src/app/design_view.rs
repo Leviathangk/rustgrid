@@ -61,10 +61,10 @@ impl TableDesignView {
 
         root = root.child(self.render_body(cx));
 
-        let root_anchor = self.root_anchor.clone();
+        let root_bounds = self.root_bounds.clone();
         root = root.on_children_prepainted(move |bounds, _window, _cx| {
             if let Some(first) = bounds.first() {
-                *root_anchor.borrow_mut() = Point::new(first.left(), first.top());
+                *root_bounds.borrow_mut() = *first;
             }
         });
 
@@ -75,7 +75,7 @@ impl TableDesignView {
             root = root.child(self.render_index_combo(cx));
         }
         if self.index_fields_draft.is_some() {
-            root = root.child(self.render_index_fields_popup(cx));
+            root = root.child(self.render_index_fields_popup(window, cx));
         }
         if self.unique_key_fields_row.is_some() {
             root = root.child(self.render_unique_key_fields_popup(cx));
@@ -358,7 +358,6 @@ impl TableDesignView {
                 DesignerTab::ForeignKeys => self.render_foreign_keys(cx),
                 DesignerTab::UniqueKeys => self.render_unique_keys(cx),
                 DesignerTab::Checks => self.render_checks(cx),
-                DesignerTab::Triggers => self.render_triggers(),
                 DesignerTab::Options => self.render_options(cx),
                 DesignerTab::Comment => self.render_comment(),
                 DesignerTab::Sql => self.render_sql(cx),
@@ -705,17 +704,20 @@ impl TableDesignView {
 
     fn render_indexes(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let widths = [
-            INDEX_NAME_WIDTH,
-            INDEX_FIELDS_WIDTH,
-            INDEX_KIND_WIDTH,
-            INDEX_METHOD_WIDTH,
-            INDEX_COMMENT_WIDTH,
-        ];
+        // The grid's columns come from the engine: its own 索引类型, the 索引方法 cell only when its
+        // kinds carry more than one type (MySQL/MariaDB's BTREE/HASH), 注释 only when its indexes
+        // carry one.
+        let columns = index_grid_columns(&self.designer);
+        let widths: Vec<f32> = columns.iter().map(|(_, width)| *width).collect();
+        let show_method = columns.iter().any(|(key, _)| *key == "design.index.method");
+        let show_comment = columns
+            .iter()
+            .any(|(key, _)| *key == "design.index.comment");
         let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
         let indexes = self.schema.indexes.clone();
         let selected = self.selected_index;
         let index_rows = self.index_rows.clone();
+        let designer = self.designer.clone();
         let edit = self
             .index_edit
             .as_ref()
@@ -748,15 +750,11 @@ impl TableDesignView {
                                 })
                                 .map(|(_, _, input)| input.clone())
                         };
-                        let kind_label = if index.primary {
-                            t!("design.index.kind.primary").to_string()
-                        } else {
-                            t!(IndexKind::of(index).label_key()).to_string()
-                        };
-                        let method = index_method(index);
+                        let kind_label = index_kind_label(&designer, index);
+                        let method = index_method_label(&designer, index);
                         let gutter_weak = weak.clone();
 
-                        div()
+                        let mut line = div()
                             .flex()
                             .flex_row()
                             .h(px(DESIGN_ROW_HEIGHT))
@@ -832,8 +830,9 @@ impl TableDesignView {
                                 row,
                                 IndexComboField::Kind,
                                 combo_anchor.clone(),
-                            ))
-                            .child(index_choice_cell(
+                            ));
+                        if show_method {
+                            line = line.child(index_choice_cell(
                                 SharedString::from(format!("index-method-{row}")),
                                 INDEX_METHOD_WIDTH,
                                 method.unwrap_or_default().to_string(),
@@ -844,8 +843,10 @@ impl TableDesignView {
                                 row,
                                 IndexComboField::Method,
                                 combo_anchor.clone(),
-                            ))
-                            .child(index_edit_cell(
+                            ));
+                        }
+                        if show_comment {
+                            line = line.child(index_edit_cell(
                                 SharedString::from(format!("index-comment-{row}")),
                                 INDEX_COMMENT_WIDTH,
                                 index.comment.clone(),
@@ -855,7 +856,9 @@ impl TableDesignView {
                                 row,
                                 IndexColumn::Comment,
                                 editor_for(IndexColumn::Comment),
-                            ))
+                            ));
+                        }
+                        line
                     })
                     .collect::<Vec<_>>()
             },
@@ -864,19 +867,12 @@ impl TableDesignView {
         .flex_1()
         .min_h(px(0.0));
 
-        let header = self.render_index_header(theme, &widths);
+        let header = self.render_index_header(theme, &columns);
 
         self.render_grid_scaffold(cx, header, list, content_width)
     }
 
-    fn render_index_header(&self, theme: Theme, widths: &[f32; 5]) -> Div {
-        let labels = [
-            "design.index.name",
-            "design.index.fields",
-            "design.index.type",
-            "design.index.method",
-            "design.index.comment",
-        ];
+    fn render_index_header(&self, theme: Theme, columns: &[(&'static str, f32)]) -> Div {
         let mut header = div()
             .flex()
             .flex_row()
@@ -894,13 +890,13 @@ impl TableDesignView {
                     .border_r_1()
                     .border_color(rgb(theme.grid_line)),
             );
-        for (index, key) in labels.iter().enumerate() {
+        for (key, width) in columns {
             header = header.child(
                 div()
                     .flex()
                     .items_center()
                     .h(px(DESIGN_HEADER_HEIGHT))
-                    .w(px(widths[index]))
+                    .w(px(*width))
                     .flex_none()
                     .px_2()
                     .whitespace_nowrap()
@@ -1471,34 +1467,6 @@ impl TableDesignView {
             .into_any_element()
     }
 
-    fn render_triggers(&self) -> AnyElement {
-        let theme = self.theme;
-        let rows = self
-            .schema
-            .triggers
-            .iter()
-            .map(|trigger| {
-                vec![
-                    trigger.name.clone(),
-                    trigger.timing.clone(),
-                    trigger.event.clone(),
-                    trigger.statement.replace('\n', " "),
-                ]
-            })
-            .collect::<Vec<_>>();
-        simple_table(
-            theme,
-            "trigger",
-            &[
-                ("design.trigger.name", 200.0),
-                ("design.trigger.timing", 100.0),
-                ("design.trigger.event", 100.0),
-                ("design.trigger.statement", 380.0),
-            ],
-            rows,
-        )
-    }
-
     /// The table's storage options. The rows come from the engine's
     /// [`TableDesignerSpec::option_fields`], so an engine only shows what its designer SQL honors.
     fn render_options(&self, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -1558,7 +1526,7 @@ impl TableDesignView {
         let Some(row) = self.type_combo else {
             return div().into_any_element();
         };
-        let origin = *self.root_anchor.borrow();
+        let origin = self.root_bounds.borrow().origin;
         let anchor = self
             .combo_anchor
             .borrow()
@@ -1661,7 +1629,7 @@ impl TableDesignView {
         let Some(index) = self.schema.indexes.get(row) else {
             return div().into_any_element();
         };
-        let origin = *self.root_anchor.borrow();
+        let origin = self.root_bounds.borrow().origin;
         let anchor = self
             .index_combo_anchor
             .borrow()
@@ -1679,15 +1647,21 @@ impl TableDesignView {
             .flex_col();
         let width = match field {
             IndexComboField::Kind => {
-                let current = IndexKind::of(index);
-                for kind in IndexKind::ALL {
+                let current = self
+                    .designer
+                    .index_kind(index)
+                    .map(|kind| kind.label)
+                    .unwrap_or_default();
+                for (position, kind) in self.designer.index_kinds.iter().enumerate() {
                     options = options.child(index_choice_option(
-                        format!("index-kind-option-{}", kind.value()),
-                        t!(kind.label_key()).to_string(),
-                        kind == current,
+                        // The label carries spaces on SQL Server (`UNIQUE NONCLUSTERED`), so the
+                        // element id is positional rather than built from it.
+                        format!("index-kind-option-{position}"),
+                        kind.label.to_string(),
+                        kind.label == current,
                         row,
                         field,
-                        kind.value(),
+                        kind.label,
                         &weak,
                         theme,
                     ));
@@ -1695,12 +1669,12 @@ impl TableDesignView {
                 INDEX_KIND_WIDTH
             }
             IndexComboField::Method => {
-                let current = index_method(index);
-                for method in INDEX_METHODS {
+                let current = index_method_label(&self.designer, index);
+                for method in self.designer.index_methods().unwrap_or_default() {
                     options = options.child(index_choice_option(
                         format!("index-method-option-{method}"),
                         method.to_string(),
-                        current == Some(method),
+                        current == Some(*method),
                         row,
                         field,
                         method,
@@ -1748,12 +1722,22 @@ impl TableDesignView {
     /// Everything edits a draft; 确定 installs it and 取消 (or a click outside) throws it away, so the
     /// grid never shows a half-made change. The 主键 row opens here too — its draft edits the 主键
     /// flags, which is where the model keeps the key — and therefore carries no per-column options.
-    fn render_index_fields_popup(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    ///
+    /// The panel is sized from its own columns — the grid's 字段 column is narrower than 字段 + 排序 +
+    /// 子部分, which is what used to clip 子部分 — and from the room the view has: it opens under the
+    /// cell, or above it when that is where the space is, and the list takes whatever height is left
+    /// so the footer's 取消 / 确定 are never pushed out of the window.
+    fn render_index_fields_popup(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let theme = self.theme;
         let Some(draft) = self.index_fields_draft.as_ref() else {
             return div().into_any_element();
         };
-        let origin = *self.root_anchor.borrow();
+        let bounds = *self.root_bounds.borrow();
+        let origin = bounds.origin;
         let anchor = self
             .index_fields_anchor
             .borrow()
@@ -1761,6 +1745,8 @@ impl TableDesignView {
             .copied()
             .unwrap_or_default();
         let anchor = Point::new(anchor.x - origin.x, anchor.y - origin.y);
+        let anchor_y: f32 = anchor.y.into();
+        let view_height: f32 = bounds.size.height.into();
         let options = !draft.primary;
         let sort = options
             && self
@@ -1772,17 +1758,34 @@ impl TableDesignView {
                 .designer
                 .index_columns
                 .contains(&DesignerIndexColumn::PrefixLength);
+        let picker_open = self.index_field_picker.is_some();
+        let width = index_fields_panel_width(&self.designer, draft.primary);
+        let reserved = INDEX_FIELDS_CHROME_HEIGHT
+            + if picker_open {
+                INDEX_FIELDS_PICKER_HEIGHT
+            } else {
+                0.0
+            };
+        let below = view_height - anchor_y - reserved;
+        let above = anchor_y - DESIGN_ROW_HEIGHT - reserved;
+        let open_up = below < INDEX_FIELDS_LIST_MIN_HEIGHT && above > below;
+        let list_height = if open_up { above } else { below }
+            .clamp(INDEX_FIELDS_LIST_MIN_HEIGHT, INDEX_FIELDS_LIST_HEIGHT);
 
         let mut panel = ui::popup_panel(theme)
             .id("design-index-fields")
             .left(anchor.x)
-            .top(anchor.y)
-            .w(px(INDEX_FIELDS_WIDTH.max(260.0)))
+            .w(px(width))
             .flex()
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.close_index_fields(cx);
             }));
+        if open_up {
+            panel = panel.bottom(px(view_height - anchor_y + DESIGN_ROW_HEIGHT));
+        } else {
+            panel = panel.top(anchor.y);
+        }
 
         let mut header = div()
             .flex()
@@ -1821,13 +1824,13 @@ impl TableDesignView {
             .flex_col()
             .flex_none()
             .min_h(px(24.0))
-            .max_h(px(240.0))
+            .max_h(px(list_height))
             .overflow_y_scroll();
         for (row, column) in draft.columns.iter().enumerate() {
             let selected = draft.selected == Some(row);
-            // The name cell is the row's drop-down: clicking it expands the field list in place
-            // (an inline list rather than a floating menu, which this panel would treat as a click
-            // outside and close).
+            // The name cell is the row's drop-down: clicking it opens the panel's field list (an
+            // in-panel list rather than a floating menu, which this panel would treat as a click
+            // outside and close) with a search box to find the column by typing.
             let expanded = self.index_field_picker == Some(row);
             let mut name_cell = div()
                 .id(SharedString::from(format!("index-field-name-{row}")))
@@ -1842,8 +1845,8 @@ impl TableDesignView {
                 .border_color(rgb(theme.border))
                 .bg(rgb(theme.input_bg))
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.toggle_index_field_picker(row, cx)
+                .on_click(cx.listener(move |this, _event, window, cx| {
+                    this.toggle_index_field_picker(row, window, cx)
                 }))
                 .child(
                     div()
@@ -1915,57 +1918,88 @@ impl TableDesignView {
                 line = line.child(cell);
             }
             list = list.child(line);
-            if expanded {
-                // The field list of this row, inline. Every column of the table is offered, so a
-                // mistake in one row is corrected in place rather than by removing and re-adding it.
-                let mut options = div()
-                    .id(SharedString::from(format!("index-field-options-{row}")))
+        }
+        panel = panel.child(list);
+
+        if self.index_field_picker.is_some() {
+            // The field list sits under the rows as the panel's own sub-list. It is not nested in
+            // the rows' scroller — a wheel event reaches *every* scrollable hitbox under the cursor,
+            // so nesting one inside another would scroll both.
+            panel = panel.child(
+                div()
                     .flex()
                     .flex_col()
                     .flex_none()
-                    .max_h(px(160.0))
-                    .overflow_y_scroll()
                     .border_b_1()
                     .border_color(rgb(theme.border))
-                    .bg(rgb(theme.dialog_bg));
-                for name in self.schema.columns.iter().map(|column| column.name.clone()) {
-                    let picked = name == column.name;
-                    let option_name = name.clone();
-                    options = options.child(
+                    .bg(rgb(theme.dialog_bg))
+                    .child(
                         div()
-                            .id(SharedString::from(format!(
-                                "index-field-option-{row}-{name}"
-                            )))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap_1()
-                            .h(px(20.0))
+                            .flex_none()
                             .px_2()
+                            .py_1()
+                            .border_b_1()
+                            .border_color(rgb(theme.border))
+                            .child({
+                                let search: AnyElement = match self.index_field_search.clone() {
+                                    Some(input) => {
+                                        div().h(px(20.0)).child(input).into_any_element()
+                                    }
+                                    None => div().h(px(20.0)).into_any_element(),
+                                };
+                                search
+                            }),
+                    )
+                    .child({
+                        let mut options = div()
+                            .id("design-index-field-options")
+                            .flex()
+                            .flex_col()
                             .flex_none()
-                            .flex_none()
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.set_index_draft_name(row, &option_name, cx)
-                            }))
-                            .child(name)
-                            .child(
-                                svg()
-                                    .path("icons/check.svg")
-                                    .w(px(12.0))
-                                    .h(px(12.0))
-                                    .flex_none()
-                                    .text_color(rgb(theme.tree_selected_text))
-                                    .opacity(if picked { 1.0 } else { 0.0 }),
-                            ),
-                    );
-                }
-                list = list.child(options);
-            }
+                            .max_h(px(INDEX_FIELDS_PICKER_HEIGHT - INDEX_FIELDS_SEARCH_HEIGHT))
+                            .overflow_y_scroll();
+                        for (row, column) in draft.columns.iter().enumerate() {
+                            if self.index_field_picker != Some(row) {
+                                continue;
+                            }
+                            for name in self.index_field_options() {
+                                let picked = name == column.name;
+                                let option_name = name.clone();
+                                options = options.child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "index-field-option-{row}-{name}"
+                                        )))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_1()
+                                        .h(px(20.0))
+                                        .px_2()
+                                        .flex_none()
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                            this.set_index_draft_name(row, &option_name, cx)
+                                        }))
+                                        .child(name)
+                                        .child(
+                                            svg()
+                                                .path("icons/check.svg")
+                                                .w(px(12.0))
+                                                .h(px(12.0))
+                                                .flex_none()
+                                                .text_color(rgb(theme.tree_selected_text))
+                                                .opacity(if picked { 1.0 } else { 0.0 }),
+                                        ),
+                                );
+                            }
+                        }
+                        options
+                    }),
+            );
         }
-        panel = panel.child(list);
 
         let mut footer = div()
             .flex()
@@ -2035,7 +2069,7 @@ impl TableDesignView {
         let Some(key) = self.schema.unique_keys.get(row) else {
             return div().into_any_element();
         };
-        let origin = *self.root_anchor.borrow();
+        let origin = self.root_bounds.borrow().origin;
         let anchor = self
             .unique_key_fields_anchor
             .borrow()
@@ -2104,7 +2138,7 @@ impl TableDesignView {
         if self.schema.foreign_keys.get(row).is_none() {
             return div().into_any_element();
         }
-        let origin = *self.root_anchor.borrow();
+        let origin = self.root_bounds.borrow().origin;
         let anchor = self
             .fk_combo_anchor
             .borrow()
@@ -2186,7 +2220,7 @@ impl TableDesignView {
         } else {
             foreign_key.referenced_columns.clone()
         };
-        let origin = *self.root_anchor.borrow();
+        let origin = self.root_bounds.borrow().origin;
         let anchor = if child {
             self.fk_fields_anchor.borrow().get(&row).copied()
         } else {
@@ -2382,10 +2416,7 @@ impl TableDesignView {
             DesignerTab::ForeignKeys => self.selected_fk,
             DesignerTab::UniqueKeys => self.selected_unique_key,
             DesignerTab::Checks => self.selected_check,
-            DesignerTab::Triggers
-            | DesignerTab::Options
-            | DesignerTab::Comment
-            | DesignerTab::Sql => None,
+            DesignerTab::Options | DesignerTab::Comment | DesignerTab::Sql => None,
         }
     }
 
@@ -2397,10 +2428,7 @@ impl TableDesignView {
             DesignerTab::ForeignKeys => self.select_fk(row, cx),
             DesignerTab::UniqueKeys => self.select_unique_key(row, cx),
             DesignerTab::Checks => self.select_check(row, cx),
-            DesignerTab::Triggers
-            | DesignerTab::Options
-            | DesignerTab::Comment
-            | DesignerTab::Sql => {}
+            DesignerTab::Options | DesignerTab::Comment | DesignerTab::Sql => {}
         }
     }
 
@@ -2447,10 +2475,7 @@ impl TableDesignView {
             DesignerTab::ForeignKeys => self.schema.foreign_keys.len(),
             DesignerTab::UniqueKeys => self.schema.unique_keys.len(),
             DesignerTab::Checks => self.schema.checks.len(),
-            DesignerTab::Triggers
-            | DesignerTab::Options
-            | DesignerTab::Comment
-            | DesignerTab::Sql => 0,
+            DesignerTab::Options | DesignerTab::Comment | DesignerTab::Sql => 0,
         }
     }
 
@@ -3372,87 +3397,4 @@ fn option_combo_row(
         row = row.child(combo);
     }
     row.text_color(rgb(theme.text))
-}
-
-fn simple_table(
-    theme: Theme,
-    id: &'static str,
-    columns: &[(&'static str, f32)],
-    rows: Vec<Vec<String>>,
-) -> AnyElement {
-    let mut header = div()
-        .flex()
-        .flex_row()
-        .flex_none()
-        .h(px(DESIGN_HEADER_HEIGHT))
-        .bg(rgb(theme.header_bg))
-        .border_b_1()
-        .border_color(rgb(theme.border));
-    for (key, width) in columns {
-        header = header.child(
-            div()
-                .flex()
-                .items_center()
-                .h(px(DESIGN_HEADER_HEIGHT))
-                .w(px(*width))
-                .flex_none()
-                .px_2()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .border_r_1()
-                .border_color(rgb(theme.grid_line))
-                .child(t!(*key).to_string()),
-        );
-    }
-
-    let mut body = div()
-        .id(id)
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h(px(0.0))
-        .overflow_y_scroll();
-    for (index, row) in rows.iter().enumerate() {
-        let mut row_element = div()
-            .flex()
-            .flex_row()
-            .flex_none()
-            .h(px(DESIGN_ROW_HEIGHT))
-            .bg(rgb(if index % 2 == 1 {
-                theme.row_alt_bg
-            } else {
-                theme.editor_bg
-            }));
-        for (column_index, value) in row.iter().enumerate() {
-            let width = columns
-                .get(column_index)
-                .map(|(_, width)| *width)
-                .unwrap_or(120.0);
-            row_element = row_element.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(DESIGN_ROW_HEIGHT))
-                    .w(px(width))
-                    .flex_none()
-                    .px_2()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .border_r_1()
-                    .border_b_1()
-                    .border_color(rgb(theme.grid_line))
-                    .child(value.clone()),
-            );
-        }
-        body = body.child(row_element);
-    }
-
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h(px(0.0))
-        .child(header)
-        .child(body)
-        .into_any_element()
 }

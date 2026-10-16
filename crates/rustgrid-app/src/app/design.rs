@@ -42,7 +42,17 @@ pub(super) const INDEX_COMMENT_WIDTH: f32 = 240.0;
 
 // The index field editor's per-row controls.
 pub(super) const INDEX_FIELD_NAME_WIDTH: f32 = 200.0;
-pub(super) const INDEX_FIELD_OPTION_WIDTH: f32 = 70.0;
+pub(super) const INDEX_FIELD_OPTION_WIDTH: f32 = 80.0;
+
+// The index field editor's panel metrics. The list is as tall as the window allows (up to
+// `INDEX_FIELDS_LIST_HEIGHT`) instead of a fixed 240px that cut the footer off on a short window,
+// and `INDEX_FIELDS_CHROME_HEIGHT` is the header, footer and padding around it. The expanded field
+// list brings its own search box, so its height is shared by both.
+pub(super) const INDEX_FIELDS_LIST_HEIGHT: f32 = 340.0;
+pub(super) const INDEX_FIELDS_LIST_MIN_HEIGHT: f32 = 96.0;
+pub(super) const INDEX_FIELDS_PICKER_HEIGHT: f32 = 200.0;
+pub(super) const INDEX_FIELDS_SEARCH_HEIGHT: f32 = 32.0;
+pub(super) const INDEX_FIELDS_CHROME_HEIGHT: f32 = 96.0;
 
 // The foreign-key grid's columns.
 pub(super) const FK_NAME_WIDTH: f32 = 180.0;
@@ -325,68 +335,72 @@ pub(super) enum IndexComboField {
 /// Per-(row, dropdown) prepaint anchors for the index grid's dropdown cells.
 pub(super) type IndexComboAnchors = Rc<RefCell<BTreeMap<(usize, IndexComboField), Point<Pixels>>>>;
 
-/// The index kind shown in the index grid's "Index Type" column. It is stored as the combination
-/// of `IndexDef::unique` and `IndexDef::index_type`, so the model needs no extra field.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum IndexKind {
-    Normal,
-    Unique,
-    Fulltext,
-    Spatial,
-}
-
-impl IndexKind {
-    pub(super) const ALL: [IndexKind; 4] = [
-        IndexKind::Normal,
-        IndexKind::Unique,
-        IndexKind::Fulltext,
-        IndexKind::Spatial,
+/// The index grid's columns after the gutter: 名称 and 字段 always, then whatever the engine
+/// declares — its own 索引类型, the 索引方法 cell only for an engine whose kinds carry more than one
+/// type (MySQL/MariaDB's `BTREE`/`HASH`), and 注释 only for an engine whose indexes carry one.
+pub(super) fn index_grid_columns(designer: &TableDesignerSpec) -> Vec<(&'static str, f32)> {
+    let mut columns = vec![
+        ("design.index.name", INDEX_NAME_WIDTH),
+        ("design.index.fields", INDEX_FIELDS_WIDTH),
+        ("design.index.type", INDEX_KIND_WIDTH),
     ];
-
-    pub(super) fn label_key(self) -> &'static str {
-        match self {
-            IndexKind::Normal => "design.index.kind.normal",
-            IndexKind::Unique => "design.index.kind.unique",
-            IndexKind::Fulltext => "design.index.kind.fulltext",
-            IndexKind::Spatial => "design.index.kind.spatial",
-        }
+    if designer.index_methods().is_some() {
+        columns.push(("design.index.method", INDEX_METHOD_WIDTH));
     }
-
-    /// The stable value round-tripped through the dropdown callback.
-    pub(super) fn value(self) -> &'static str {
-        match self {
-            IndexKind::Normal => "normal",
-            IndexKind::Unique => "unique",
-            IndexKind::Fulltext => "fulltext",
-            IndexKind::Spatial => "spatial",
-        }
+    if designer.index_comment {
+        columns.push(("design.index.comment", INDEX_COMMENT_WIDTH));
     }
+    columns
+}
 
-    pub(super) fn of(index: &IndexDef) -> IndexKind {
-        match index.index_type.to_ascii_uppercase().as_str() {
-            "FULLTEXT" => IndexKind::Fulltext,
-            "SPATIAL" => IndexKind::Spatial,
-            _ if index.unique => IndexKind::Unique,
-            _ => IndexKind::Normal,
-        }
+/// The 索引类型 cell's text for one index row: the engine's declared kind (`NORMAL`, `UNIQUE`,
+/// `FULLTEXT`, `SPATIAL`, `NONCLUSTERED`, ...), the primary key's own marker, or — for a type the
+/// engine did not declare (Oracle's `FUNCTION-BASED NORMAL`, SQL Server's columnstore, ...) — the
+/// engine's own `index_type` text, so nothing is ever mislabelled as another engine's.
+pub(super) fn index_kind_label(designer: &TableDesignerSpec, index: &IndexDef) -> String {
+    if index.primary {
+        return "PRIMARY".to_string();
+    }
+    match designer.index_kind(index) {
+        Some(kind) => kind.label.to_string(),
+        None => index.index_type.trim().to_string(),
     }
 }
 
-/// The access method shown in the index grid's "Index Method" column, for normal/unique indexes.
-pub(super) const INDEX_METHODS: [&str; 2] = ["BTREE", "HASH"];
-
-/// The method of an index, or `None` for fulltext/spatial indexes where it does not apply.
-pub(super) fn index_method(index: &IndexDef) -> Option<&'static str> {
-    match IndexKind::of(index) {
-        IndexKind::Normal | IndexKind::Unique => {
-            Some(if index.index_type.eq_ignore_ascii_case("HASH") {
-                "HASH"
-            } else {
-                "BTREE"
-            })
-        }
-        _ => None,
+/// The 索引方法 cell's text for one index row: the kind's own type list when it has more than one
+/// entry, with the index's stored type as the current one. `None` for a row the cell does not
+/// apply to (the primary key, the kinds with a single type).
+pub(super) fn index_method_label(
+    designer: &TableDesignerSpec,
+    index: &IndexDef,
+) -> Option<&'static str> {
+    if index.primary {
+        return None;
     }
+    designer.index_method(index)
+}
+
+/// A brand-new index row starts as the engine's first kind, so its type is that kind's own value
+/// (`BTREE` on MySQL/MariaDB, `NONCLUSTERED` on SQL Server, nothing where the engine has no type)
+/// rather than a fixed MySQL value on every engine.
+pub(super) fn default_index_kind(designer: &TableDesignerSpec) -> (bool, String) {
+    designer
+        .index_kinds
+        .first()
+        .map(|kind| (kind.unique, kind.value().to_string()))
+        .unwrap_or((false, String::new()))
+}
+
+/// The index field editor's width: the field column plus the engine's per-column option cells, so
+/// a wide set (MySQL's 排序 + 子部分) is never clipped — the grid's own 字段 column is a different
+/// width and must not size this panel.
+pub(super) fn index_fields_panel_width(designer: &TableDesignerSpec, primary: bool) -> f32 {
+    let options = if primary {
+        0
+    } else {
+        designer.index_columns.len()
+    } as f32;
+    INDEX_FIELD_NAME_WIDTH + options * (INDEX_FIELD_OPTION_WIDTH + 8.0) + 24.0
 }
 
 /// Add `value` to `list`, or remove it if it is already present.
@@ -481,6 +495,10 @@ pub(super) struct TableDesignView {
     /// The 子部分 input of each draft row, rebuilt whenever the draft's rows change (the wrapper
     /// builds its inner state on the first render).
     pub(super) index_field_prefix_inputs: BTreeMap<usize, Entity<TextInput>>,
+    /// The search box of the expanded field list and the text it holds (kept across rows, like the
+    /// type drop-down's, so the filter does not rebuild on every render).
+    pub(super) index_field_search: Option<Entity<TextInput>>,
+    pub(super) index_field_query: String,
     /// The unique-key grid: its own selection, in-place name editor and field picker. An engine
     /// only shows the tab when its [`TableDesignerSpec`] declares it.
     pub(super) selected_unique_key: Option<usize>,
@@ -528,9 +546,10 @@ pub(super) struct TableDesignView {
     /// Each row's type-cell bottom-left in window coordinates, keyed by field index. A shared
     /// single anchor cannot work here because every visible row prepaints and would overwrite it.
     pub(super) combo_anchor: Rc<RefCell<BTreeMap<usize, Point<Pixels>>>>,
-    /// The design view's own window-space origin, so the type dropdown can convert the
-    /// (window-absolute) prepaint anchor into view-local coordinates.
-    pub(super) root_anchor: Rc<RefCell<Point<Pixels>>>,
+    /// The design view's own window-space bounds, so the type dropdown can convert the
+    /// (window-absolute) prepaint anchor into view-local coordinates — and so the index field
+    /// editor can size itself to the room the view actually has.
+    pub(super) root_bounds: Rc<RefCell<Bounds<Pixels>>>,
     pub(super) default_input: Entity<TextInput>,
     /// Pick-lists for the Options tab, fed by `engines`/`charsets`/`collations`.
     pub(super) engine_combo: Entity<ComboBox>,
@@ -665,6 +684,8 @@ impl TableDesignView {
             index_fields_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             index_field_picker: None,
             index_field_prefix_inputs: BTreeMap::new(),
+            index_field_search: None,
+            index_field_query: String::new(),
             selected_unique_key: None,
             unique_key_rows: RowSelection::default(),
             unique_key_edit: None,
@@ -697,7 +718,7 @@ impl TableDesignView {
             type_highlight: None,
             type_scroll: ScrollHandle::new(),
             combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
-            root_anchor: Rc::new(RefCell::new(Point::default())),
+            root_bounds: Rc::new(RefCell::new(Bounds::default())),
             default_input,
             engine_combo,
             charset_combo,
@@ -1880,12 +1901,13 @@ impl TableDesignView {
     }
 
     pub(super) fn add_index(&mut self, cx: &mut Context<'_, Self>) {
+        let (unique, index_type) = default_index_kind(&self.designer);
         let index = IndexDef {
             name: String::new(),
             columns: Vec::new(),
-            unique: false,
+            unique,
             primary: false,
-            index_type: "BTREE".to_string(),
+            index_type,
             comment: String::new(),
         };
         self.schema.indexes.push(index);
@@ -2049,7 +2071,10 @@ impl TableDesignView {
         let Some(index) = self.schema.indexes.get(row) else {
             return;
         };
-        if index.primary || (field == IndexComboField::Method && index_method(index).is_none()) {
+        if index.primary
+            || (field == IndexComboField::Method
+                && index_method_label(&self.designer, index).is_none())
+        {
             return;
         }
         self.index_edit = None;
@@ -2072,26 +2097,24 @@ impl TableDesignView {
         value: &str,
         cx: &mut Context<'_, Self>,
     ) {
+        let kind = match field {
+            IndexComboField::Kind => self
+                .designer
+                .index_kinds
+                .iter()
+                .find(|kind| kind.label == value)
+                .copied(),
+            IndexComboField::Method => None,
+        };
         if let Some(index) = self.schema.indexes.get_mut(row) {
             match field {
-                IndexComboField::Kind => match value {
-                    "unique" => {
-                        index.unique = true;
-                        index.index_type = "BTREE".to_string();
+                // The kind carries both halves of the model: uniqueness and the type it stores.
+                IndexComboField::Kind => {
+                    if let Some(kind) = kind {
+                        index.unique = kind.unique;
+                        index.index_type = kind.value().to_string();
                     }
-                    "fulltext" => {
-                        index.unique = false;
-                        index.index_type = "FULLTEXT".to_string();
-                    }
-                    "spatial" => {
-                        index.unique = false;
-                        index.index_type = "SPATIAL".to_string();
-                    }
-                    _ => {
-                        index.unique = false;
-                        index.index_type = "BTREE".to_string();
-                    }
-                },
+                }
                 IndexComboField::Method => index.index_type = value.to_string(),
             }
         }
@@ -2173,6 +2196,7 @@ impl TableDesignView {
     fn discard_index_field_inputs(&mut self) {
         self.index_field_picker = None;
         self.index_field_prefix_inputs.clear();
+        self.index_field_query.clear();
     }
 
     /// Rebuild the per-row controls after the draft's rows changed.
@@ -2205,14 +2229,72 @@ impl TableDesignView {
         }
     }
 
-    /// Expand (or collapse) one draft row's field list.
-    pub(super) fn toggle_index_field_picker(&mut self, row: usize, cx: &mut Context<'_, Self>) {
-        self.index_field_picker = if self.index_field_picker == Some(row) {
-            None
-        } else {
-            Some(row)
-        };
+    /// Expand (or collapse) one draft row's field list and put the caret in its search box, so a
+    /// wide table's field is found by typing rather than by scrolling.
+    pub(super) fn toggle_index_field_picker(
+        &mut self,
+        row: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.index_field_picker == Some(row) {
+            self.index_field_picker = None;
+            self.index_field_query.clear();
+            cx.notify();
+            return;
+        }
+        self.index_field_picker = Some(row);
+        self.index_field_query.clear();
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        let filter = weak.clone();
+        let cancel = weak;
+        let input = self
+            .index_field_search
+            .get_or_insert_with(|| {
+                cx.new(move |cx| {
+                    TextInput::new(
+                        theme,
+                        "",
+                        TextInputOptions {
+                            size: Some(Size::XSmall),
+                            text_size: Some(12.0),
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .on_change(Rc::new(move |text, _window, cx| {
+                        let _ = filter.update(cx, |view, cx| {
+                            view.index_field_query = text.to_string();
+                            cx.notify();
+                        });
+                    }))
+                    .on_cancel(Rc::new(move |_window, cx| {
+                        let _ = cancel.update(cx, |view, cx| {
+                            view.index_field_picker = None;
+                            view.index_field_query.clear();
+                            cx.notify();
+                        });
+                    }))
+                })
+            })
+            .clone();
+        input.update(cx, |input, cx| input.set_text("", cx));
+        let focus = input.read(cx).focus_handle();
+        window.focus(&focus, cx);
         cx.notify();
+    }
+
+    /// The columns the open field list offers: every column of the table, in the table's own order,
+    /// narrowed by the search box's text (the same subsequence match the type drop-down uses).
+    pub(super) fn index_field_options(&self) -> Vec<String> {
+        let query = self.index_field_query.trim().to_lowercase();
+        self.schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .filter(|name| query.is_empty() || is_fuzzy_subsequence(&query, &name.to_lowercase()))
+            .collect()
     }
 
     /// Select the draft row the footer's ↑ ↓ − act on.
@@ -2236,6 +2318,7 @@ impl TableDesignView {
             column.name = name.to_string();
         }
         self.index_field_picker = None;
+        self.index_field_query.clear();
         cx.notify();
     }
 

@@ -5,8 +5,8 @@ use rustgrid_core::{
     AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldLabel,
     ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
     DatabaseEditorSpec, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
-    DesignerTab, Driver, DriverCapabilities, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TableDesignerSpec,
+    DesignerIndexKind, DesignerTab, Driver, DriverCapabilities, DriverDescriptor, DriverDialect,
+    DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -66,7 +66,6 @@ impl Driver for SqliteDriver {
                     DesignerTab::Fields,
                     DesignerTab::Indexes,
                     DesignerTab::ForeignKeys,
-                    DesignerTab::Triggers,
                     DesignerTab::Sql,
                 ],
                 column_options: vec![
@@ -87,6 +86,20 @@ impl Driver for SqliteDriver {
                 },
                 // SQLite indexes sort per column; there is no prefix length.
                 index_columns: vec![DesignerIndexColumn::Sort],
+                // `CREATE [UNIQUE] INDEX` is all SQLite has: no type of its own and no comment.
+                index_kinds: vec![
+                    DesignerIndexKind {
+                        label: "NORMAL",
+                        unique: false,
+                        types: None,
+                    },
+                    DesignerIndexKind {
+                        label: "UNIQUE",
+                        unique: true,
+                        types: None,
+                    },
+                ],
+                index_comment: false,
             },
             id: DriverId::new("sqlite"),
             display_name: "SQLite".to_string(),

@@ -7,8 +7,8 @@ use rustgrid_core::{
     AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldChoice,
     ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec,
     ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
-    DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerTab, Driver,
-    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerTab,
+    Driver, DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
     DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
 };
 
@@ -108,7 +108,6 @@ impl Driver for OracleDriver {
                     DesignerTab::Fields,
                     DesignerTab::Indexes,
                     DesignerTab::ForeignKeys,
-                    DesignerTab::Triggers,
                     DesignerTab::Comment,
                     DesignerTab::Sql,
                 ],
@@ -131,6 +130,26 @@ impl Driver for OracleDriver {
                 },
                 // Oracle indexes sort per column; 子部分 is MySQL's.
                 index_columns: vec![DesignerIndexColumn::Sort],
+                // Oracle's own kinds: `CREATE [UNIQUE|BITMAP] INDEX` — the two are exclusive — and
+                // an index carries no comment.
+                index_kinds: vec![
+                    DesignerIndexKind {
+                        label: "NORMAL",
+                        unique: false,
+                        types: Some(&["NORMAL"]),
+                    },
+                    DesignerIndexKind {
+                        label: "UNIQUE",
+                        unique: true,
+                        types: Some(&["NORMAL"]),
+                    },
+                    DesignerIndexKind {
+                        label: "BITMAP",
+                        unique: false,
+                        types: Some(&["BITMAP"]),
+                    },
+                ],
+                index_comment: false,
             },
             id: DriverId::new("oracle"),
             display_name: "Oracle".to_string(),

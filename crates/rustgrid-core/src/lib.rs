@@ -16,8 +16,8 @@ pub use descriptor::{
     AdvancedFields, AutoIncrementRule, ConnectionFieldChoice, ConnectionFieldKind,
     ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
     ConnectionPage, ConnectionStandardField, DesignerColumnOption, DesignerFieldColumn,
-    DesignerIndexColumn, DesignerOptionField, DesignerTab, DriverDescriptor, DriverIconStyle,
-    TableDesignerSpec,
+    DesignerIndexColumn, DesignerIndexKind, DesignerOptionField, DesignerTab, DriverDescriptor,
+    DriverIconStyle, TableDesignerSpec,
 };
 pub use dialect::DriverDialect;
 pub use driver::{

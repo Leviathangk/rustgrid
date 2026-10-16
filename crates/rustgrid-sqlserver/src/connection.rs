@@ -2674,9 +2674,18 @@ fn create_index_statements(table: &str, indexes: &[IndexDef]) -> Vec<String> {
         .iter()
         .filter(|index| !index.primary && !index.columns.is_empty())
         .map(|index| {
+            // SQL Server's own vocabulary: an index is clustered or nonclustered and either kind
+            // may be unique — `CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX`. Anything else in
+            // `index_type` (a columnstore index, say) is left to the engine's default.
+            let kind = match index.index_type.trim().to_ascii_uppercase().as_str() {
+                "CLUSTERED" => "CLUSTERED ",
+                "NONCLUSTERED" => "NONCLUSTERED ",
+                _ => "",
+            };
             format!(
-                "CREATE {}INDEX {} ON {table} ({})",
+                "CREATE {}{}INDEX {} ON {table} ({})",
                 if index.unique { "UNIQUE " } else { "" },
+                kind,
                 quote_identifier(&index.name),
                 index_column_list(&index.columns)
             )
@@ -2972,7 +2981,26 @@ mod tests {
         };
         assert_eq!(
             create_index_statements("dbo.[t]", &[index]),
-            vec!["CREATE UNIQUE INDEX [ix_code] ON dbo.[t] ([code] DESC, [id])".to_string()]
+            vec![
+                "CREATE UNIQUE NONCLUSTERED INDEX [ix_code] ON dbo.[t] ([code] DESC, [id])"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn renders_a_clustered_index_as_the_engine_writes_it() {
+        let index = IndexDef {
+            name: "ix_code".to_string(),
+            columns: vec![IndexColumnDef::new("id")],
+            unique: false,
+            primary: false,
+            index_type: "CLUSTERED".to_string(),
+            comment: String::new(),
+        };
+        assert_eq!(
+            create_index_statements("dbo.[t]", &[index]),
+            vec!["CREATE CLUSTERED INDEX [ix_code] ON dbo.[t] ([id])".to_string()]
         );
     }
 }

@@ -3,9 +3,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rustgrid_core::{
     AutoIncrementRule, Connection, ConnectionConfig, DatabaseEditorSpec, DesignerColumnOption,
-    DesignerFieldColumn, DesignerIndexColumn, DesignerOptionField, Driver, DriverCapabilities,
-    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
-    TableDesignerSpec, TlsMode, UserEditorSpec,
+    DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerOptionField, Driver,
+    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
@@ -111,6 +111,21 @@ impl Driver for PostgresDriver {
                 },
                 // PostgreSQL indexes sort per column; 子部分 is MySQL's.
                 index_columns: vec![DesignerIndexColumn::Sort],
+                // The designer writes `CREATE [UNIQUE] INDEX` only, so a PostgreSQL index has no
+                // type of its own — the two kinds differ by uniqueness alone — and no comment.
+                index_kinds: vec![
+                    DesignerIndexKind {
+                        label: "NORMAL",
+                        unique: false,
+                        types: None,
+                    },
+                    DesignerIndexKind {
+                        label: "UNIQUE",
+                        unique: true,
+                        types: None,
+                    },
+                ],
+                index_comment: false,
             },
             id: DriverId::new("postgresql"),
             display_name: "PostgreSQL".to_string(),
