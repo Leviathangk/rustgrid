@@ -133,29 +133,34 @@ pub struct Theme {
 
 impl Theme {
     /// The light palette, aligned with shadcn/ui's default ("zinc") design tokens.
+    ///
+    /// The chrome is white and the structure comes from borders (`border`) and the grid's cell
+    /// lines (`grid_line`), the way Navicat reads: white panels, visible separators, near-black
+    /// text. Grey *fills* are reserved for the few surfaces that mean "secondary" — grid headers,
+    /// the alternate row and hover states — so the window never washes out into one grey mass.
     pub const fn light() -> Self {
         Self {
             window_bg: 0xffffff,
-            titlebar_bg: 0xfafafa,
-            sidebar_bg: 0xfafafa,
+            titlebar_bg: 0xffffff,
+            sidebar_bg: 0xffffff,
             editor_bg: 0xffffff,
-            toolbar_bg: 0xfafafa,
+            toolbar_bg: 0xffffff,
             header_bg: 0xf4f4f5,
             row_alt_bg: 0xfafafa,
             cell_edit_bg: 0xfef9c3,
             grid_selection_bg: 0x3b82f6,
             grid_selection_text: 0xffffff,
             dialog_bg: 0xffffff,
-            dialog_face: 0xfafafa,
+            dialog_face: 0xffffff,
             input_bg: 0xffffff,
-            border: 0xe4e4e7,
-            grid_line: 0xf1f1f3,
+            border: 0xd4d4d8,
+            grid_line: 0xe4e4e7,
             text: 0x09090b,
-            text_muted: 0x71717a,
-            text_null: 0xa1a1aa,
+            text_muted: 0x52525b,
+            text_null: 0x71717a,
             button_bg: 0xf4f4f5,
             button_hover_bg: 0xe4e4e7,
-            button_border: 0xe4e4e7,
+            button_border: 0xd4d4d8,
             button_default_border: 0xa1a1aa,
             scroll_track: 0xf4f4f5,
             scroll_thumb: 0xa1a1aa,
@@ -207,7 +212,7 @@ impl Theme {
             dialog_face: 0x18181b,
             input_bg: 0x09090b,
             border: 0x27272a,
-            grid_line: 0x1c1c1f,
+            grid_line: 0x27272a,
             text: 0xfafafa,
             text_muted: 0xa1a1aa,
             text_null: 0x52525b,
