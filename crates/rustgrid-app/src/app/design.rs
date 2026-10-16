@@ -15,6 +15,10 @@ pub(super) const DESIGN_HEADER_HEIGHT: f32 = 24.0;
 /// The row-header strip of every designer grid: the row marker's column, as narrow as the marker
 /// needs (the same 16px the table grid's gutter uses, `GRID_GUTTER_WIDTH`).
 pub(super) const DESIGN_GUTTER_WIDTH: f32 = 16.0;
+/// The left inset of a designer grid's cells *and* their header labels. A column's header, its
+/// value and the in-place editor that replaces the value must all start on the same line — keeping
+/// them on one constant is what stops a cell's text from drifting away from its header.
+pub(super) const DESIGN_CELL_INSET: f32 = 8.0;
 pub(super) const FIELD_NAME_WIDTH: f32 = 246.0;
 pub(super) const FIELD_TYPE_WIDTH: f32 = 178.0;
 pub(super) const FIELD_LENGTH_WIDTH: f32 = 90.0;

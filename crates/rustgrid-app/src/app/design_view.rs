@@ -611,7 +611,7 @@ impl TableDesignView {
                     .h(px(DESIGN_HEADER_HEIGHT))
                     .w(px(widths[index]))
                     .flex_none()
-                    .px_2()
+                    .px(px(DESIGN_CELL_INSET))
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .border_r_1()
@@ -918,7 +918,7 @@ impl TableDesignView {
                     .h(px(DESIGN_HEADER_HEIGHT))
                     .w(px(*width))
                     .flex_none()
-                    .px_2()
+                    .px(px(DESIGN_CELL_INSET))
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .border_r_1()
@@ -1050,7 +1050,7 @@ impl TableDesignView {
                                     theme,
                                     false,
                                 )
-                                .px_2()
+                                .px(px(DESIGN_CELL_INSET))
                                 .child(database.clone()),
                             )
                             .child(fk_edit_cell(
@@ -1145,7 +1145,7 @@ impl TableDesignView {
                     .h(px(DESIGN_HEADER_HEIGHT))
                     .w(px(widths[index]))
                     .flex_none()
-                    .px_2()
+                    .px(px(DESIGN_CELL_INSET))
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .border_r_1()
@@ -2672,11 +2672,18 @@ fn design_edit_cell(
             // The selected-cell text color (white) must not leak into the editor, or its text is
             // invisible on the light input background.
             .text_color(rgb(theme.text))
-            .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
+            .pl(px(DESIGN_CELL_INSET))
+            .child(
+                div()
+                    .w(px(width - DESIGN_CELL_INSET))
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .child(editor),
+            )
             .into_any_element();
     }
     let weak = weak.clone();
-    cell.pr(px(4.0))
+    cell.pl(px(DESIGN_CELL_INSET))
+        .pr(px(4.0))
         .cursor_text()
         .on_click(move |_event, window, cx| {
             let _ = weak.update(cx, |view, cx| view.begin_edit(row, column, window, cx));
@@ -2705,11 +2712,18 @@ fn index_edit_cell(
             // The selected-cell text color (white) must not leak into the editor, or its text is
             // invisible on the light input background.
             .text_color(rgb(theme.text))
-            .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
+            .pl(px(DESIGN_CELL_INSET))
+            .child(
+                div()
+                    .w(px(width - DESIGN_CELL_INSET))
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .child(editor),
+            )
             .into_any_element();
     }
     let weak = weak.clone();
-    cell.pr(px(4.0))
+    cell.pl(px(DESIGN_CELL_INSET))
+        .pr(px(4.0))
         .cursor_text()
         .on_click(move |_event, window, cx| {
             let _ = weak.update(cx, |view, cx| {
@@ -2749,6 +2763,7 @@ fn index_choice_cell(
         .when(selected, |style| {
             style.text_color(rgb(theme.grid_selection_text))
         })
+        .pl(px(DESIGN_CELL_INSET))
         .pr(px(4.0))
         .when(enabled, |style| style.cursor_pointer())
         .on_children_prepainted(move |bounds, _window, _cx| {
@@ -2852,6 +2867,7 @@ fn design_type_cell(
         .when(selected, |style| {
             style.text_color(rgb(theme.grid_selection_text))
         })
+        .pl(px(DESIGN_CELL_INSET))
         .pr(px(4.0))
         .cursor_pointer()
         .on_children_prepainted(move |bounds, _window, _cx| {
@@ -2885,7 +2901,7 @@ fn design_check_cell(
     toggle: Option<(WeakEntity<TableDesignView>, usize)>,
 ) -> AnyElement {
     let cell = design_cell(id, width, theme, false)
-        .px_2()
+        .px(px(DESIGN_CELL_INSET))
         .child(checkbox_box(checked, theme));
     let Some((weak, row)) = toggle else {
         return cell.into_any_element();
@@ -2905,7 +2921,7 @@ fn design_key_cell(
     toggle: Option<(WeakEntity<TableDesignView>, usize)>,
 ) -> AnyElement {
     let cell = design_cell(id, width, theme, false)
-        .px_2()
+        .px(px(DESIGN_CELL_INSET))
         .child(checkbox_box(primary_key, theme));
     let Some((weak, row)) = toggle else {
         return cell.into_any_element();
@@ -2964,7 +2980,7 @@ fn design_field_column_cell(
             Some((weak.clone(), row)),
         ),
         _ => design_cell(id, width, theme, false)
-            .px_2()
+            .px(px(DESIGN_CELL_INSET))
             .child(field_column_display(kind, column))
             .into_any_element(),
     }
@@ -2997,7 +3013,7 @@ fn design_grid_header(theme: Theme, labels: &[&'static str], widths: &[f32]) -> 
                 .h(px(DESIGN_HEADER_HEIGHT))
                 .w(px(widths.get(index).copied().unwrap_or(120.0)))
                 .flex_none()
-                .px_2()
+                .px(px(DESIGN_CELL_INSET))
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .border_r_1()
@@ -3050,6 +3066,7 @@ fn design_picker_cell(
         .border_r_1()
         .border_b_1()
         .border_color(rgb(theme.grid_line))
+        .pl(px(DESIGN_CELL_INSET))
         .pr(px(4.0))
         .when(enabled, |style| style.cursor_pointer())
         .on_children_prepainted(move |bounds, _window, _cx| {
@@ -3111,11 +3128,18 @@ fn unique_key_edit_cell(
             // The selected-cell text color (white) must not leak into the editor, or its text is
             // invisible on the light input background.
             .text_color(rgb(theme.text))
-            .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
+            .pl(px(DESIGN_CELL_INSET))
+            .child(
+                div()
+                    .w(px(width - DESIGN_CELL_INSET))
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .child(editor),
+            )
             .into_any_element();
     }
     let weak = weak.clone();
-    cell.pr(px(4.0))
+    cell.pl(px(DESIGN_CELL_INSET))
+        .pr(px(4.0))
         .cursor_text()
         .on_click(move |_event, window, cx| {
             let _ = weak.update(cx, |view, cx| {
@@ -3147,11 +3171,18 @@ fn check_edit_cell(
             // The selected-cell text color (white) must not leak into the editor, or its text is
             // invisible on the light input background.
             .text_color(rgb(theme.text))
-            .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
+            .pl(px(DESIGN_CELL_INSET))
+            .child(
+                div()
+                    .w(px(width - DESIGN_CELL_INSET))
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .child(editor),
+            )
             .into_any_element();
     }
     let weak = weak.clone();
-    cell.pr(px(4.0))
+    cell.pl(px(DESIGN_CELL_INSET))
+        .pr(px(4.0))
         .cursor_text()
         .on_click(move |_event, window, cx| {
             let _ = weak.update(cx, |view, cx| {
@@ -3253,11 +3284,18 @@ fn fk_edit_cell(
             // The selected-cell text color (white) must not leak into the editor, or its text is
             // invisible on the light input background.
             .text_color(rgb(theme.text))
-            .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
+            .pl(px(DESIGN_CELL_INSET))
+            .child(
+                div()
+                    .w(px(width - DESIGN_CELL_INSET))
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .child(editor),
+            )
             .into_any_element();
     }
     let weak = weak.clone();
-    cell.pr(px(4.0))
+    cell.pl(px(DESIGN_CELL_INSET))
+        .pr(px(4.0))
         .cursor_text()
         .on_click(move |_event, window, cx| {
             let _ = weak.update(cx, |view, cx| view.begin_fk_edit(row, column, window, cx));
@@ -3294,6 +3332,7 @@ fn fk_choice_cell(
         .when(selected, |style| {
             style.text_color(rgb(theme.grid_selection_text))
         })
+        .pl(px(DESIGN_CELL_INSET))
         .pr(px(4.0))
         .cursor_pointer()
         .on_children_prepainted(move |bounds, _window, _cx| {
