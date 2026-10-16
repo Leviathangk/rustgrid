@@ -57,12 +57,83 @@ pub(super) const FK_UPDATE_WIDTH: f32 = 120.0;
 // shows comes from its [`TableDesignerSpec`], so nothing here matches on an engine id.
 
 /// The editable text columns of the field grid.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum FieldColumn {
     Name,
     Length,
     Decimals,
     Comment,
+}
+
+/// A cell of the field grid the caret can rest in, in the order Tab walks them: 列名, 类型, then the
+/// engine's own text cells. The toggles (不是 null / 主键 / 虚拟 / 稀疏) are click-only, so the chain
+/// skips them rather than stranding the caret on something that cannot take it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum FieldCell {
+    Name,
+    Type,
+    Text(FieldColumn),
+}
+
+/// The height of one row of the type drop-down, so its highlight can be scrolled into view.
+pub(super) const TYPE_OPTION_HEIGHT: f32 = 20.0;
+
+/// The chain entry a text cell occupies: 列名 is its own entry, the engine's other text cells wrap
+/// their [`FieldColumn`].
+pub(super) fn field_cell_of(column: FieldColumn) -> FieldCell {
+    match column {
+        FieldColumn::Name => FieldCell::Name,
+        other => FieldCell::Text(other),
+    }
+}
+
+/// The cell Tab (or Shift+Tab) moves to from `cell` of `row` in a grid of `rows` rows: the next cell
+/// of `chain`, wrapped onto the neighbouring row at either end. `None` means the keystroke leaves the
+/// grid (the window's own focus chain takes over).
+pub(super) fn field_cell_neighbor(
+    chain: &[FieldCell],
+    row: usize,
+    rows: usize,
+    cell: FieldCell,
+    shift: bool,
+) -> Option<(usize, FieldCell)> {
+    let position = chain.iter().position(|entry| *entry == cell)?;
+    if rows == 0 || row >= rows || chain.is_empty() {
+        return None;
+    }
+    if shift {
+        match position.checked_sub(1) {
+            Some(previous) => Some((row, chain[previous])),
+            None if row > 0 => Some((row - 1, chain[chain.len() - 1])),
+            None => None,
+        }
+    } else {
+        match chain.get(position + 1) {
+            Some(next) => Some((row, *next)),
+            None if row + 1 < rows => Some((row + 1, chain[0])),
+            None => None,
+        }
+    }
+}
+
+/// The type list's next highlight row: one step down (`down`) or up, wrapping at both ends. `None`
+/// when the list is empty; `current` is clamped so a search that narrowed the list cannot strand it.
+pub(super) fn next_type_highlight(
+    count: usize,
+    current: Option<usize>,
+    down: bool,
+) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let current = current.unwrap_or(0).min(count - 1);
+    Some(if down {
+        if current + 1 >= count { 0 } else { current + 1 }
+    } else if current == 0 {
+        count - 1
+    } else {
+        current - 1
+    })
 }
 
 /// The width of one engine-declared field-list column. The variants that describe the same cell
@@ -449,6 +520,11 @@ pub(super) struct TableDesignView {
     /// The search field shown at the top of the type drop-down; its text filters the list.
     pub(super) type_search: Option<Entity<TextInput>>,
     pub(super) type_query: String,
+    /// Which row of the filtered type list the keyboard highlight sits on (Up/Down, Enter picks it).
+    /// Reset when the drop-down opens or its search text changes.
+    pub(super) type_highlight: Option<usize>,
+    /// The type list's own scroll offset, so the highlight can be kept in view.
+    pub(super) type_scroll: ScrollHandle,
     /// Each row's type-cell bottom-left in window coordinates, keyed by field index. A shared
     /// single anchor cannot work here because every visible row prepaints and would overwrite it.
     pub(super) combo_anchor: Rc<RefCell<BTreeMap<usize, Point<Pixels>>>>,
@@ -472,6 +548,14 @@ pub(super) struct TableDesignView {
     pub(super) hscroll_grab: Option<f32>,
     pub(super) list_scroll: UniformListScrollHandle,
     pub(super) vscroll_grab: Option<f32>,
+    /// The designer's own focus handle: it carries the `TableDesigner` key context (Ctrl+S), so
+    /// something inside the designer must hold focus for those keys to fire.
+    pub(super) focus: FocusHandle,
+    /// Set when the designer is opened or brought to the front; the next render focuses `focus`.
+    pub(super) focus_pending: bool,
+    /// The 预览 tab's read-only, syntax-highlighted editor. Kept across renders so its scroll
+    /// position and selection survive.
+    pub(super) preview_editor: Option<Entity<ui::SqlEditor>>,
     pub(super) self_weak: WeakEntity<TableDesignView>,
 }
 
@@ -610,6 +694,8 @@ impl TableDesignView {
             type_combo: None,
             type_search: None,
             type_query: String::new(),
+            type_highlight: None,
+            type_scroll: ScrollHandle::new(),
             combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             root_anchor: Rc::new(RefCell::new(Point::default())),
             default_input,
@@ -626,6 +712,10 @@ impl TableDesignView {
             hscroll_grab: None,
             list_scroll: UniformListScrollHandle::new(),
             vscroll_grab: None,
+            focus: cx.focus_handle(),
+            // The designer opens as the active tab, so it takes focus on its first render.
+            focus_pending: true,
+            preview_editor: None,
             self_weak: cx.weak_entity(),
         }
     }
@@ -941,6 +1031,13 @@ impl TableDesignView {
         self.fk_ref_open = false;
     }
 
+    /// Take focus on the next render: called when the designer opens or becomes the active tab, so
+    /// its key context (Ctrl+S) is in the focused element's path straight away.
+    pub(super) fn request_focus(&mut self, cx: &mut Context<'_, Self>) {
+        self.focus_pending = true;
+        cx.notify();
+    }
+
     pub(super) fn select_tab(&mut self, tab: DesignerTab, cx: &mut Context<'_, Self>) {
         self.tab = tab;
         self.clear_editors();
@@ -1012,6 +1109,20 @@ impl TableDesignView {
         }
         self.type_combo = Some(row);
         self.type_query.clear();
+        // Start the highlight on the type the column already has, so Up/Down walk the list from
+        // where the user is rather than from the top.
+        let current = self
+            .schema
+            .columns
+            .get(row)
+            .map(|column| column.data_type.clone())
+            .unwrap_or_default();
+        self.type_highlight = self
+            .filtered_types()
+            .iter()
+            .position(|data_type| *data_type == current)
+            .or(Some(0));
+        self.type_scroll.set_offset(Point::default());
         let theme = self.theme;
         let weak = self.self_weak.clone();
         let input = self
@@ -1019,7 +1130,8 @@ impl TableDesignView {
             .get_or_insert_with(|| {
                 let change = weak.clone();
                 let submit = weak.clone();
-                let cancel = weak;
+                let cancel = weak.clone();
+                let arrows = weak;
                 cx.new(move |cx| {
                     TextInput::new(
                         theme,
@@ -1034,17 +1146,25 @@ impl TableDesignView {
                     .on_change(Rc::new(move |text, _window, cx| {
                         let _ = change.update(cx, |view, cx| {
                             view.type_query = text.to_string();
+                            // The filtered list changed under the highlight: start from its top.
+                            view.type_highlight = Some(0);
+                            view.type_scroll.set_offset(Point::default());
                             cx.notify();
                         });
                     }))
                     .on_submit(Rc::new(move |_window, cx| {
-                        let _ = submit.update(cx, |view, cx| view.select_first_type(cx));
+                        let _ = submit.update(cx, |view, cx| view.select_highlighted_type(cx));
                     }))
                     .on_cancel(Rc::new(move |_window, cx| {
                         let _ = cancel.update(cx, |view, cx| {
                             view.type_combo = None;
                             cx.notify();
                         });
+                    }))
+                    // Up/Down move the list's highlight. Tab is claimed by the designer's own key
+                    // binding (see `tab_designer_cell`), so it needs no callback here.
+                    .on_arrow(Rc::new(move |down, _window, cx| {
+                        let _ = arrows.update(cx, |view, cx| view.move_type_highlight(down, cx));
                     }))
                 })
             })
@@ -1053,6 +1173,42 @@ impl TableDesignView {
         let focus = input.read(cx).focus_handle();
         window.focus(&focus, cx);
         cx.notify();
+    }
+
+    /// Tab / Shift+Tab inside the designer, from its `NextDesignerCell` / `PrevDesignerCell` bindings.
+    ///
+    /// A `tab` keystroke is claimed by a key binding — the `Root` context binds it to `focus_next`,
+    /// and gpui dispatches a keystroke a binding matches as an action instead of running an element's
+    /// own `on_key_down` — so the fields grid takes it here: the caret walks the row's cells
+    /// (列名 → 类型 → the engine's text cells) and rolls onto the neighbouring row, instead of dropping
+    /// straight to the detail panel below the grid. Anywhere else in the designer — the detail panel's
+    /// own fields, the other tabs — the keystroke is left to the window's focus chain.
+    pub(super) fn tab_designer_cell(
+        &mut self,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((row, cell)) = self.editing_field_cell() else {
+            if shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            return;
+        };
+        self.tab_field_cell(row, cell, shift, window, cx);
+    }
+
+    /// The fields-grid cell the caret is in, if any: the open type drop-down counts as 类型, and the
+    /// in-place text editor reports its own row and column.
+    fn editing_field_cell(&self) -> Option<(usize, FieldCell)> {
+        if let Some(row) = self.type_combo {
+            return Some((row, FieldCell::Type));
+        }
+        self.edit
+            .as_ref()
+            .map(|edit| (edit.row, field_cell_of(edit.column)))
     }
 
     /// The type names that match the current search text, best matches first.
@@ -1075,11 +1231,119 @@ impl TableDesignView {
         substring
     }
 
-    fn select_first_type(&mut self, cx: &mut Context<'_, Self>) {
+    /// The cells Tab walks through, in the order the fields grid shows them: 列名, 类型, then the
+    /// engine's own text cells (长度/小数位/备注 for MySQL, 大小/比例/排序规则 for SQL Server).
+    pub(super) fn field_cell_chain(&self) -> Vec<FieldCell> {
+        let mut chain = vec![FieldCell::Name, FieldCell::Type];
+        for kind in &self.designer.field_columns {
+            // Two engines' columns can name the same cell (`size`/`length`), so the chain keeps one.
+            if let Some(column) = field_column_text(*kind) {
+                let cell = FieldCell::Text(column);
+                if !chain.contains(&cell) {
+                    chain.push(cell);
+                }
+            }
+        }
+        chain
+    }
+
+    /// Tab (or Shift+Tab) from one cell of the fields grid: hand the caret to the neighbouring cell
+    /// of that row, wrap to the previous/next row at either end, and let the window's own focus
+    /// chain take over beyond the grid's first and last cell.
+    pub(super) fn tab_field_cell(
+        &mut self,
+        row: usize,
+        cell: FieldCell,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let rows = self.schema.columns.len();
+        let chain = self.field_cell_chain();
+        if !chain.contains(&cell) {
+            return;
+        }
+        match field_cell_neighbor(&chain, row, rows, cell, shift) {
+            Some((row, cell)) => self.open_field_cell(row, cell, window, cx),
+            // Beyond the grid's first (Shift+Tab) or last (Tab) cell the window's own focus chain
+            // takes over — the detail panel below the grid is where the caret goes next.
+            None if shift => window.focus_prev(cx),
+            None => window.focus_next(cx),
+        }
+    }
+
+    /// Put the caret in one cell of the fields grid, opening whichever editor that cell uses.
+    fn open_field_cell(
+        &mut self,
+        row: usize,
+        cell: FieldCell,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Moving on ends the editor we came from: its text already reached the working copy through
+        // `on_change`, and the drop-down we came from must not stay open over the next cell.
+        self.edit = None;
+        self.edit_blur = None;
+        self.type_combo = None;
+        self.select_field(row, cx);
+        match cell {
+            FieldCell::Name => self.begin_edit(row, FieldColumn::Name, window, cx),
+            FieldCell::Type => self.open_type_combo(row, window, cx),
+            FieldCell::Text(column) => self.begin_edit(row, column, window, cx),
+        }
+    }
+
+    /// Move the type drop-down's highlight by one row (Up/Down), wrapping at both ends.
+    pub(super) fn move_type_highlight(&mut self, down: bool, cx: &mut Context<'_, Self>) {
+        let count = self.filtered_types().len();
+        self.type_highlight = next_type_highlight(count, self.type_highlight, down);
+        self.keep_type_highlight_visible();
+        cx.notify();
+    }
+
+    /// Scroll the type list so the highlighted row is inside the visible part of the drop-down.
+    pub(super) fn keep_type_highlight_visible(&self) {
+        let Some(index) = self.type_highlight else {
+            return;
+        };
+        let viewport = f32::from(self.type_scroll.bounds().size.height);
+        if viewport <= 0.0 {
+            return;
+        }
+        let max = f32::from(self.type_scroll.max_offset().y);
+        let top = index as f32 * TYPE_OPTION_HEIGHT;
+        let current = -f32::from(self.type_scroll.offset().y);
+        let next = if top < current {
+            top
+        } else if top + TYPE_OPTION_HEIGHT > current + viewport {
+            top + TYPE_OPTION_HEIGHT - viewport
+        } else {
+            current
+        };
+        let next = next.clamp(0.0, max);
+        if (next - current).abs() >= 0.5 {
+            self.type_scroll.set_offset(Point::new(px(0.0), px(-next)));
+        }
+    }
+
+    /// The type the drop-down's highlight is on: the row the user moved to, or the first match when
+    /// the search text just narrowed the list and nothing has been moved yet.
+    fn highlighted_type(&self) -> Option<&'static str> {
+        let types = self.filtered_types();
+        let index = self
+            .type_highlight
+            .unwrap_or(0)
+            .min(types.len().checked_sub(1)?);
+        types.get(index).copied()
+    }
+
+    /// Enter in the type search: take the highlighted type (or the best match when the search just
+    /// narrowed the list).
+    fn select_highlighted_type(&mut self, cx: &mut Context<'_, Self>) {
         let Some(row) = self.type_combo else {
             return;
         };
-        if let Some(data_type) = self.filtered_types().first().copied() {
+        if let Some(data_type) = self.highlighted_type() {
             self.select_type(row, data_type, cx);
         }
     }
@@ -2760,6 +3024,11 @@ impl AppView {
         self.active_design = index;
         self.active_query = None;
         self.active_grid = None;
+        // The designer's key context only applies while it (or a cell editor inside it) holds focus,
+        // so bringing it to the front takes focus for it.
+        if let Some(design) = index.and_then(|index| self.designs.get(index)).cloned() {
+            design.update(cx, |design, cx| design.request_focus(cx));
+        }
         cx.notify();
     }
 
@@ -2832,5 +3101,95 @@ impl AppView {
         for grid in targets {
             grid.update(cx, |grid, cx| grid.load_page(cx));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The MySQL field grid's chain: 列名 → 类型 → 长度 → 小数位 → 备注.
+    fn chain() -> Vec<FieldCell> {
+        vec![
+            FieldCell::Name,
+            FieldCell::Type,
+            FieldCell::Text(FieldColumn::Length),
+            FieldCell::Text(FieldColumn::Decimals),
+            FieldCell::Text(FieldColumn::Comment),
+        ]
+    }
+
+    #[test]
+    fn tab_walks_the_row_then_wraps_to_the_next_row() {
+        let chain = chain();
+        // 列名 → 类型: the detail panel must not take the caret before the row's own cells have.
+        assert_eq!(
+            field_cell_neighbor(&chain, 0, 3, FieldCell::Name, false),
+            Some((0, FieldCell::Type))
+        );
+        assert_eq!(
+            field_cell_neighbor(&chain, 0, 3, FieldCell::Text(FieldColumn::Length), false),
+            Some((0, FieldCell::Text(FieldColumn::Decimals)))
+        );
+        // The row's last cell rolls onto the next row's 列名 …
+        assert_eq!(
+            field_cell_neighbor(&chain, 0, 3, FieldCell::Text(FieldColumn::Comment), false),
+            Some((1, FieldCell::Name))
+        );
+        // … and the grid's very last cell hands the keystroke back to the window.
+        assert_eq!(
+            field_cell_neighbor(&chain, 2, 3, FieldCell::Text(FieldColumn::Comment), false),
+            None
+        );
+    }
+
+    #[test]
+    fn shift_tab_walks_backwards_and_stops_at_the_first_cell() {
+        let chain = chain();
+        assert_eq!(
+            field_cell_neighbor(&chain, 1, 3, FieldCell::Name, true),
+            Some((0, FieldCell::Text(FieldColumn::Comment)))
+        );
+        assert_eq!(
+            field_cell_neighbor(&chain, 0, 3, FieldCell::Text(FieldColumn::Comment), true),
+            Some((0, FieldCell::Text(FieldColumn::Decimals)))
+        );
+        assert_eq!(
+            field_cell_neighbor(&chain, 0, 3, FieldCell::Name, true),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_ignores_a_cell_that_is_not_in_the_chain() {
+        let chain = chain();
+        // A single-row grid has nothing to wrap onto.
+        assert_eq!(
+            field_cell_neighbor(&chain, 0, 1, FieldCell::Text(FieldColumn::Comment), false),
+            None
+        );
+        // A cell the engine does not show (its field list has no 备注 column) is not a Tab stop.
+        assert_eq!(
+            field_cell_neighbor(
+                &[FieldCell::Name, FieldCell::Type],
+                0,
+                2,
+                FieldCell::Text(FieldColumn::Comment),
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_type_highlight_wraps_and_clamps_to_a_narrowed_list() {
+        assert_eq!(next_type_highlight(0, Some(0), true), None);
+        assert_eq!(next_type_highlight(3, Some(2), true), Some(0));
+        assert_eq!(next_type_highlight(3, Some(0), false), Some(2));
+        assert_eq!(next_type_highlight(3, Some(1), true), Some(2));
+        // The list shrank under the highlight (the user typed): the index is clamped to the list, so
+        // Down wraps to its top and Up steps to the row before its last.
+        assert_eq!(next_type_highlight(2, Some(7), true), Some(0));
+        assert_eq!(next_type_highlight(2, Some(7), false), Some(0));
     }
 }

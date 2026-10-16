@@ -294,6 +294,19 @@ touching UI code.
   edit stays on the draft until 确定 and 取消 / a click outside discards it. The 主键 row opens the
   same editor and its draft edits the columns' 主键 flags (the model keeps the key on the columns, so
   that draft carries no options). The 外键 / 唯一键 cells keep the check-box list.
+  The designer owns a key context of its own (`TableDesigner`, on the root div, which
+  `request_focus` focuses when the tab opens or is brought to the front — a key binding only fires
+  while its context is in the focused element's path): 保存 from `ctrl-s` / `cmd-s` (`SaveDesign`),
+  and `tab` / `shift-tab` (`NextDesignerCell` / `PrevDesignerCell` → `tab_designer_cell`) walking the
+  fields grid's cells — 列名 → 类型 → the engine's text cells (`field_cell_chain`), rolling onto the
+  neighbouring row at the row's end (`field_cell_neighbor`) and handing the keystroke back to the
+  window's focus chain (the detail panel below the grid) only past the grid's first/last cell. The
+  engine's toggles (不是 null / 主键 / 虚拟 / 稀疏) are not Tab stops — they have no editor to focus.
+  Tab must be claimed by a key binding rather than an element's `on_key_down` (`ui::TextInput::on_tab`
+  never fires for it: gpui dispatches a keystroke a binding matches as an action, and `Root` binds
+  `tab`). The 类型 drop-down is driven from the keyboard: `type_highlight` marks a row, Up/Down
+  (`ui::TextInput::on_arrow`) move it and `keep_type_highlight_visible` scrolls it in, Enter takes
+  the highlighted type and a search that narrows the list restarts the highlight at its top.
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
   `crates/rustgrid-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.
@@ -725,17 +738,23 @@ make more engines cheap later — do not build those features early.
   — never from the filler's own height, which would feed back and grow. The filler carries no
   hitboxes, so nothing in it is selectable; a click just focuses the grid.
 
-- **Read-only text the user must copy is selectable.** The query result panel's 信息 error
-  (`query_editor.rs::render_query_info`) renders through `gpui_kit::base::SelectableText`, so a
-  mouse drag selects and Ctrl+C copies; the main window is opened with `gpui_kit::open_window`,
-  whose `gpui_base::Root` renders the one `TextSelectionLayer` selection needs — a plain `div`
-  opened with `cx.open_window` does not, so wrap such a window in `gpui_kit::component::Root` (as
-  the wizards do) before relying on it. The grid status bar's SQL line
-  (`grid_toolbar.rs::render_status_sql`) instead owns its selection, because it must treat
-  **double-click as select-all** (base multi-click would pick a word): it keeps the laid-out
-  `StyledText`, paints the selected range with a `HighlightStyle`, and exposes copy / select-all
-  through its own `"GridStatus"` key context (`CopyStatusSql` / `SelectAllStatusSql`) — the `Root`
-  context's `ctrl-c`/`ctrl-a` would otherwise swallow the keystroke before it reached the line.
+- **Read-only text the user must copy is selectable, but `SelectableText` alone does not copy.**
+  `gpui_kit::base::SelectableText` participates in the window's selection — a mouse drag selects —
+  but Ctrl+C only reaches it while something inside the run holds focus, because `gpui_base::Root`
+  dispatches its `Copy` action along the focused element's path. Nothing focuses a plain text run, so
+  a drag over one selects and Ctrl+C does nothing (verified in
+  `ui/sql_editor.rs::tests::readonly_preview_selects_and_copies`). Text the user must actually be able
+  to copy therefore renders through a **read-only `ui::SqlEditor`** (the SQL 预览 panes: the table
+  designer's 预览 tab, the user window's, the 对象权限管理器's, and the routine/view designers') — the
+  kit's editor handles Copy itself, and gives SQL syntax highlighting and scrolling with it. The main
+  window is opened with `gpui_kit::open_window`, whose `gpui_base::Root` renders the one
+  `TextSelectionLayer` selection needs — a plain `div` opened with `cx.open_window` does not, so wrap
+  such a window in `gpui_kit::component::Root` (as the wizards do) before relying on it. The grid
+  status bar's SQL line (`grid_toolbar.rs::render_status_sql`) instead owns its selection, because it
+  must treat **double-click as select-all** (base multi-click would pick a word): it keeps the
+  laid-out `StyledText`, paints the selected range with a `HighlightStyle`, and exposes copy /
+  select-all through its own `"GridStatus"` key context (`CopyStatusSql` / `SelectAllStatusSql`) — the
+  `Root` context's `ctrl-c`/`ctrl-a` would otherwise swallow the keystroke before it reached the line.
 
 - **The filter builder's value fields are ordinary `ui::TextInput`s** (caret, mouse selection,
   clipboard and IME from gpui-kit), one entity per `(node path, slot)` in

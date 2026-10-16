@@ -12,7 +12,6 @@ use super::user_create::{
     PrivilegeTooltip, catalog_label, preset_privileges, privilege_label, privilege_summary, section,
 };
 use super::*;
-use gpui_kit::base::SelectableText;
 
 /// Height of one account row in the account list.
 const PM_ROW_HEIGHT: f32 = 22.0;
@@ -84,7 +83,8 @@ pub(super) struct PrivilegeManager {
     saving: bool,
     dirty: bool,
     error: Option<String>,
-    sql_scroll: ScrollHandle,
+    /// The 预览 tab's read-only, syntax-highlighted editor (kept across renders).
+    preview_editor: Option<Entity<ui::SqlEditor>>,
     /// Whether the change-preview popup is open (Save shows it before writing anything).
     confirm_open: bool,
     /// Whether the "discard unsaved changes?" prompt is open.
@@ -121,7 +121,7 @@ impl PrivilegeManager {
             saving: false,
             dirty: false,
             error: None,
-            sql_scroll: ScrollHandle::new(),
+            preview_editor: None,
             confirm_open: false,
             discard_open: false,
         }
@@ -946,7 +946,7 @@ impl PrivilegeManager {
         bar
     }
 
-    fn render_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_body(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         match self.tab {
             PmTab::General => div()
                 .flex()
@@ -959,30 +959,44 @@ impl PrivilegeManager {
                 .into_any_element(),
             PmTab::Sql => {
                 let sql = self.preview_sql();
-                let text = if sql.trim().is_empty() {
-                    t!("design.no_changes").to_string()
-                } else {
-                    sql
-                };
+                if sql.trim().is_empty() {
+                    return div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .p_2()
+                        .text_size(px(12.0))
+                        .text_color(rgb(self.theme.text_muted))
+                        .child(t!("design.no_changes").to_string())
+                        .into_any_element();
+                }
+                // Highlighted and read-only: the SQL editor gives the script its syntax colours and
+                // handles mouse selection, Ctrl+A / Ctrl+C and scrolling itself (a plain text run
+                // cannot be copied — the window's Ctrl+C never reaches it).
+                let editor = self
+                    .preview_editor
+                    .get_or_insert_with(|| {
+                        cx.new(|cx| {
+                            ui::SqlEditor::new(cx).options(ui::SqlEditorOptions {
+                                language: "sql".into(),
+                                font_family: "Consolas".into(),
+                                font_size: 12.5,
+                                line_number: false,
+                                readonly: true,
+                            })
+                        })
+                    })
+                    .clone();
+                editor.update(cx, |editor, cx| editor.set_text(sql, cx));
                 div()
                     .id("op-sql-scroll")
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.sql_scroll)
-                    .p_2()
-                    .cursor_text()
-                    .child(
-                        div()
-                            .font_family("Consolas")
-                            .text_size(px(12.5))
-                            .text_color(rgb(self.theme.text))
-                            // The script is read-only text the user must copy, so it is selectable
-                            // (mouse drag + Ctrl+C) rather than a plain label.
-                            .child(SelectableText::new("op-sql-text", text)),
-                    )
+                    .overflow_hidden()
+                    .child(editor)
                     .into_any_element()
             }
         }

@@ -2,7 +2,6 @@ use super::design::*;
 use super::*;
 
 use gpui::HitboxBehavior;
-use gpui_kit::base::SelectableText;
 use rustgrid_core::{
     ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerOptionField,
     DesignerTab,
@@ -24,23 +23,36 @@ impl TableDesignView {
 }
 
 impl Render for TableDesignView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if let Some(app) = self.app.upgrade() {
             self.theme = app.read(cx).theme;
         }
-        self.render_design(cx)
+        self.render_design(window, cx)
     }
 }
 
 impl TableDesignView {
-    fn render_design(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_design(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
+        if self.focus_pending {
+            self.focus_pending = false;
+            window.focus(&self.focus, cx);
+        }
         let mut root = div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
             .overflow_hidden()
+            .track_focus(&self.focus)
+            .key_context(DESIGNER_CONTEXT)
+            .on_action(cx.listener(|this, _: &SaveDesign, _window, cx| this.save(cx)))
+            .on_action(cx.listener(|this, _: &NextDesignerCell, window, cx| {
+                this.tab_designer_cell(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PrevDesignerCell, window, cx| {
+                this.tab_designer_cell(true, window, cx)
+            }))
             .bg(rgb(theme.editor_bg))
             .text_size(px(12.0))
             .text_color(rgb(theme.text))
@@ -332,7 +344,7 @@ impl TableDesignView {
         bar
     }
 
-    fn render_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_body(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let content: AnyElement = if self.loading && self.original.is_none() {
             div()
                 .p_3()
@@ -349,7 +361,7 @@ impl TableDesignView {
                 DesignerTab::Triggers => self.render_triggers(),
                 DesignerTab::Options => self.render_options(cx),
                 DesignerTab::Comment => self.render_comment(),
-                DesignerTab::Sql => self.render_sql(),
+                DesignerTab::Sql => self.render_sql(cx),
             }
         };
 
@@ -360,6 +372,51 @@ impl TableDesignView {
             .min_h(px(0.0))
             .overflow_hidden()
             .child(content)
+            .into_any_element()
+    }
+
+    /// The 预览 tab: the statement Save would run, in a read-only gpui-kit SQL editor.
+    ///
+    /// The editor is what makes the script usable: SQL syntax colours, a caret so a mouse drag
+    /// selects, Ctrl+A / Ctrl+C, and its own scrolling. A plain text run (gpui-base's
+    /// `SelectableText`, what the query editor's 信息 error uses) can be dragged over but the
+    /// window's Ctrl+C never reaches it, because nothing inside it holds focus.
+    fn render_sql(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let sql = self.preview_sql();
+        if sql.trim().is_empty() {
+            return div()
+                .p_3()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("design.no_changes").to_string())
+                .into_any_element();
+        }
+        let editor = self
+            .preview_editor
+            .get_or_insert_with(|| {
+                cx.new(|cx| {
+                    ui::SqlEditor::new(cx).options(ui::SqlEditorOptions {
+                        language: "sql".into(),
+                        font_family: "Consolas".into(),
+                        font_size: 12.0,
+                        line_number: false,
+                        readonly: true,
+                    })
+                })
+            })
+            .clone();
+        editor.update(cx, |editor, cx| editor.set_text(sql, cx));
+
+        div()
+            .id("design-sql")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_hidden()
+            .bg(rgb(theme.editor_bg))
+            .child(editor)
             .into_any_element()
     }
 
@@ -1496,42 +1553,6 @@ impl TableDesignView {
             .into_any_element()
     }
 
-    fn render_sql(&self) -> AnyElement {
-        let theme = self.theme;
-        let sql = self.preview_sql();
-        let unchanged = sql.trim().is_empty();
-        let text = if unchanged {
-            t!("design.no_changes").to_string()
-        } else {
-            sql
-        };
-        let color = if unchanged {
-            theme.text_muted
-        } else {
-            theme.text
-        };
-        div()
-            .id("design-sql")
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .bg(rgb(theme.editor_bg))
-            .p_3()
-            .font_family("Consolas")
-            .text_size(px(12.0))
-            .text_color(rgb(color))
-            // The script is read-only text the user must copy, so it renders through
-            // `SelectableText` (mouse-drag selects, Ctrl+C copies) under a text cursor, exactly as
-            // the query editor's 信息 error does.
-            .cursor_text()
-            .child(
-                div()
-                    .whitespace_nowrap()
-                    .child(SelectableText::new("design-sql-text", text)),
-            )
-            .into_any_element()
-    }
-
     fn render_type_combo(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let Some(row) = self.type_combo else {
@@ -1557,10 +1578,12 @@ impl TableDesignView {
             .id("design-type-options")
             .max_h(px(300.0))
             .overflow_y_scroll()
+            .track_scroll(&self.type_scroll)
             .flex()
             .flex_col();
-        for data_type in self.filtered_types() {
+        for (index, data_type) in self.filtered_types().into_iter().enumerate() {
             let selected = data_type == current;
+            let highlighted = self.type_highlight == Some(index);
             let weak = weak.clone();
             options = options.child(
                 div()
@@ -1572,7 +1595,7 @@ impl TableDesignView {
                     .items_center()
                     .justify_between()
                     .gap_1()
-                    .h(px(20.0))
+                    .h(px(TYPE_OPTION_HEIGHT))
                     .px_2()
                     .flex_none()
                     .text_size(px(12.0))
@@ -1581,6 +1604,13 @@ impl TableDesignView {
                         style
                             .bg(rgb(theme.tree_selected_bg))
                             .text_color(rgb(theme.tree_selected_text))
+                    })
+                    // The keyboard highlight (Up/Down) reads like a hover, and outranks the
+                    // selected row's tint so the row the caret is on is the one that stands out.
+                    .when(highlighted, move |style| {
+                        style
+                            .bg(rgb(theme.tree_hover_bg))
+                            .text_color(rgb(theme.text))
                     })
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                     .on_click(move |_event, _window, cx| {

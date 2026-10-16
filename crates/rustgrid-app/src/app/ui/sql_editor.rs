@@ -391,7 +391,10 @@ mod tests {
         assert_eq!(word_bounds(text, 6), Some((0, 6)));
     }
 
-    use gpui::{Bounds, Point, TestAppContext, WindowBounds, WindowOptions, size};
+    use gpui::{
+        Bounds, Modifiers, MouseButton, Point, TestAppContext, VisualTestContext, WindowBounds,
+        WindowOptions, point, size,
+    };
     use gpui_kit::test::TestWindowExt as _;
 
     /// The query page's shape: a fixed toolbar strip, the editor filling the rest, and — once a
@@ -434,6 +437,93 @@ mod tests {
             ))
         })
         .unwrap()
+    }
+
+    /// The app's read-only SQL 预览 panes (the table designer's, the user window's, the privilege
+    /// manager's) are this editor: a mouse drag must select the script and Ctrl+C must copy it. A
+    /// plain text run (`SelectableText`) selects but never copies, because the window's Ctrl+C is
+    /// dispatched along the focused element's path and nothing inside the run holds focus.
+    struct PreviewHarness {
+        editor: Entity<SqlEditor>,
+    }
+
+    impl Render for PreviewHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().p_2().child(self.editor.clone())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn readonly_preview_selects_and_copies(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let sql = "CREATE TABLE `db`.`t` (\n  id bigint NOT NULL\n);";
+        let (handle, harness) = cx.update(|cx| {
+            let harness = cx.new(|cx| PreviewHarness {
+                editor: cx.new(|cx| {
+                    SqlEditor::new(cx).options(SqlEditorOptions {
+                        language: "sql".into(),
+                        font_family: "Consolas".into(),
+                        font_size: 12.0,
+                        line_number: false,
+                        readonly: true,
+                    })
+                }),
+            });
+            harness.update(cx, |harness, cx| {
+                harness
+                    .editor
+                    .update(cx, |editor, cx| editor.set_text(sql, cx));
+            });
+            let (handle, _) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(800.0), px(600.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| harness.clone(),
+            )
+            .expect("open test window");
+            (handle, harness)
+        });
+
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_down(
+            point(px(30.), px(24.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(260.), px(24.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(260.), px(24.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        let selected = cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            let editor = harness.read(cx).editor.clone();
+            let editor = editor.read(cx);
+            let (start, end) = editor.selected_range(cx);
+            editor.text()[start..end].to_string()
+        });
+        assert!(
+            selected.contains("CREATE TABLE"),
+            "a drag over the preview should select the script, selected {selected:?}"
+        );
+        cx.simulate_keystrokes("ctrl-c");
+        let copied = cx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .unwrap_or_default();
+        assert_eq!(copied, selected, "Ctrl+C should copy the selected script");
     }
 
     #[gpui_kit::test]

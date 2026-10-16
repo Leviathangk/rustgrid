@@ -31,7 +31,16 @@ pub(crate) type TextChangeCallback = Rc<dyn Fn(&str, &mut Window, &mut App) + 's
 /// Called when the user presses Enter.
 pub(crate) type TextVoidCallback = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 /// Called when the user presses Tab (`true` for Shift+Tab).
+///
+/// A `tab` keystroke is matched by the `Root` context's `focus_next` binding (gpui-base's root binds
+/// it), and a keystroke a key binding claims is dispatched as an action instead of reaching this
+/// element's `on_key_down` — so a grid that wants Tab for its own cells claims it with a key binding
+/// of its own (the data grid's `GridCell` context, the designer's `TableDesigner`) and does not rely
+/// on this callback.
 pub(crate) type TextTabCallback = Rc<dyn Fn(bool, &mut Window, &mut App) + 'static>;
+/// Called when the user presses Up or Down (`true` for Down). Let a search field drive the
+/// keyboard highlight of the popup it filters.
+pub(crate) type TextArrowCallback = Rc<dyn Fn(bool, &mut Window, &mut App) + 'static>;
 
 /// Construction options for [`TextInput`].
 #[derive(Default)]
@@ -101,6 +110,8 @@ pub(crate) struct TextInput {
     /// Called when the field loses focus (the inner gpui-kit input's `Blur` event). Used by the
     /// in-place tree rename to commit on click-away.
     on_blur: Option<TextVoidCallback>,
+    /// Called on Up/Down, for list popups the field filters.
+    on_arrow: Option<TextArrowCallback>,
 }
 
 impl TextInput {
@@ -135,6 +146,7 @@ impl TextInput {
             on_cancel: None,
             on_tab: None,
             on_blur: None,
+            on_arrow: None,
         }
     }
 
@@ -204,6 +216,12 @@ impl TextInput {
     /// Called when the field loses focus (commit-on-click-away).
     pub(crate) fn on_blur(mut self, callback: TextVoidCallback) -> Self {
         self.on_blur = Some(callback);
+        self
+    }
+
+    /// Called on Up/Down. The field keeps its own caret behaviour; the callback runs after it.
+    pub(crate) fn on_arrow(mut self, callback: TextArrowCallback) -> Self {
+        self.on_arrow = Some(callback);
         self
     }
 
@@ -339,6 +357,11 @@ impl TextInput {
                     callback(event.keystroke.modifiers.shift, window, cx);
                 }
             }
+            "up" | "down" => {
+                if let Some(callback) = self.on_arrow.clone() {
+                    callback(event.keystroke.key == "down", window, cx);
+                }
+            }
             _ => {}
         }
     }
@@ -381,5 +404,82 @@ impl Render for TextInput {
             .size_full()
             .on_key_down(cx.listener(Self::handle_key_down))
             .child(input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{
+        Bounds, Point, TestAppContext, VisualTestContext, WindowBounds, WindowOptions, size,
+    };
+    use std::cell::Cell;
+
+    /// A field whose Up/Down presses are recorded, standing in for a list popup's search box.
+    struct ArrowHarness {
+        field: Entity<TextInput>,
+    }
+
+    impl Render for ArrowHarness {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            div().size_full().p_2().child(self.field.clone())
+        }
+    }
+
+    /// Up/Down must reach the wrapper's `on_arrow`: the kit's single-line input handles the arrows
+    /// itself, and the callback is what lets the type drop-down move its highlight with them.
+    #[gpui_kit::test]
+    fn arrow_keys_reach_the_on_arrow_callback(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let pressed: Rc<Cell<Vec<bool>>> = Rc::new(Cell::new(Vec::new()));
+        let sink = pressed.clone();
+        let (handle, view) = cx.update(|cx| {
+            let field = cx.new(|cx| {
+                TextInput::new(Theme::light(), "sql", TextInputOptions::default(), cx).on_arrow(
+                    Rc::new(move |down, _window, _cx| {
+                        let mut seen = sink.take();
+                        seen.push(down);
+                        sink.set(seen);
+                    }),
+                )
+            });
+            let view = cx.new(|_cx| ArrowHarness {
+                field: field.clone(),
+            });
+            let (handle, _window) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(400.), px(200.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, _| view.clone(),
+            )
+            .expect("open test window");
+            (handle, view)
+        });
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        // The inner gpui-kit state only exists after the first draw, and focus must go to it (the
+        // wrapper forwards focus), which is what `focus_state` does.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|window, cx| {
+            let field = view.read(cx).field.clone();
+            field.update(cx, |field, cx| field.focus_state(window, cx));
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("down up");
+        assert_eq!(
+            pressed.take(),
+            vec![true, false],
+            "Down then Up should reach the callback as (down, up)"
+        );
     }
 }

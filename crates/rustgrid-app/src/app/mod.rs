@@ -120,6 +120,15 @@ gpui::actions!(
 // own actions in a deeper context takes precedence, like the backup list above.
 gpui::actions!(gridstatus, [CopyStatusSql, SelectAllStatusSql]);
 
+// The table designer's own actions: 保存 from Ctrl+S, and Tab / Shift+Tab walking the fields grid's
+// cells (`Root` binds `tab` to `focus_next`, and a bound keystroke never reaches an element's own
+// `on_key_down`, so the grid claims it the same way the data grid does).
+gpui::actions!(designer, [SaveDesign, NextDesignerCell, PrevDesignerCell]);
+
+/// Key context applied to the table designer, so Ctrl+S saves it and Tab walks its cells while the
+/// designer (or one of its cell editors) holds focus.
+const DESIGNER_CONTEXT: &str = "TableDesigner";
+
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
 
@@ -2524,6 +2533,11 @@ impl AppView {
             KeyBinding::new("cmd-enter", RunSelectedQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("ctrl-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
             KeyBinding::new("cmd-s", SaveQuery, Some(QUERY_EDITOR_CONTEXT)),
+            // 保存 in the table designer, and Tab / Shift+Tab walking its fields grid.
+            KeyBinding::new("ctrl-s", SaveDesign, Some(DESIGNER_CONTEXT)),
+            KeyBinding::new("cmd-s", SaveDesign, Some(DESIGNER_CONTEXT)),
+            KeyBinding::new("tab", NextDesignerCell, Some(DESIGNER_CONTEXT)),
+            KeyBinding::new("shift-tab", PrevDesignerCell, Some(DESIGNER_CONTEXT)),
             // The status bar's SQL line: copy the selection (or select the whole statement).
             KeyBinding::new("ctrl-c", CopyStatusSql, Some(GRID_STATUS_CONTEXT)),
             KeyBinding::new("cmd-c", CopyStatusSql, Some(GRID_STATUS_CONTEXT)),

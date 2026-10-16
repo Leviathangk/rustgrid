@@ -15,8 +15,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
-use gpui_kit::base::SelectableText;
-
 /// Height of one row in the identity form and the grant/role lists.
 const CREATE_ROW_HEIGHT: f32 = 26.0;
 /// Width of the identity form's label column; every label ends at the same x.
@@ -502,7 +500,8 @@ pub(super) struct UserCreateDialog {
     pub(super) context: Option<UserAccountContext>,
     /// Every account on the server, for the role membership lists.
     pub(super) accounts: Vec<(String, String)>,
-    pub(super) sql_scroll: ScrollHandle,
+    /// The 预览 tab's read-only, syntax-highlighted editor (kept across renders).
+    pub(super) preview_editor: Option<Entity<ui::SqlEditor>>,
     /// Whether the account's details are still loading (Save is disabled until they are).
     pub(super) loading: bool,
     /// The window's inline validation error.
@@ -587,7 +586,7 @@ impl UserCreateDialog {
             old_password: String::new(),
             context,
             accounts: Vec::new(),
-            sql_scroll: ScrollHandle::new(),
+            preview_editor: None,
             loading: editing,
             error: None,
             saving: false,
@@ -3401,18 +3400,21 @@ fn make_create_combo(
 
 impl AppView {
     /// The window's contents: the child titlebar, the section navigation + content, and the footer.
-    pub(super) fn create_user_window_contents(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    pub(super) fn create_user_window_contents(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
+        let Some(title) =
+            self.create_user_dialog
+                .as_ref()
+                .map(|dialog| match dialog.original_account() {
+                    Some((user, host)) => format!(
+                        "{} - {}",
+                        user_host_label(user, host, &dialog.spec),
+                        t!("user.create.edit_title")
+                    ),
+                    None => t!("user.create.title").to_string(),
+                })
+        else {
             return div().into_any_element();
-        };
-        let title = match dialog.original_account() {
-            Some((user, host)) => format!(
-                "{} - {}",
-                user_host_label(user, host, &dialog.spec),
-                t!("user.create.edit_title")
-            ),
-            None => t!("user.create.title").to_string(),
         };
 
         let mut root = div()
@@ -3498,10 +3500,15 @@ impl AppView {
                     .child(self.create_user_footer(cx)),
             );
 
-        if dialog.confirm_open {
+        let (confirm_open, discard_confirm) = self
+            .create_user_dialog
+            .as_ref()
+            .map(|dialog| (dialog.confirm_open, dialog.discard_confirm))
+            .unwrap_or((false, false));
+        if confirm_open {
             root = root.child(self.render_create_confirm(cx));
         }
-        if dialog.discard_confirm {
+        if discard_confirm {
             root = root.child(self.render_discard_confirm(cx));
         }
         root.into_any_element()
@@ -3747,11 +3754,14 @@ impl AppView {
     }
 
     /// The body of the active section.
-    fn create_user_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let Some(dialog) = self.create_user_dialog.as_ref() else {
+    fn create_user_body(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let Some(section) = self
+            .create_user_dialog
+            .as_ref()
+            .map(|dialog| dialog.section)
+        else {
             return div().into_any_element();
         };
-        let section = dialog.section;
         match section {
             UserSection::General => self.render_create_general(cx),
             UserSection::Advanced => self.render_create_advanced(cx),
@@ -6102,20 +6112,45 @@ impl AppView {
         .into_any_element()
     }
 
-    /// SQL 预览: the script Save would run.
-    fn render_create_sql(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// SQL 预览: the script Save would run, in a read-only highlighted SQL editor.
+    fn render_create_sql(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let sql = self.create_user_sql();
-        let text = if sql.trim().is_empty() {
-            t!("design.no_changes").to_string()
-        } else {
-            sql
+        if sql.trim().is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .w_full()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("design.no_changes").to_string())
+                .into_any_element();
+        }
+        // Highlighted and read-only: the editor gives the script SQL syntax colours and handles
+        // mouse selection, Ctrl+A / Ctrl+C and scrolling itself — a plain text run cannot be copied,
+        // because the window's Ctrl+C never reaches it. The 复制 button above still takes the whole
+        // script in one go.
+        let editor = self.create_user_dialog.as_mut().map(|dialog| {
+            dialog
+                .preview_editor
+                .get_or_insert_with(|| {
+                    cx.new(|cx| {
+                        ui::SqlEditor::new(cx).options(ui::SqlEditorOptions {
+                            language: "sql".into(),
+                            font_family: "Consolas".into(),
+                            font_size: 12.0,
+                            line_number: false,
+                            readonly: true,
+                        })
+                    })
+                })
+                .clone()
+        });
+        let Some(editor) = editor else {
+            return div().into_any_element();
         };
-        let scroll = self
-            .create_user_dialog
-            .as_ref()
-            .map(|dialog| dialog.sql_scroll.clone())
-            .unwrap_or_default();
+        editor.update(cx, |editor, cx| editor.set_text(sql, cx));
         div()
             .id("user-create-sql")
             .flex()
@@ -6157,22 +6192,11 @@ impl AppView {
                     .id("user-create-sql-scroll")
                     .h(px(CREATE_PREVIEW_HEIGHT))
                     .flex_none()
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
+                    .overflow_hidden()
                     .border_1()
                     .border_color(rgb(theme.border))
                     .bg(rgb(theme.input_bg))
-                    .p_2()
-                    .cursor_text()
-                    .child(
-                        div()
-                            .font_family("Consolas")
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text))
-                            // Selectable as well as copyable: the 复制 button above takes the whole
-                            // script, a mouse drag + Ctrl+C takes part of it.
-                            .child(SelectableText::new("user-create-sql-text", text)),
-                    ),
+                    .child(editor),
             )
             .into_any_element()
     }
