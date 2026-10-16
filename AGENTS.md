@@ -291,9 +291,13 @@ touching UI code.
   carry the engine's per-column options (`TableDesignerSpec::index_columns`: `Sort` everywhere,
   `PrefixLength` for MySQL/MariaDB) and which owns its per-row controls
   (`index_field_combos` / `index_field_prefix_inputs`, rebuilt on every structural change); every
-  edit stays on the draft until 确定 and 取消 / a click outside discards it. The 主键 row opens the
-  same editor and its draft edits the columns' 主键 flags (the model keeps the key on the columns, so
-  that draft carries no options). The 外键 / 唯一键 cells keep the check-box list.
+  edit stays on the draft until 确定 and 取消 / a click outside discards it. The 索引 grid lists the
+  table's secondary indexes only: the primary key's name and kind are the key's own (not editable)
+  and its columns are the 字段 tab's 主键 flags, so — like Navicat — it gets no row. The model keeps
+  the entry, pushed last (`push_primary_index_last`), so a grid row is always its own model row:
+  `TableDesignView::index_row_count` is what the grid's row count, the scroll extent
+  (`design_row_count`) and 添加索引's insert position all use. The 外键 / 唯一键 cells keep the
+  check-box list.
   The designer owns a key context of its own (`TableDesigner`, on the root div, which
   `request_focus` focuses when the tab opens or is brought to the front — a key binding only fires
   while its context is in the focused element's path): 保存 from `ctrl-s` / `cmd-s` (`SaveDesign`),

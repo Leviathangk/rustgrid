@@ -731,6 +731,10 @@ impl TableDesignView {
             .any(|(key, _)| *key == "design.index.comment");
         let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
         let indexes = self.schema.indexes.clone();
+        // The grid lists the secondary indexes only: the primary key (kept last in the model) is
+        // managed from the 字段 tab's 主键 flags and its own name and kind are not editable, so —
+        // like Navicat — it gets no row. Every shown row is then also its own model row.
+        let shown = self.index_row_count();
         let selected = self.selected_index;
         let index_rows = self.index_rows.clone();
         let designer = self.designer.clone();
@@ -744,11 +748,11 @@ impl TableDesignView {
 
         let list = uniform_list(
             SharedString::from(format!("design-indexes-{}", self.id)),
-            indexes.len().max(1),
+            shown.max(1),
             move |range, _window, _cx| {
                 range
                     .map(|row| {
-                        if row >= indexes.len() {
+                        if row >= shown {
                             return placeholder_row(PlaceholderKind::Index, &widths, theme, &weak);
                         }
                         let index = &indexes[row];
@@ -827,8 +831,8 @@ impl TableDesignView {
                                     .collect::<Vec<_>>()
                                     .join(", "),
                                 theme,
-                                // The primary key row is editable here too: its columns are the
-                                // ones flagged 主键 in the 字段 tab.
+                                // Every shown row is a secondary index, so its field list is
+                                // editable.
                                 true,
                                 DesignPicker::IndexFields,
                                 &weak,
@@ -1737,8 +1741,7 @@ impl TableDesignView {
     /// (the index's field order), the engine's own per-column options (排序 / 子部分) and 取消 / 确定.
     ///
     /// Everything edits a draft; 确定 installs it and 取消 (or a click outside) throws it away, so the
-    /// grid never shows a half-made change. The 主键 row opens here too — its draft ticks the 主键
-    /// flags, which is where the model keeps the key — and therefore carries no per-column options.
+    /// grid never shows a half-made change.
     ///
     /// The panel is sized from the table's own names — a long field (CUSTOMER_GRP_SCH_DETAIL_ID) is
     /// shown in full instead of being wrapped — and from the room the view has: it opens under the
@@ -1765,18 +1768,15 @@ impl TableDesignView {
         let anchor = Point::new(anchor.x - origin.x, anchor.y - origin.y);
         let anchor_y: f32 = anchor.y.into();
         let view_height: f32 = bounds.size.height.into();
-        let options = !draft.primary;
-        let sort = options
-            && self
-                .designer
-                .index_columns
-                .contains(&DesignerIndexColumn::Sort);
-        let prefix = options
-            && self
-                .designer
-                .index_columns
-                .contains(&DesignerIndexColumn::PrefixLength);
-        let width = index_fields_panel_width(&self.designer, &self.schema.columns, draft.primary);
+        let sort = self
+            .designer
+            .index_columns
+            .contains(&DesignerIndexColumn::Sort);
+        let prefix = self
+            .designer
+            .index_columns
+            .contains(&DesignerIndexColumn::PrefixLength);
+        let width = index_fields_panel_width(&self.designer, &self.schema.columns);
         // The row's own name cell, and what the header (which has no drag handle or check box)
         // offsets its 字段 label by so the 排序 / 子部分 headings line up with the cells.
         let name_width = index_fields_name_width(&self.schema.columns);
@@ -2476,7 +2476,7 @@ impl TableDesignView {
     pub(super) fn design_row_count(&self) -> usize {
         match self.tab {
             DesignerTab::Fields => self.schema.columns.len(),
-            DesignerTab::Indexes => self.schema.indexes.len(),
+            DesignerTab::Indexes => self.index_row_count(),
             DesignerTab::ForeignKeys => self.schema.foreign_keys.len(),
             DesignerTab::UniqueKeys => self.schema.unique_keys.len(),
             DesignerTab::Checks => self.schema.checks.len(),

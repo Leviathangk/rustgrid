@@ -325,14 +325,11 @@ pub(super) struct IndexFieldRow {
 /// list order, are the index's fields.
 ///
 /// Every edit (the ticks, 排序, 子部分, the order) lands here and only 确定 installs it; 取消 or a click
-/// outside discards it. A draft for the primary key row edits the columns' 主键 flags instead — the
-/// model keeps that key on the columns, so its rows carry no per-column options.
+/// outside discards it.
 #[derive(Clone)]
 pub(super) struct IndexFieldsDraft {
     /// The index row being edited.
     pub(super) row: usize,
-    /// Whether this is the 主键 row.
-    pub(super) primary: bool,
     /// Every column of the table, in the order the editor lists them (the index's own field order
     /// for its fields first, then the table's remaining columns, re-ordered by dragging a handle).
     pub(super) fields: Vec<IndexFieldRow>,
@@ -449,6 +446,19 @@ pub(super) fn default_index_kind(designer: &TableDesignerSpec) -> (bool, String)
         .unwrap_or((false, String::new()))
 }
 
+/// Move the primary key to the end of a schema's index list, where the designer keeps it.
+///
+/// The 索引 grid lists the table's *secondary* indexes: Navicat hides the primary key there, and its
+/// name and kind are the key's own (not editable) while its columns are the 字段 tab's 主键 flags. The
+/// model still carries the entry — the DDL diff needs its name — with the key pushed last, which is
+/// what makes a row of the grid a row of the model (see `TableDesignView::index_row_count`).
+pub(super) fn push_primary_index_last(schema: &mut TableSchema) {
+    if let Some(position) = schema.indexes.iter().position(|index| index.primary) {
+        let primary = schema.indexes.remove(position);
+        schema.indexes.push(primary);
+    }
+}
+
 /// The 字段 column's width in the index field editor: the table's longest column name plus a little
 /// slack, so a long field (`CUSTOMER_GRP_SCH_DETAIL_ID`) is drawn in full instead of being wrapped
 /// or clipped.
@@ -463,16 +473,8 @@ pub(super) fn index_fields_name_width(columns: &[ColumnDef]) -> f32 {
 /// The width of the whole editor: the 字段 column, the drag handle and check box the rows lead with,
 /// the engine's per-column option cells (MySQL's 排序 + 子部分), the heading row's count and the
 /// panel's own padding.
-pub(super) fn index_fields_panel_width(
-    designer: &TableDesignerSpec,
-    columns: &[ColumnDef],
-    primary: bool,
-) -> f32 {
-    let options = if primary {
-        0
-    } else {
-        designer.index_columns.len()
-    } as f32;
+pub(super) fn index_fields_panel_width(designer: &TableDesignerSpec, columns: &[ColumnDef]) -> f32 {
+    let options = designer.index_columns.len() as f32;
     index_fields_name_width(columns)
         + INDEX_FIELD_LEAD_WIDTH
         + options * (INDEX_FIELD_OPTION_WIDTH + 8.0)
@@ -867,7 +869,9 @@ impl TableDesignView {
             let _ = this.update(cx, |view, cx| {
                 view.loading = false;
                 match result {
-                    Ok(schema) => {
+                    Ok(mut schema) => {
+                        // The 索引 grid does not list the primary key (see `push_primary_index_last`).
+                        push_primary_index_last(&mut schema);
                         view.schema = schema.clone();
                         view.original = Some(schema);
                         view.is_new = false;
@@ -2012,6 +2016,18 @@ impl TableDesignView {
         self.mark_dirty(cx);
     }
 
+    /// The rows the 索引 grid shows: the model's index list without its trailing primary key, which
+    /// the grid never draws (see [`push_primary_index_last`]). A grid row is therefore a model row.
+    pub(super) fn index_row_count(&self) -> usize {
+        self.schema.indexes.len()
+            - usize::from(
+                self.schema
+                    .indexes
+                    .last()
+                    .is_some_and(|index| index.primary),
+            )
+    }
+
     pub(super) fn add_index(&mut self, cx: &mut Context<'_, Self>) {
         let (unique, index_type) = default_index_kind(&self.designer);
         let index = IndexDef {
@@ -2022,12 +2038,16 @@ impl TableDesignView {
             index_type,
             comment: String::new(),
         };
-        self.schema.indexes.push(index);
-        self.selected_index = Some(self.schema.indexes.len() - 1);
+        // A new index goes before the primary key, which stays last so the grid keeps its rows and
+        // the model's rows in step; the new row is also the last one the grid shows, so it can be
+        // revealed by its own index.
+        let row = self.index_row_count();
+        self.schema.indexes.insert(row, index);
+        self.selected_index = Some(row);
         self.index_rows.rows.clear();
-        self.index_rows.rows.insert(self.schema.indexes.len() - 1);
-        self.index_rows.anchor = self.selected_index;
-        self.reveal_design_row(self.schema.indexes.len() - 1);
+        self.index_rows.rows.insert(row);
+        self.index_rows.anchor = Some(row);
+        self.reveal_design_row(row);
         self.mark_dirty(cx);
     }
 
@@ -2053,10 +2073,10 @@ impl TableDesignView {
         for row in targets.iter().rev() {
             self.schema.indexes.remove(*row);
         }
-        self.selected_index = if self.schema.indexes.is_empty() {
+        self.selected_index = if self.index_row_count() == 0 {
             None
         } else {
-            Some(first.min(self.schema.indexes.len() - 1))
+            Some(first.min(self.index_row_count() - 1))
         };
         self.index_rows.rows.clear();
         if let Some(active) = self.selected_index {
@@ -2246,11 +2266,10 @@ impl TableDesignView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(index) = self.schema.indexes.get(row) else {
+        if self.schema.indexes.get(row).is_none() {
             return;
-        };
-        let primary = index.primary;
-        let fields = self.index_field_rows(row, primary);
+        }
+        let fields = self.index_field_rows(row);
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
@@ -2258,11 +2277,7 @@ impl TableDesignView {
         self.index_field_search_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.select_index(row, cx);
-        self.index_fields_draft = Some(IndexFieldsDraft {
-            row,
-            primary,
-            fields,
-        });
+        self.index_fields_draft = Some(IndexFieldsDraft { row, fields });
         self.rebuild_index_field_inputs(cx);
         cx.notify();
     }
@@ -2270,20 +2285,11 @@ impl TableDesignView {
     /// The editor's rows for one index: the index's own fields first, in the order the index holds
     /// them, then every other column of the table in its own order. Ticking is what makes a column
     /// a field; the list's order is what the index stores.
-    fn index_field_rows(&self, row: usize, primary: bool) -> Vec<IndexFieldRow> {
+    fn index_field_rows(&self, row: usize) -> Vec<IndexFieldRow> {
         let Some(index) = self.schema.indexes.get(row) else {
             return Vec::new();
         };
-        let members: Vec<IndexColumnDef> = if primary {
-            self.schema
-                .columns
-                .iter()
-                .filter(|column| column.primary_key)
-                .map(|column| IndexColumnDef::new(column.name.clone()))
-                .collect()
-        } else {
-            index.columns.clone()
-        };
+        let members: Vec<IndexColumnDef> = index.columns.clone();
         let mut fields: Vec<IndexFieldRow> = members
             .iter()
             .map(|member| IndexFieldRow {
@@ -2310,14 +2316,10 @@ impl TableDesignView {
 
     /// 重置: put the draft back to the index's own fields (and its own order).
     pub(super) fn index_fields_reset(&mut self, cx: &mut Context<'_, Self>) {
-        let Some((row, primary)) = self
-            .index_fields_draft
-            .as_ref()
-            .map(|draft| (draft.row, draft.primary))
-        else {
+        let Some(row) = self.index_fields_draft.as_ref().map(|draft| draft.row) else {
             return;
         };
-        let fields = self.index_field_rows(row, primary);
+        let fields = self.index_field_rows(row);
         if let Some(draft) = self.index_fields_draft.as_mut() {
             draft.fields = fields;
         }
@@ -2333,22 +2335,13 @@ impl TableDesignView {
         }
     }
 
-    /// Apply the draft: an ordinary index takes its field list, the primary key takes the flags.
+    /// Apply the draft: the index takes the draft's field list.
     pub(super) fn confirm_index_fields(&mut self, cx: &mut Context<'_, Self>) {
         let Some(draft) = self.index_fields_draft.take() else {
             return;
         };
         let fields = draft.members();
-        if draft.primary {
-            let names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
-            for column in self.schema.columns.iter_mut() {
-                let primary = names.contains(&column.name);
-                column.primary_key = primary;
-                if primary {
-                    column.nullable = false;
-                }
-            }
-        } else if let Some(index) = self.schema.indexes.get_mut(draft.row) {
+        if let Some(index) = self.schema.indexes.get_mut(draft.row) {
             index.columns = fields;
         }
         self.discard_index_field_inputs();
@@ -2369,13 +2362,12 @@ impl TableDesignView {
             self.discard_index_field_inputs();
             return;
         };
-        // The primary key's rows carry no per-column options, and 子部分 only applies to a field that
-        // is part of the index — an unticked row shows an empty cell, so no editor is built for it.
-        let has_prefix = !draft.primary
-            && self
-                .designer
-                .index_columns
-                .contains(&DesignerIndexColumn::PrefixLength);
+        // 子部分 only applies to a field that is part of the index — an unticked row shows an empty
+        // cell, so no editor is built for it.
+        let has_prefix = self
+            .designer
+            .index_columns
+            .contains(&DesignerIndexColumn::PrefixLength);
         let members: Vec<&IndexFieldRow> = if has_prefix {
             draft.fields.iter().filter(|field| field.member).collect()
         } else {
@@ -2823,7 +2815,7 @@ impl TableDesignView {
     /// Append an index — from the toolbar's 添加索引 or the index grid's blank placeholder row —
     /// then edit its name.
     pub(super) fn begin_empty_index(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let row = self.schema.indexes.len();
+        let row = self.index_row_count();
         self.add_index(cx);
         self.begin_index_edit(row, IndexColumn::Name, window, cx);
     }
