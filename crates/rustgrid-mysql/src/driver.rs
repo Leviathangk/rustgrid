@@ -3,7 +3,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rustgrid_core::{
     Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
-    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TlsMode,
+    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
+    TlsMode,
 };
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
@@ -45,6 +46,9 @@ impl Driver for MysqlDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
+            // MySQL's own shape is the designer's default: every tab (a unique index is an 索引,
+            // so there is no 唯一键 tab), 自动递增/无符号/填充零 and MySQL's field columns.
+            table_designer: TableDesignerSpec::default(),
             id: DriverId::new("mysql"),
             display_name: "MySQL".to_string(),
             default_port: 3306,
@@ -106,6 +110,7 @@ impl Driver for MariaDbDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
+            table_designer: TableDesignerSpec::default(),
             id: DriverId::new("mariadb"),
             display_name: "MariaDB".to_string(),
             default_port: 3306,

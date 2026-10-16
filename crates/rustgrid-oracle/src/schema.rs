@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 
 use rustgrid_core::{
-    ColumnDef, ForeignKeyDef, IndexDef, Result, TableOptions, TableSchema, TriggerDef,
+    ColumnDef, ForeignKeyDef, IndexColumnDef, IndexDef, Result, TableOptions, TableSchema,
+    TriggerDef,
 };
 
 use crate::connection::{OracleConnection, map_query_error};
@@ -63,7 +64,13 @@ fn index_sql(schema: &str, table: &str, index: &IndexDef) -> String {
     let columns = index
         .columns
         .iter()
-        .map(|column| quote_identifier(column))
+        .map(|column| {
+            let mut sql = quote_identifier(&column.name);
+            if column.descending {
+                sql.push_str(" DESC");
+            }
+            sql
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -181,7 +188,7 @@ pub(crate) async fn table_schema(
 
             let index_cursor = raw
                 .query(
-                    "SELECT i.index_name, i.uniqueness, i.index_type, c.column_name \
+                    "SELECT i.index_name, i.uniqueness, i.index_type, c.column_name, c.descend \
                      FROM all_indexes i \
                      JOIN all_ind_columns c \
                        ON c.index_owner = i.owner AND c.index_name = i.index_name \
@@ -196,12 +203,17 @@ pub(crate) async fn table_schema(
                 let name = string_at(&row, 0);
                 let unique = string_at(&row, 1).eq_ignore_ascii_case("UNIQUE");
                 let index_type = string_at(&row, 2);
-                let column = string_at(&row, 3);
+                // Oracle indexes have no prefix length (子部分 is MySQL's).
+                let index_column = IndexColumnDef {
+                    name: string_at(&row, 3),
+                    descending: string_at(&row, 4).eq_ignore_ascii_case("DESC"),
+                    prefix_length: String::new(),
+                };
                 match indexes.iter_mut().find(|index| index.name == name) {
-                    Some(existing) => existing.columns.push(column),
+                    Some(existing) => existing.columns.push(index_column),
                     None => indexes.push(IndexDef {
                         name,
-                        columns: vec![column],
+                        columns: vec![index_column],
                         unique,
                         primary: false,
                         index_type,
@@ -286,6 +298,8 @@ pub(crate) async fn table_schema(
             Ok(TableSchema {
                 columns,
                 indexes,
+                unique_keys: Vec::new(),
+                checks: Vec::new(),
                 foreign_keys,
                 triggers,
                 options: TableOptions {

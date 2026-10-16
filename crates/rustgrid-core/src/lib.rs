@@ -13,9 +13,11 @@ pub mod view;
 
 pub use capability::{DriverCapabilities, DriverCapability};
 pub use descriptor::{
-    AdvancedFields, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel,
-    ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage, ConnectionPage,
-    ConnectionStandardField, DriverDescriptor, DriverIconStyle,
+    AdvancedFields, AutoIncrementRule, ConnectionFieldChoice, ConnectionFieldKind,
+    ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
+    ConnectionPage, ConnectionStandardField, DesignerColumnOption, DesignerFieldColumn,
+    DesignerIndexColumn, DesignerOptionField, DesignerTab, DriverDescriptor, DriverIconStyle,
+    TableDesignerSpec,
 };
 pub use dialect::DriverDialect;
 pub use driver::{
@@ -23,11 +25,12 @@ pub use driver::{
 };
 pub use error::{Error, Result};
 pub use model::{
-    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionProfile,
-    DatabaseInfo, DatabaseOptions, DriverId, FilterCondition, FilterConjunction, FilterGroup,
-    FilterNode, FilterOperator, ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, PageRequest,
-    QueryResult, RowInsert, RowUpdate, SavedBackup, SavedBackupSelection, SavedQuery, SortColumn,
-    TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
+    BackupObjectKind, CellValue, CheckDef, ColumnDef, ColumnInfo, ConnectionConfig,
+    ConnectionProfile, DatabaseInfo, DatabaseOptions, DriverId, FilterCondition, FilterConjunction,
+    FilterGroup, FilterNode, FilterOperator, ForeignKeyDef, IndexColumnDef, IndexDef, ObjectDump,
+    ObjectKind, PageRequest, QueryResult, RowInsert, RowUpdate, SavedBackup, SavedBackupSelection,
+    SavedQuery, SortColumn, TableInfo, TableOptions, TablePage, TableSchema, TableStatus,
+    TriggerDef, UniqueKeyDef,
 };
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use registry::{BuiltinDriverSource, DriverRegistry, DriverSource};

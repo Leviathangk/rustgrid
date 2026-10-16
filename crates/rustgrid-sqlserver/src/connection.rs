@@ -4,12 +4,13 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use rustgrid_core::{
-    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
-    DriverId, Error, ForeignKeyDef, IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow,
-    PageRequest, PrivilegeCatalog, QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo,
-    RoutineKind, RowInsert, RowUpdate, ServerSecurableGrant, TableInfo, TableOptions, TablePage,
-    TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit, UserEditSection,
-    UserMapping, ViewDetails, ViewEdit, ViewInfo,
+    BackupObjectKind, CellValue, CheckDef, ColumnDef, ColumnInfo, Connection, DatabaseInfo,
+    DatabaseOptions, DriverId, Error, ForeignKeyDef, IndexColumnDef, IndexDef, ObjectDump,
+    ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult, Result,
+    RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate,
+    ServerSecurableGrant, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
+    UniqueKeyDef, UserAccount, UserDetails, UserEdit, UserEditSection, UserMapping, ViewDetails,
+    ViewEdit, ViewInfo,
 };
 use tiberius::{QueryItem, Row, ToSql};
 
@@ -327,7 +328,7 @@ impl Connection for SqlServerConnection {
         DriverId::new("sqlserver")
     }
 
-    /// T-SQL's scanner, tracking `BEGIN`/`CASE … END` so a block body is not split on its inner
+    /// T-SQL's scanner, tracking `BEGIN`/`CASE …END` so a block body is not split on its inner
     /// semicolons.
     fn split_statements(&self, sql: &str) -> Vec<String> {
         split_statements(sql)
@@ -600,8 +601,8 @@ impl Connection for SqlServerConnection {
                 .find(|result| result.has_result_set)
                 .unwrap_or_else(|| empty_result(sql.trim().to_string())));
         }
-        // A script the splitter could not break into several statements — e.g. several `SELECT`s
-        // without semicolons, which SQL Server runs as one batch — carries multiple result sets.
+        // A script the splitter could not break into several statements —e.g. several `SELECT`s
+        // without semicolons, which SQL Server runs as one batch —carries multiple result sets.
         // The batch path returns them all and this keeps only the first, matching the single
         // result `execute_query` promises (the query editor uses `execute_query_many`).
         if statements.len() == 1 && returns_result_set(&statements[0]) {
@@ -653,8 +654,8 @@ impl Connection for SqlServerConnection {
             // round-trips; run it whole and return one result per result set.
             return run_batch_sets(&mut client, sql).await;
         }
-        // A single statement the splitter could not divide — several `SELECT`s without
-        // semicolons, which SQL Server runs as one batch — still carries every result set.
+        // A single statement the splitter could not divide —several `SELECT`s without
+        // semicolons, which SQL Server runs as one batch —still carries every result set.
         if statements.len() == 1 && returns_result_set(&statements[0]) {
             return run_batch_sets(&mut client, sql).await;
         }
@@ -1165,7 +1166,7 @@ impl Connection for SqlServerConnection {
             "SELECT c.name, ty.name, c.max_length, c.precision, c.scale, c.is_nullable, \
                     c.is_identity, dc.definition, c.collation_name, \
                     CAST(ep.value AS nvarchar(max)), c.is_computed, cc.definition, \
-                    CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END \
+                    CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END, c.is_sparse \
              FROM {db}.sys.columns c \
              JOIN {db}.sys.objects o ON o.object_id = c.object_id \
              JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
@@ -1209,6 +1210,7 @@ impl Connection for SqlServerConnection {
                 auto_increment: bool_cell(row, 6),
                 unsigned: false,
                 zerofill: false,
+                sparse: bool_cell(row, 13),
                 comment: text_cell(row, 9),
                 charset: String::new(),
                 collation: text_cell(row, 8),
@@ -1228,6 +1230,7 @@ impl Connection for SqlServerConnection {
              JOIN {db}.sys.objects o ON o.object_id = i.object_id \
              JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
              WHERE o.name = @P1 AND s.name = @P2 AND i.name IS NOT NULL \
+               AND i.is_unique_constraint = 0 \
              ORDER BY i.index_id"
         );
         let index_result = self
@@ -1254,6 +1257,8 @@ impl Connection for SqlServerConnection {
             });
         }
 
+        let unique_keys = self.unique_keys(database, &schema_name, &table).await?;
+        let checks = self.checks(database, &schema_name, &table).await?;
         let foreign_keys = self.foreign_keys(database, &schema_name, &table).await?;
         let triggers = self.triggers(database, &schema_name, &table).await?;
 
@@ -1274,6 +1279,8 @@ impl Connection for SqlServerConnection {
         Ok(TableSchema {
             columns,
             indexes,
+            unique_keys,
+            checks,
             foreign_keys,
             triggers,
             options: TableOptions {
@@ -1638,10 +1645,10 @@ impl Connection for SqlServerConnection {
 }
 
 impl SqlServerConnection {
-    async fn index_columns(&self, database: &str, index: &str) -> Result<Vec<String>> {
+    async fn index_columns(&self, database: &str, index: &str) -> Result<Vec<IndexColumnDef>> {
         let db = quote_identifier(database);
         let sql = format!(
-            "SELECT c.name FROM {db}.sys.index_columns ic \
+            "SELECT c.name, ic.is_descending_key FROM {db}.sys.index_columns ic \
              JOIN {db}.sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
              JOIN {db}.sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id \
              WHERE i.name = @P1 ORDER BY ic.key_ordinal",
@@ -1650,7 +1657,81 @@ impl SqlServerConnection {
         Ok(result
             .rows
             .into_iter()
-            .filter_map(|row| row.first().map(CellValue::as_display))
+            .map(|row| IndexColumnDef {
+                name: text_cell(&row, 0),
+                descending: bool_cell(&row, 1),
+                // SQL Server indexes have no prefix length (子部分 is MySQL's).
+                prefix_length: String::new(),
+            })
+            .collect())
+    }
+
+    /// The table's `UNIQUE` constraints. SQL Server keeps them apart from plain unique indexes
+    /// (`sys.indexes.is_unique_constraint = 1`), which is why the designer has a 唯一键tab.
+    async fn unique_keys(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<UniqueKeyDef>> {
+        let db = quote_identifier(database);
+        let sql = format!(
+            "SELECT kc.name, c.name FROM {db}.sys.key_constraints kc \
+             JOIN {db}.sys.objects o ON o.object_id = kc.parent_object_id \
+             JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+             JOIN {db}.sys.index_columns ic \
+               ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id \
+             JOIN {db}.sys.columns c \
+               ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+             WHERE kc.type = 'UQ' AND o.name = @P1 AND s.name = @P2 \
+             ORDER BY kc.name, ic.key_ordinal"
+        );
+        let result = self
+            .run(
+                None,
+                &sql,
+                &[Some(table.to_string()), Some(schema.to_string())],
+            )
+            .await?;
+        let mut unique_keys: Vec<UniqueKeyDef> = Vec::new();
+        for row in &result.rows {
+            let name = text_cell(row, 0);
+            let column = text_cell(row, 1);
+            match unique_keys.iter_mut().find(|key| key.name == name) {
+                Some(key) => key.columns.push(column),
+                None => unique_keys.push(UniqueKeyDef {
+                    name,
+                    columns: vec![column],
+                }),
+            }
+        }
+        Ok(unique_keys)
+    }
+
+    /// The table's check constraints, with the definition's outer parentheses removed (the catalog
+    /// stores `([qty]>(0))`; the designer edits `[qty]>(0)` and the DDL adds the parentheses back).
+    async fn checks(&self, database: &str, schema: &str, table: &str) -> Result<Vec<CheckDef>> {
+        let db = quote_identifier(database);
+        let sql = format!(
+            "SELECT cc.name, cc.definition FROM {db}.sys.check_constraints cc \
+             JOIN {db}.sys.objects o ON o.object_id = cc.parent_object_id \
+             JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+             WHERE o.name = @P1 AND s.name = @P2 ORDER BY cc.name"
+        );
+        let result = self
+            .run(
+                None,
+                &sql,
+                &[Some(table.to_string()), Some(schema.to_string())],
+            )
+            .await?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| CheckDef {
+                name: text_cell(row, 0),
+                expression: strip_outer_parens(&text_cell(row, 1)),
+            })
             .collect())
     }
 
@@ -2322,6 +2403,15 @@ fn parse_sys_type(
 
 fn column_definition(column: &ColumnDef) -> String {
     let mut out = quote_identifier(&column.name);
+    // A computed column carries an expression instead of a type.
+    if !column.generated.trim().is_empty() {
+        out.push_str(" AS ");
+        out.push_str(&wrap_parens(column.generated.trim()));
+        if column.stored {
+            out.push_str(" PERSISTED");
+        }
+        return out;
+    }
     let data_type = if column.data_type.trim().is_empty() {
         "nvarchar"
     } else {
@@ -2338,6 +2428,10 @@ fn column_definition(column: &ColumnDef) -> String {
         }
         out.push(')');
     }
+    if !column.collation.trim().is_empty() {
+        out.push_str(" COLLATE ");
+        out.push_str(column.collation.trim());
+    }
     if column.auto_increment {
         out.push_str(" IDENTITY(1,1)");
     }
@@ -2347,6 +2441,9 @@ fn column_definition(column: &ColumnDef) -> String {
     if !column.default.trim().is_empty() {
         out.push_str(" DEFAULT ");
         out.push_str(column.default.trim());
+    }
+    if column.sparse {
+        out.push_str(" SPARSE");
     }
     out
 }
@@ -2377,6 +2474,8 @@ fn table_schema_sql(
                     ));
                 }
             }
+            definitions.extend(unique_key_definitions(&modified.unique_keys));
+            definitions.extend(check_definitions(&modified.checks));
             let mut statements = vec![format!(
                 "CREATE TABLE {qualified} (\n    {}\n)",
                 definitions.join(",\n    ")
@@ -2415,10 +2514,13 @@ fn table_schema_sql(
             }
             for column in &modified.columns {
                 if let Some(previous) = original_columns.get(column.name.as_str())
+                    && column.generated.trim().is_empty()
                     && (previous.data_type != column.data_type
                         || previous.length != column.length
                         || previous.decimals != column.decimals
-                        || previous.nullable != column.nullable)
+                        || previous.nullable != column.nullable
+                        || previous.collation != column.collation
+                        || previous.sparse != column.sparse)
                 {
                     let mut definition = column_definition(column);
                     // `ALTER COLUMN` cannot carry DEFAULT/IDENTITY clauses.
@@ -2466,6 +2568,86 @@ fn table_schema_sql(
                 }
             }
 
+            // Unique constraints. SQL Server cannot alter one in place, so a changed column list
+            // is dropped and re-added; an unnamed row is skipped (it was created without a name
+            // and cannot be referenced afterwards).
+            let original_keys: std::collections::HashMap<&str, &UniqueKeyDef> = original
+                .unique_keys
+                .iter()
+                .filter(|key| !key.name.trim().is_empty())
+                .map(|key| (key.name.as_str(), key))
+                .collect();
+            for key in &modified.unique_keys {
+                if key.name.trim().is_empty() || key.columns.is_empty() {
+                    continue;
+                }
+                let unchanged = original_keys
+                    .get(key.name.as_str())
+                    .is_some_and(|previous| previous.columns == key.columns);
+                if unchanged {
+                    continue;
+                }
+                if original_keys.contains_key(key.name.as_str()) {
+                    statements.push(drop_constraint_statement(&qualified, &key.name));
+                }
+                statements.push(format!(
+                    "ALTER TABLE {qualified} ADD CONSTRAINT {} UNIQUE ({})",
+                    quote_identifier(&key.name),
+                    column_list(&key.columns)
+                ));
+            }
+            for key in &original.unique_keys {
+                if key.name.trim().is_empty() {
+                    continue;
+                }
+                if !modified
+                    .unique_keys
+                    .iter()
+                    .any(|candidate| candidate.name == key.name)
+                {
+                    statements.push(drop_constraint_statement(&qualified, &key.name));
+                }
+            }
+
+            // Check constraints, reconciled the same way.
+            let original_checks: std::collections::HashMap<&str, &CheckDef> = original
+                .checks
+                .iter()
+                .filter(|check| !check.name.trim().is_empty())
+                .map(|check| (check.name.as_str(), check))
+                .collect();
+            for check in &modified.checks {
+                if check.name.trim().is_empty() || check.expression.trim().is_empty() {
+                    continue;
+                }
+                let unchanged = original_checks
+                    .get(check.name.as_str())
+                    .is_some_and(|previous| previous.expression == check.expression);
+                if unchanged {
+                    continue;
+                }
+                if original_checks.contains_key(check.name.as_str()) {
+                    statements.push(drop_constraint_statement(&qualified, &check.name));
+                }
+                statements.push(format!(
+                    "ALTER TABLE {qualified} ADD CONSTRAINT {} CHECK ({})",
+                    quote_identifier(&check.name),
+                    check.expression.trim()
+                ));
+            }
+            for check in &original.checks {
+                if check.name.trim().is_empty() {
+                    continue;
+                }
+                if !modified
+                    .checks
+                    .iter()
+                    .any(|candidate| candidate.name == check.name)
+                {
+                    statements.push(drop_constraint_statement(&qualified, &check.name));
+                }
+            }
+
             statements.join(";\n")
         }
     }
@@ -2480,15 +2662,97 @@ fn create_index_statements(table: &str, indexes: &[IndexDef]) -> Vec<String> {
                 "CREATE {}INDEX {} ON {table} ({})",
                 if index.unique { "UNIQUE " } else { "" },
                 quote_identifier(&index.name),
-                index
-                    .columns
-                    .iter()
-                    .map(|column| quote_identifier(column))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                index_column_list(&index.columns)
             )
         })
         .collect()
+}
+
+/// A quoted, comma-separated index column list, each column with its own `DESC` where it sorts
+/// downwards.
+fn index_column_list(columns: &[IndexColumnDef]) -> String {
+    columns
+        .iter()
+        .map(|column| {
+            let mut sql = quote_identifier(&column.name);
+            if column.descending {
+                sql.push_str(" DESC");
+            }
+            sql
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A quoted, comma-separated column list.
+fn column_list(columns: &[String]) -> String {
+    columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The `UNIQUE` constraint clauses of a `CREATE TABLE`, before the check constraints.
+fn unique_key_definitions(unique_keys: &[UniqueKeyDef]) -> Vec<String> {
+    unique_keys
+        .iter()
+        .filter(|key| !key.columns.is_empty())
+        .map(|key| {
+            let body = format!("UNIQUE ({})", column_list(&key.columns));
+            if key.name.trim().is_empty() {
+                body
+            } else {
+                format!("CONSTRAINT {} {body}", quote_identifier(&key.name))
+            }
+        })
+        .collect()
+}
+
+/// The `CHECK` constraint clauses of a `CREATE TABLE`.
+fn check_definitions(checks: &[CheckDef]) -> Vec<String> {
+    checks
+        .iter()
+        .filter(|check| !check.expression.trim().is_empty())
+        .map(|check| {
+            let body = format!("CHECK ({})", check.expression.trim());
+            if check.name.trim().is_empty() {
+                body
+            } else {
+                format!("CONSTRAINT {} {body}", quote_identifier(&check.name))
+            }
+        })
+        .collect()
+}
+
+/// Drop one named constraint (`DROP CONSTRAINT` covers unique, check, default and foreign keys).
+fn drop_constraint_statement(table: &str, name: &str) -> String {
+    format!(
+        "ALTER TABLE {table} DROP CONSTRAINT {}",
+        quote_identifier(name)
+    )
+}
+
+/// Wrap an expression in parentheses unless it already is parenthesized.
+fn wrap_parens(expression: &str) -> String {
+    if expression.starts_with('(') && expression.ends_with(')') {
+        expression.to_string()
+    } else {
+        format!("({expression})")
+    }
+}
+
+/// Remove one pair of outer parentheses from a check definition, as the catalog stores it.
+fn strip_outer_parens(definition: &str) -> String {
+    let trimmed = definition.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        inner.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Normalize reported permission names into privilege ids (used by `user.rs`). SQL Server's
@@ -2538,5 +2802,161 @@ mod tests {
         // Types without a qualifier are rendered bare.
         assert_eq!(render_column_type("int", Some(4), None, None), "int");
         assert_eq!(render_column_type("bit", Some(1), None, None), "bit");
+    }
+
+    /// A one-column `dbo.t` with `id int NOT NULL`; the callers add what they test.
+    fn base_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![ColumnDef {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                ..ColumnDef::default()
+            }],
+            ..TableSchema::default()
+        }
+    }
+
+    #[test]
+    fn creates_unique_key_and_check_constraints() {
+        let mut schema = base_schema();
+        schema.unique_keys.push(UniqueKeyDef {
+            name: "uq_code".to_string(),
+            columns: vec!["id".to_string(), "code".to_string()],
+        });
+        schema.checks.push(CheckDef {
+            name: "ck_positive".to_string(),
+            expression: "[id]>(0)".to_string(),
+        });
+
+        let sql = table_schema_sql("dbo", "t", None, &schema);
+        assert!(
+            sql.contains("CONSTRAINT [uq_code] UNIQUE ([id], [code])"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CONSTRAINT [ck_positive] CHECK ([id]>(0))"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn alters_unique_key_and_check_constraints_by_recreating_them() {
+        let mut original = base_schema();
+        original.unique_keys.push(UniqueKeyDef {
+            name: "uq_code".to_string(),
+            columns: vec!["id".to_string()],
+        });
+        original.checks.push(CheckDef {
+            name: "ck_positive".to_string(),
+            expression: "[id]>(0)".to_string(),
+        });
+
+        // A changed column list/expression is dropped and re-added; SQL Server cannot alter one.
+        let mut modified = base_schema();
+        modified.unique_keys.push(UniqueKeyDef {
+            name: "uq_code".to_string(),
+            columns: vec!["id".to_string(), "code".to_string()],
+        });
+        modified.checks.push(CheckDef {
+            name: "ck_positive".to_string(),
+            expression: "[id]>=(0)".to_string(),
+        });
+
+        let sql = table_schema_sql("dbo", "t", Some(&original), &modified);
+        assert!(
+            sql.contains("ALTER TABLE dbo.[t] DROP CONSTRAINT [uq_code]"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ALTER TABLE dbo.[t] ADD CONSTRAINT [uq_code] UNIQUE ([id], [code])"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ALTER TABLE dbo.[t] DROP CONSTRAINT [ck_positive]"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ALTER TABLE dbo.[t] ADD CONSTRAINT [ck_positive] CHECK ([id]>=(0))"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn drops_removed_unique_keys_and_checks() {
+        let mut original = base_schema();
+        original.unique_keys.push(UniqueKeyDef {
+            name: "uq_code".to_string(),
+            columns: vec!["id".to_string()],
+        });
+        original.checks.push(CheckDef {
+            name: "ck_positive".to_string(),
+            expression: "[id]>(0)".to_string(),
+        });
+
+        let sql = table_schema_sql("dbo", "t", Some(&original), &base_schema());
+        assert!(sql.contains("DROP CONSTRAINT [uq_code]"), "{sql}");
+        assert!(sql.contains("DROP CONSTRAINT [ck_positive]"), "{sql}");
+    }
+
+    #[test]
+    fn strips_the_catalog_parentheses_around_a_check_definition() {
+        assert_eq!(strip_outer_parens("([id]>(0))"), "[id]>(0)");
+        // Only the outermost pair goes, so a compound expression keeps its own grouping.
+        assert_eq!(
+            strip_outer_parens("(([a]>(0)) OR ([b]<(1)))"),
+            "([a]>(0)) OR ([b]<(1))"
+        );
+        assert_eq!(strip_outer_parens("[id]>(0)"), "[id]>(0)");
+    }
+
+    #[test]
+    fn renders_sparse_and_collated_columns() {
+        let column = ColumnDef {
+            name: "code".to_string(),
+            data_type: "varchar".to_string(),
+            length: "10".to_string(),
+            nullable: true,
+            collation: "Latin1_General_CI_AS".to_string(),
+            sparse: true,
+            ..ColumnDef::default()
+        };
+        assert_eq!(
+            column_definition(&column),
+            "[code] varchar(10) COLLATE Latin1_General_CI_AS SPARSE"
+        );
+    }
+
+    #[test]
+    fn renders_computed_columns() {
+        let column = ColumnDef {
+            name: "total".to_string(),
+            generated: "[qty] * [price]".to_string(),
+            ..ColumnDef::default()
+        };
+        assert_eq!(column_definition(&column), "[total] AS ([qty] * [price])");
+    }
+
+    #[test]
+    fn renders_index_columns_with_their_own_sort_order() {
+        let index = IndexDef {
+            name: "ix_code".to_string(),
+            columns: vec![
+                IndexColumnDef {
+                    name: "code".to_string(),
+                    descending: true,
+                    prefix_length: String::new(),
+                },
+                IndexColumnDef::new("id"),
+            ],
+            unique: true,
+            primary: false,
+            index_type: "NONCLUSTERED".to_string(),
+            comment: String::new(),
+        };
+        assert_eq!(
+            create_index_statements("dbo.[t]", &[index]),
+            vec!["CREATE UNIQUE INDEX [ix_code] ON dbo.[t] ([code] DESC, [id])".to_string()]
+        );
     }
 }

@@ -4,10 +4,10 @@ use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
     DriverId, Error, FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef,
-    IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog,
-    QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind, RowInsert,
-    RowUpdate, ScriptSession, TableInfo, TableOptions, TablePage, TableSchema, TableStatus,
-    TriggerDef, UserAccount, UserDetails, UserEdit, ViewDetails, ViewEdit,
+    IndexColumnDef, IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest,
+    PrivilegeCatalog, QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind,
+    RowInsert, RowUpdate, ScriptSession, TableInfo, TableOptions, TablePage, TableSchema,
+    TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit, ViewDetails, ViewEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, ValueRef};
@@ -967,6 +967,7 @@ impl Connection for MysqlConnection {
                 auto_increment: extra_lower.contains("auto_increment"),
                 unsigned: column_type_lower.contains("unsigned"),
                 zerofill: column_type_lower.contains("zerofill"),
+                sparse: false,
                 comment,
                 charset: charset.unwrap_or_default(),
                 collation: collation.unwrap_or_default(),
@@ -977,7 +978,7 @@ impl Connection for MysqlConnection {
         }
 
         let index_rows = sqlx::query(
-            "SELECT index_name, non_unique, index_type, column_name, comment \
+            "SELECT index_name, non_unique, index_type, column_name, comment, collation, sub_part \
              FROM information_schema.statistics \
              WHERE table_schema = ? AND table_name = ? \
              ORDER BY index_name, seq_in_index",
@@ -995,14 +996,26 @@ impl Connection for MysqlConnection {
             let index_type: String = row.try_get(2).unwrap_or_default();
             let column: Option<String> = row.try_get(3).unwrap_or(None);
             let comment: String = row.try_get(4).unwrap_or_default();
+            // `collation` is `A`/`D`/NULL (binary or unsorted); `sub_part` is the prefix length.
+            let collation: Option<String> = row.try_get(5).unwrap_or(None);
+            let sub_part: Option<i64> = row.try_get(6).unwrap_or(None);
+            let index_column = column.map(|name| IndexColumnDef {
+                name,
+                descending: collation
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("D")),
+                prefix_length: sub_part
+                    .map(|length| length.to_string())
+                    .unwrap_or_default(),
+            });
             if let Some(existing) = indexes.iter_mut().find(|index| index.name == name) {
-                if let Some(column) = column {
+                if let Some(column) = index_column {
                     existing.columns.push(column);
                 }
             } else {
                 indexes.push(IndexDef {
                     name: name.clone(),
-                    columns: column.into_iter().collect(),
+                    columns: index_column.into_iter().collect(),
                     unique: non_unique == 0,
                     primary: name.eq_ignore_ascii_case("PRIMARY"),
                     index_type,
@@ -1113,6 +1126,8 @@ impl Connection for MysqlConnection {
         Ok(TableSchema {
             columns,
             indexes,
+            unique_keys: Vec::new(),
+            checks: Vec::new(),
             foreign_keys,
             triggers,
             options,
@@ -1580,11 +1595,27 @@ fn column_sql(column: &ColumnDef) -> String {
     sql
 }
 
+/// One column of an index with MySQL's per-column options: a prefix length (子部分) and/or a
+/// descending sort.
+pub(crate) fn index_column_sql(column: &IndexColumnDef) -> String {
+    let mut sql = quote_identifier(&column.name);
+    let prefix = column.prefix_length.trim();
+    if !prefix.is_empty() {
+        sql.push('(');
+        sql.push_str(prefix);
+        sql.push(')');
+    }
+    if column.descending {
+        sql.push_str(" DESC");
+    }
+    sql
+}
+
 fn index_sql(index: &IndexDef) -> String {
     let columns = index
         .columns
         .iter()
-        .map(|column| quote_identifier(column))
+        .map(index_column_sql)
         .collect::<Vec<_>>()
         .join(", ");
     if index.primary {
@@ -2412,13 +2443,36 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
 #[cfg(test)]
 mod tests {
     use super::{
-        column_sql, filter_clause, format_default, order_clause, returns_result_set, schema_sql,
-        split_statements,
+        column_sql, filter_clause, format_default, index_sql, order_clause, returns_result_set,
+        schema_sql, split_statements,
     };
     use rustgrid_core::{
         ColumnDef, FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator,
-        PageRequest, SortColumn, TableSchema,
+        IndexColumnDef, IndexDef, PageRequest, SortColumn, TableSchema,
     };
+
+    #[test]
+    fn renders_index_columns_with_their_own_options() {
+        let index = IndexDef {
+            name: "idx_code".to_string(),
+            columns: vec![
+                IndexColumnDef {
+                    name: "code".to_string(),
+                    descending: true,
+                    prefix_length: "10".to_string(),
+                },
+                IndexColumnDef::new("id"),
+            ],
+            unique: true,
+            primary: false,
+            index_type: "BTREE".to_string(),
+            comment: String::new(),
+        };
+        assert_eq!(
+            index_sql(&index),
+            "UNIQUE INDEX `idx_code` (`code`(10) DESC, `id`)"
+        );
+    }
 
     #[test]
     fn renders_column_definitions() {

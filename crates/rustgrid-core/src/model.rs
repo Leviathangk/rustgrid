@@ -479,6 +479,8 @@ pub struct ColumnDef {
     pub auto_increment: bool,
     pub unsigned: bool,
     pub zerofill: bool,
+    /// Whether the column is `SPARSE` (SQL Server; ignored elsewhere).
+    pub sparse: bool,
     pub comment: String,
     pub charset: String,
     pub collation: String,
@@ -490,16 +492,72 @@ pub struct ColumnDef {
     pub stored: bool,
 }
 
+/// One column of an index.
+///
+/// B-tree engines let each column of an index sort its own way (`DESC`), and MySQL/MariaDB can
+/// index only a prefix of a long column (Navicat's 子部分).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IndexColumnDef {
+    pub name: String,
+    /// `true` for a descending sort (`DESC`); the default `ASC` is `false`.
+    pub descending: bool,
+    /// MySQL/MariaDB's prefix length, empty when the whole column is indexed.
+    pub prefix_length: String,
+}
+
+impl IndexColumnDef {
+    /// The column with the engine's default options: ascending, whole column.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The column as the designer and the DDL show it: `CODE(10) DESC`.
+    pub fn display(&self) -> String {
+        let mut text = self.name.clone();
+        let prefix = self.prefix_length.trim();
+        if !prefix.is_empty() {
+            text.push('(');
+            text.push_str(prefix);
+            text.push(')');
+        }
+        if self.descending {
+            text.push_str(" DESC");
+        }
+        text
+    }
+}
+
 /// One index of a table.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IndexDef {
     pub name: String,
-    pub columns: Vec<String>,
+    pub columns: Vec<IndexColumnDef>,
     pub unique: bool,
     pub primary: bool,
     /// `BTREE`, `HASH`, `FULLTEXT` or `SPATIAL`.
     pub index_type: String,
     pub comment: String,
+}
+
+/// One unique constraint of a table.
+///
+/// Engines differ in how they model uniqueness: MySQL reports a unique index (see [`IndexDef`]),
+/// while SQL Server keeps `UNIQUE` constraints apart from indexes, which is what this carries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UniqueKeyDef {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
+/// One check constraint of a table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CheckDef {
+    pub name: String,
+    /// The constraint's expression, exactly as it should appear inside `CHECK (...)`.
+    pub expression: String,
 }
 
 /// One foreign key constraint of a table.
@@ -542,6 +600,8 @@ pub struct TableOptions {
 pub struct TableSchema {
     pub columns: Vec<ColumnDef>,
     pub indexes: Vec<IndexDef>,
+    pub unique_keys: Vec<UniqueKeyDef>,
+    pub checks: Vec<CheckDef>,
     pub foreign_keys: Vec<ForeignKeyDef>,
     pub triggers: Vec<TriggerDef>,
     pub options: TableOptions,

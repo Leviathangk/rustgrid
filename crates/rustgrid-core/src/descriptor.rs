@@ -238,6 +238,351 @@ impl Default for ConnectionFormSpec {
     }
 }
 
+/// One sub-tab of the table designer.
+///
+/// The vocabulary is engine-agnostic: a driver declares which tabs it shows (see
+/// [`TableDesignerSpec`]), so the designer never matches on an engine id. A tab an engine does not
+/// list is not rendered at all — a tab it lists but has no data for simply shows its empty grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DesignerTab {
+    /// The table's columns.
+    Fields,
+    /// Secondary indexes.
+    Indexes,
+    /// Foreign-key constraints.
+    ForeignKeys,
+    /// Unique constraints (SQL Server keeps these apart from plain indexes).
+    UniqueKeys,
+    /// Check constraints.
+    Checks,
+    /// Triggers.
+    Triggers,
+    /// Table-level storage options.
+    Options,
+    /// The table's comment.
+    Comment,
+    /// The statement Save would run.
+    Sql,
+}
+
+impl DesignerTab {
+    /// Every tab, in the designer's default order.
+    pub const ALL: [DesignerTab; 9] = [
+        DesignerTab::Fields,
+        DesignerTab::Indexes,
+        DesignerTab::ForeignKeys,
+        DesignerTab::UniqueKeys,
+        DesignerTab::Checks,
+        DesignerTab::Triggers,
+        DesignerTab::Options,
+        DesignerTab::Comment,
+        DesignerTab::Sql,
+    ];
+
+    /// i18n key of the tab's label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            DesignerTab::Fields => "design.tab.fields",
+            DesignerTab::Indexes => "design.tab.indexes",
+            DesignerTab::ForeignKeys => "design.tab.foreign_keys",
+            DesignerTab::UniqueKeys => "design.tab.unique_keys",
+            DesignerTab::Checks => "design.tab.checks",
+            DesignerTab::Triggers => "design.tab.triggers",
+            DesignerTab::Options => "design.tab.options",
+            DesignerTab::Comment => "design.tab.comment",
+            DesignerTab::Sql => "design.tab.sql",
+        }
+    }
+
+    /// A stable id fragment for the tab's element id.
+    pub fn id(self) -> &'static str {
+        match self {
+            DesignerTab::Fields => "design-tab-fields",
+            DesignerTab::Indexes => "design-tab-indexes",
+            DesignerTab::ForeignKeys => "design-tab-foreign-keys",
+            DesignerTab::UniqueKeys => "design-tab-unique-keys",
+            DesignerTab::Checks => "design-tab-checks",
+            DesignerTab::Triggers => "design-tab-triggers",
+            DesignerTab::Options => "design-tab-options",
+            DesignerTab::Comment => "design-tab-comment",
+            DesignerTab::Sql => "design-tab-sql",
+        }
+    }
+}
+
+/// One control of the designer's per-column detail panel (the strip under the field list), which
+/// describes the selected column.
+///
+/// The controls are one shared vocabulary: an engine lists the ones it has, in the order it wants
+/// them. MySQL/MariaDB declare 自动递增 / 无符号 / 填充零; SQL Server declares 排序规则 / 稀疏; an
+/// engine that has none of them still always gets 默认.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DesignerColumnOption {
+    /// The column's default value. A text field, and the one control every engine shows.
+    Default,
+    /// Auto-increment (MySQL) / identity (SQL Server, Oracle, PostgreSQL).
+    AutoIncrement,
+    /// Unsigned integer columns (MySQL/MariaDB).
+    Unsigned,
+    /// Zerofill (MySQL/MariaDB).
+    Zerofill,
+    /// The column's own collation, picked from the engine's list.
+    Collation,
+    /// Sparse columns (SQL Server).
+    Sparse,
+}
+
+impl DesignerColumnOption {
+    /// Whether the control is a check box; the rest ([`Default`](Self::Default) and
+    /// [`Collation`](Self::Collation)) are editors.
+    pub fn is_toggle(self) -> bool {
+        match self {
+            DesignerColumnOption::Default | DesignerColumnOption::Collation => false,
+            DesignerColumnOption::AutoIncrement
+            | DesignerColumnOption::Unsigned
+            | DesignerColumnOption::Zerofill
+            | DesignerColumnOption::Sparse => true,
+        }
+    }
+
+    /// i18n key of the control's label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            DesignerColumnOption::Default => "design.default",
+            DesignerColumnOption::AutoIncrement => "design.auto_increment",
+            DesignerColumnOption::Unsigned => "design.unsigned",
+            DesignerColumnOption::Zerofill => "design.fill_zero",
+            DesignerColumnOption::Collation => "design.collation",
+            DesignerColumnOption::Sparse => "design.sparse",
+        }
+    }
+}
+
+/// One column of the designer's field list, after the name and type cells every engine has.
+///
+/// The variants are one vocabulary of *cells* (not of columns): `Length` and `Size` are the same
+/// cell under the two engines' names, as are `Decimals`/`Scale` and `Generated`/`Computed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DesignerFieldColumn {
+    /// The display length (MySQL's 长度).
+    Length,
+    /// The display length under SQL Server's name (大小).
+    Size,
+    /// The decimal places (小数位).
+    Decimals,
+    /// The decimal places under SQL Server's name (比例).
+    Scale,
+    /// Whether the column is `NOT NULL`.
+    NotNull,
+    /// A generated-column expression (MySQL's 虚拟).
+    Generated,
+    /// A computed-column expression under SQL Server's name (计算列).
+    Computed,
+    /// Whether the column is part of the primary key.
+    Key,
+    /// The column's comment (备注).
+    Comment,
+    /// The column's collation.
+    Collation,
+    /// Whether the column is sparse.
+    Sparse,
+}
+
+impl DesignerFieldColumn {
+    /// i18n key of the cell's header label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            DesignerFieldColumn::Length => "design.col.length",
+            DesignerFieldColumn::Size => "design.col.size",
+            DesignerFieldColumn::Decimals => "design.col.decimals",
+            DesignerFieldColumn::Scale => "design.col.scale",
+            DesignerFieldColumn::NotNull => "design.col.not_null",
+            DesignerFieldColumn::Generated => "design.col.virtual",
+            DesignerFieldColumn::Computed => "design.col.computed",
+            DesignerFieldColumn::Key => "design.col.key",
+            DesignerFieldColumn::Comment => "design.col.comment",
+            DesignerFieldColumn::Collation => "design.col.collation",
+            DesignerFieldColumn::Sparse => "design.col.sparse",
+        }
+    }
+}
+
+/// One row of the designer's Options tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DesignerOptionField {
+    /// The storage engine (MySQL/MariaDB).
+    Engine,
+    /// The table's character set.
+    Charset,
+    /// The table's collation.
+    Collation,
+    /// The next auto-increment value.
+    AutoIncrement,
+    /// The table's comment.
+    Comment,
+}
+
+impl DesignerOptionField {
+    /// i18n key of the row's label.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            DesignerOptionField::Engine => "design.options.engine",
+            DesignerOptionField::Charset => "design.options.charset",
+            DesignerOptionField::Collation => "design.options.collation",
+            DesignerOptionField::AutoIncrement => "design.options.auto_increment",
+            DesignerOptionField::Comment => "design.comment_label",
+        }
+    }
+}
+
+/// Which columns an engine accepts an auto-increment (identity) on.
+///
+/// Every engine that has one restricts it — SQL Server and Oracle allow a single identity column per
+/// table and only on a numeric type, MySQL's `AUTO_INCREMENT` must be an integer column, SQLite's
+/// `AUTOINCREMENT` only exists on `INTEGER PRIMARY KEY` — so the designer asks this before offering
+/// the control instead of showing it on every column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoIncrementRule {
+    /// The base types the engine accepts, compared case-insensitively against the column's type with
+    /// any `(…)` qualifier removed. An empty list accepts any type.
+    pub types: Vec<&'static str>,
+    /// Whether the engine allows at most one auto-increment column per table.
+    pub one_per_table: bool,
+    /// Whether an auto-increment can be added to (or removed from) a column the table already has.
+    /// SQL Server cannot: `IDENTITY` is only accepted on a new column, so the designer offers the
+    /// control on a freshly added column or a new table and shows it read-only otherwise.
+    pub change_existing: bool,
+}
+
+impl Default for AutoIncrementRule {
+    /// An unrestricted engine: any type, one per table, changeable in place.
+    fn default() -> Self {
+        Self {
+            types: Vec::new(),
+            one_per_table: true,
+            change_existing: true,
+        }
+    }
+}
+
+impl AutoIncrementRule {
+    /// Whether a column of type `data_type` may carry the engine's auto-increment.
+    pub fn allows(&self, data_type: &str) -> bool {
+        if self.types.is_empty() {
+            return true;
+        }
+        let base = data_type
+            .trim()
+            .split('(')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        self.types.iter().any(|allowed| *allowed == base)
+    }
+}
+
+/// One per-column option an engine's indexes carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesignerIndexColumn {
+    /// The column's sort order (`ASC` / `DESC`); every B-tree engine has it.
+    Sort,
+    /// Index only a prefix of the column (MySQL/MariaDB's 子部分).
+    PrefixLength,
+}
+
+impl DesignerIndexColumn {
+    /// i18n key of the option's column header.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            DesignerIndexColumn::Sort => "design.index.column.sort",
+            DesignerIndexColumn::PrefixLength => "design.index.column.prefix",
+        }
+    }
+}
+
+/// How the table designer presents one engine's tables.
+///
+/// The designer is one view shared by every engine; this spec is what makes it engine-correct.
+/// The default is MySQL's shape (the designer's historical behavior), so a driver that does not
+/// opt in keeps working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDesignerSpec {
+    /// The sub-tabs shown, in order.
+    pub tabs: Vec<DesignerTab>,
+    /// The per-column detail controls shown, in order.
+    pub column_options: Vec<DesignerColumnOption>,
+    /// The field-list columns shown, after 列名 and 类型.
+    pub field_columns: Vec<DesignerFieldColumn>,
+    /// The rows shown by the Options tab, in order.
+    pub option_fields: Vec<DesignerOptionField>,
+    /// The per-column options the index field editor shows, in order.
+    pub index_columns: Vec<DesignerIndexColumn>,
+    /// Where the engine accepts an auto-increment (identity) column.
+    pub auto_increment: AutoIncrementRule,
+}
+
+impl TableDesignerSpec {
+    /// Every tab except the ones no engine but SQL Server has (唯一键 / 检查), which a driver adds
+    /// back when it has them. Handy for engines that keep 选项/注释 but take no column extras.
+    pub fn standard_tabs() -> Vec<DesignerTab> {
+        vec![
+            DesignerTab::Fields,
+            DesignerTab::Indexes,
+            DesignerTab::ForeignKeys,
+            DesignerTab::Triggers,
+            DesignerTab::Options,
+            DesignerTab::Comment,
+            DesignerTab::Sql,
+        ]
+    }
+}
+
+impl Default for TableDesignerSpec {
+    /// MySQL/MariaDB's shape: every tab, no unique-constraint or check-constraint tab (MySQL
+    /// reports those through 索引), MySQL's three column extras, and MySQL's field-list columns.
+    fn default() -> Self {
+        Self {
+            tabs: TableDesignerSpec::standard_tabs(),
+            column_options: vec![
+                DesignerColumnOption::Default,
+                DesignerColumnOption::AutoIncrement,
+                DesignerColumnOption::Unsigned,
+                DesignerColumnOption::Zerofill,
+            ],
+            field_columns: vec![
+                DesignerFieldColumn::Length,
+                DesignerFieldColumn::Decimals,
+                DesignerFieldColumn::NotNull,
+                DesignerFieldColumn::Generated,
+                DesignerFieldColumn::Key,
+                DesignerFieldColumn::Comment,
+            ],
+            option_fields: vec![
+                DesignerOptionField::Engine,
+                DesignerOptionField::Charset,
+                DesignerOptionField::Collation,
+                DesignerOptionField::AutoIncrement,
+                DesignerOptionField::Comment,
+            ],
+            // MySQL's `AUTO_INCREMENT` is a single integer column per table, changeable in place.
+            auto_increment: AutoIncrementRule {
+                types: vec![
+                    "tinyint",
+                    "smallint",
+                    "mediumint",
+                    "int",
+                    "integer",
+                    "bigint",
+                ],
+                ..AutoIncrementRule::default()
+            },
+            // MySQL indexes sort per column and can index a fixed prefix of one (子部分).
+            index_columns: vec![DesignerIndexColumn::Sort, DesignerIndexColumn::PrefixLength],
+        }
+    }
+}
+
 /// Presentation and capability metadata for one driver.
 #[derive(Debug, Clone)]
 pub struct DriverDescriptor {
@@ -259,6 +604,54 @@ pub struct DriverDescriptor {
     pub database_editor: DatabaseEditorSpec,
     /// Which extra fields the New/Edit Connection form shows for this engine.
     pub connection_form: ConnectionFormSpec,
+    /// How the table designer presents this engine's tables.
+    pub table_designer: TableDesignerSpec,
     /// Sort key for the New Connection menu (lower first); ties fall back to the display name.
     pub order: u16,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_increment_matches_the_type_without_its_qualifier() {
+        let rule = AutoIncrementRule {
+            types: vec!["int", "bigint"],
+            ..AutoIncrementRule::default()
+        };
+        assert!(rule.allows("int"));
+        assert!(rule.allows("INT"));
+        assert!(rule.allows(" int(11) "));
+        assert!(rule.allows("bigint"));
+        assert!(!rule.allows("nvarchar"));
+        assert!(!rule.allows("decimal(10,2)"));
+    }
+
+    #[test]
+    fn an_engine_without_a_type_list_accepts_any_column() {
+        // The default is unrestricted in type, one per table, and changeable in place.
+        let rule = AutoIncrementRule::default();
+        assert!(rule.allows("nvarchar"));
+        assert!(rule.one_per_table);
+        assert!(rule.change_existing);
+    }
+
+    #[test]
+    fn the_default_designer_offers_mysqls_shape() {
+        let spec = TableDesignerSpec::default();
+        assert!(spec.tabs.contains(&DesignerTab::Fields));
+        assert!(!spec.tabs.contains(&DesignerTab::UniqueKeys));
+        assert!(
+            spec.column_options
+                .contains(&DesignerColumnOption::Unsigned)
+        );
+        assert!(
+            spec.column_options
+                .contains(&DesignerColumnOption::Zerofill)
+        );
+        assert!(!spec.column_options.contains(&DesignerColumnOption::Sparse));
+        assert!(spec.auto_increment.allows("int"));
+        assert!(!spec.auto_increment.allows("varchar"));
+    }
 }

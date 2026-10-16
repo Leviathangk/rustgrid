@@ -2,9 +2,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    AdvancedFields, Connection, ConnectionConfig, ConnectionFieldLabel, ConnectionFormSpec,
-    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, Driver,
-    DriverCapabilities, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldLabel,
+    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
+    DatabaseEditorSpec, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
+    DesignerTab, Driver, DriverCapabilities, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Error, Result, TableDesignerSpec,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -57,6 +59,35 @@ impl Driver for SqliteDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
+            // SQLite keeps no table options and no table comment, and its designer DDL emits no
+            // per-column collation, so those tabs and controls are left off rather than shown dead.
+            table_designer: TableDesignerSpec {
+                tabs: vec![
+                    DesignerTab::Fields,
+                    DesignerTab::Indexes,
+                    DesignerTab::ForeignKeys,
+                    DesignerTab::Triggers,
+                    DesignerTab::Sql,
+                ],
+                column_options: vec![
+                    DesignerColumnOption::Default,
+                    DesignerColumnOption::AutoIncrement,
+                ],
+                field_columns: vec![
+                    DesignerFieldColumn::Length,
+                    DesignerFieldColumn::NotNull,
+                    DesignerFieldColumn::Generated,
+                    DesignerFieldColumn::Key,
+                ],
+                option_fields: Vec::new(),
+                // `AUTOINCREMENT` only exists on an `INTEGER PRIMARY KEY`.
+                auto_increment: AutoIncrementRule {
+                    types: vec!["integer"],
+                    ..AutoIncrementRule::default()
+                },
+                // SQLite indexes sort per column; there is no prefix length.
+                index_columns: vec![DesignerIndexColumn::Sort],
+            },
             id: DriverId::new("sqlite"),
             display_name: "SQLite".to_string(),
             default_port: 0,

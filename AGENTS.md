@@ -256,6 +256,44 @@ touching UI code.
   window title (`新建/编辑连接 · <engine>`) already names it. The generic ODBC driver is the one that
   keeps the plain form (`home: Odbc`) and declares no TLS/tunnel/advanced pages (it reads none of
   them).
+- **Per-engine table design.** `DriverDescriptor::table_designer` (`TableDesignerSpec`) is the whole
+  designer spec, read from the driver through the registry (`AppView::table_designer`) — never by
+  matching on an engine id. `tabs` lists the sub-tabs (`DesignerTab`) in order, `column_options` the
+  per-column controls of the detail panel under the field list (`DesignerColumnOption` — `Default`
+  and `Collation` are editors, the rest are check boxes), `field_columns` the field-list cells after
+  列名/类型 (`DesignerFieldColumn`, where `Length`/`Size`, `Decimals`/`Scale` and
+  `Generated`/`Computed` are the same cells under different names) and `option_fields` the rows of
+  the 选项 page (`DesignerOptionField`). The default is MySQL's shape, so an engine opts in by
+  declaring its own, and only a control the engine's designer SQL actually honors is listed, so no
+  driver shows a dead knob. MySQL/MariaDB keep 自动递增/无符号/填充零 and every tab; SQL Server
+  declares 排序规则/稀疏, 大小/比例/计算列, and the extra 唯一键/检查 tabs; SQLite has no 选项/注释
+  (it has neither) and Oracle no 选项, while PostgreSQL's 选项 keeps only 注释. The character-set /
+  collation catalogues are queried only when the spec shows a control fed by them
+  (`TableDesignView::needs_option_catalogs`). `ColumnDef` carries the per-column attributes
+  (`sparse`) and `TableSchema` the SQL Server-only constraint lists (`unique_keys`, `checks`), so a
+  driver fills in only what its engine has and the two extra grids stay empty elsewhere. Every
+  designer grid renders through `TableDesignView::render_grid_scaffold`, which also owns the grids'
+  wheel handling: a `uniform_list` registers **no** wheel handler of its own (unlike gpui's `list`),
+  so — exactly as the table grid does — a capture-phase `canvas` hitbox picks the gesture up and the
+  wheel moves the selected row one step and brings it into view through `scroll_to_item` (the only
+  scrolling a uniform list performs), a horizontal gesture pans the columns, and a gesture aimed at
+  an overlay above the grid is left to it (`should_handle_scroll`). Never write the list's scroll
+  offset directly: the row extent is computed from the row count (`design_scroll_extent`) because
+  `ScrollHandle::max_offset` is not the list's own extent. Where an auto-increment may sit comes from
+  the same spec (`TableDesignerSpec::auto_increment`, an `AutoIncrementRule`): the field details
+  panel leaves the control out on a type the engine does not accept and moves the flag off whichever
+  column had it, and `change_existing: false` (SQL Server, whose `ALTER COLUMN` cannot add an
+  `IDENTITY`) restricts editing to a newly added column or a new table. A grid cell that holds a
+  *list* of columns is a drop-down built on `design_picker_cell`: the whole cell is the trigger (no
+  "..." button), it opens flush under the row you clicked (each row records its own anchor in
+  `DesignPickerAnchors`, a map keyed by row — a single shared anchor would open the list under
+  whichever row painted last). The 索引 cell opens `IndexFieldsDraft`, an editor panel whose rows
+  carry the engine's per-column options (`TableDesignerSpec::index_columns`: `Sort` everywhere,
+  `PrefixLength` for MySQL/MariaDB) and which owns its per-row controls
+  (`index_field_combos` / `index_field_prefix_inputs`, rebuilt on every structural change); every
+  edit stays on the draft until 确定 and 取消 / a click outside discards it. The 主键 row opens the
+  same editor and its draft edits the columns' 主键 flags (the model keeps the key on the columns, so
+  that draft carries no options). The 外键 / 唯一键 cells keep the check-box list.
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
   `crates/rustgrid-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.
@@ -832,7 +870,10 @@ make more engines cheap later — do not build those features early.
   `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc`, `CC=gcc` (MinGW-w64 `gcc` is on `PATH`).
   A plain `cargo build` fails with `linker link.exe not found`. With the GNU toolchain the
   host *is* the GNU target, so the binary lands at `target/debug/RustGrid.exe` (not under a
-  triple-named subdirectory).
+  triple-named subdirectory). The gitignored `.cargo/config.toml` also carries this machine's
+  settings (see "Commands"): `[build] jobs = 4` caps Cargo's parallelism — one job per core (12
+  here) froze the machine — and `[env] GPUI_FXC_PATH` points at the release-build shader shim. A
+  command line `-j N` still overrides the cap.
 - Keep GPUI usage close to the shapes verified in `main.rs` and the `ui/` wrappers.
   `main.rs` opens the window as `gpui_kit::application().with_assets(Assets).run(|cx| { gpui_kit::init(cx); … })`
   and wraps the app view in `Root::new(view, window, cx)` — `Root` must be the window root or

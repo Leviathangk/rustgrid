@@ -3,7 +3,11 @@ use super::*;
 use std::collections::BTreeSet;
 
 use gpui_kit::component::Size;
-use rustgrid_core::{ColumnDef, ForeignKeyDef, IndexDef, TableSchema};
+use rustgrid_core::{
+    CheckDef, ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
+    DesignerOptionField, DesignerTab, ForeignKeyDef, IndexColumnDef, IndexDef, TableDesignerSpec,
+    TableSchema, UniqueKeyDef,
+};
 
 /// A row of the field grid, shared by the header and every row.
 pub(super) const DESIGN_ROW_HEIGHT: f32 = 24.0;
@@ -17,7 +21,17 @@ pub(super) const FIELD_NOTNULL_WIDTH: f32 = 70.0;
 pub(super) const FIELD_VIRTUAL_WIDTH: f32 = 65.0;
 pub(super) const FIELD_KEY_WIDTH: f32 = 100.0;
 pub(super) const FIELD_COMMENT_WIDTH: f32 = 200.0;
+pub(super) const FIELD_COLLATION_WIDTH: f32 = 150.0;
+pub(super) const FIELD_SPARSE_WIDTH: f32 = 60.0;
 pub(super) const DESIGN_DETAIL_HEIGHT: f32 = 152.0;
+
+// The unique-key grid's columns.
+pub(super) const UQ_NAME_WIDTH: f32 = 240.0;
+pub(super) const UQ_FIELDS_WIDTH: f32 = 420.0;
+
+// The check-constraint grid's columns.
+pub(super) const CHECK_NAME_WIDTH: f32 = 240.0;
+pub(super) const CHECK_EXPRESSION_WIDTH: f32 = 520.0;
 
 // The index grid's columns.
 pub(super) const INDEX_NAME_WIDTH: f32 = 200.0;
@@ -25,6 +39,10 @@ pub(super) const INDEX_FIELDS_WIDTH: f32 = 340.0;
 pub(super) const INDEX_KIND_WIDTH: f32 = 130.0;
 pub(super) const INDEX_METHOD_WIDTH: f32 = 120.0;
 pub(super) const INDEX_COMMENT_WIDTH: f32 = 240.0;
+
+// The index field editor's per-row controls.
+pub(super) const INDEX_FIELD_NAME_WIDTH: f32 = 200.0;
+pub(super) const INDEX_FIELD_OPTION_WIDTH: f32 = 70.0;
 
 // The foreign-key grid's columns.
 pub(super) const FK_NAME_WIDTH: f32 = 180.0;
@@ -35,53 +53,8 @@ pub(super) const FK_REF_COLUMNS_WIDTH: f32 = 200.0;
 pub(super) const FK_DELETE_WIDTH: f32 = 120.0;
 pub(super) const FK_UPDATE_WIDTH: f32 = 120.0;
 
-/// The sub-tabs of the table designer.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum DesignTab {
-    Fields,
-    Indexes,
-    ForeignKeys,
-    Triggers,
-    Options,
-    Comment,
-    Sql,
-}
-
-impl DesignTab {
-    pub(super) const ALL: [DesignTab; 7] = [
-        DesignTab::Fields,
-        DesignTab::Indexes,
-        DesignTab::ForeignKeys,
-        DesignTab::Triggers,
-        DesignTab::Options,
-        DesignTab::Comment,
-        DesignTab::Sql,
-    ];
-
-    pub(super) fn label_key(self) -> &'static str {
-        match self {
-            DesignTab::Fields => "design.tab.fields",
-            DesignTab::Indexes => "design.tab.indexes",
-            DesignTab::ForeignKeys => "design.tab.foreign_keys",
-            DesignTab::Triggers => "design.tab.triggers",
-            DesignTab::Options => "design.tab.options",
-            DesignTab::Comment => "design.tab.comment",
-            DesignTab::Sql => "design.tab.sql",
-        }
-    }
-
-    pub(super) fn id(self) -> &'static str {
-        match self {
-            DesignTab::Fields => "design-tab-fields",
-            DesignTab::Indexes => "design-tab-indexes",
-            DesignTab::ForeignKeys => "design-tab-foreign-keys",
-            DesignTab::Triggers => "design-tab-triggers",
-            DesignTab::Options => "design-tab-options",
-            DesignTab::Comment => "design-tab-comment",
-            DesignTab::Sql => "design-tab-sql",
-        }
-    }
-}
+// The sub-tabs of the table designer are [`rustgrid_core::DesignerTab`]: which of them an engine
+// shows comes from its [`TableDesignerSpec`], so nothing here matches on an engine id.
 
 /// The editable text columns of the field grid.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,6 +65,64 @@ pub(super) enum FieldColumn {
     Comment,
 }
 
+/// The width of one engine-declared field-list column. The variants that describe the same cell
+/// under different engines share their width.
+pub(super) fn field_column_width(kind: DesignerFieldColumn) -> f32 {
+    match kind {
+        DesignerFieldColumn::Length | DesignerFieldColumn::Size => FIELD_LENGTH_WIDTH,
+        DesignerFieldColumn::Decimals | DesignerFieldColumn::Scale => FIELD_DECIMALS_WIDTH,
+        DesignerFieldColumn::NotNull => FIELD_NOTNULL_WIDTH,
+        DesignerFieldColumn::Generated | DesignerFieldColumn::Computed => FIELD_VIRTUAL_WIDTH,
+        DesignerFieldColumn::Key => FIELD_KEY_WIDTH,
+        DesignerFieldColumn::Comment => FIELD_COMMENT_WIDTH,
+        DesignerFieldColumn::Collation => FIELD_COLLATION_WIDTH,
+        DesignerFieldColumn::Sparse => FIELD_SPARSE_WIDTH,
+    }
+}
+
+/// A stable id fragment for one field-list column, used to keep every cell's element id unique.
+pub(super) fn field_column_id(kind: DesignerFieldColumn) -> &'static str {
+    match kind {
+        DesignerFieldColumn::Length | DesignerFieldColumn::Size => "size",
+        DesignerFieldColumn::Decimals | DesignerFieldColumn::Scale => "scale",
+        DesignerFieldColumn::NotNull => "notnull",
+        DesignerFieldColumn::Generated | DesignerFieldColumn::Computed => "computed",
+        DesignerFieldColumn::Key => "key",
+        DesignerFieldColumn::Comment => "comment",
+        DesignerFieldColumn::Collation => "collation",
+        DesignerFieldColumn::Sparse => "sparse",
+    }
+}
+
+/// The text cell a [`DesignerFieldColumn`] edits, or `None` when the cell is a toggle or a
+/// read-only display.
+pub(super) fn field_column_text(kind: DesignerFieldColumn) -> Option<FieldColumn> {
+    match kind {
+        DesignerFieldColumn::Length | DesignerFieldColumn::Size => Some(FieldColumn::Length),
+        DesignerFieldColumn::Decimals | DesignerFieldColumn::Scale => Some(FieldColumn::Decimals),
+        DesignerFieldColumn::Comment => Some(FieldColumn::Comment),
+        _ => None,
+    }
+}
+
+/// The text one editable [`FieldColumn`] cell shows for a column definition.
+pub(super) fn field_column_value(column: &ColumnDef, text: FieldColumn) -> String {
+    match text {
+        FieldColumn::Name => column.name.clone(),
+        FieldColumn::Length => column.length.clone(),
+        FieldColumn::Decimals => column.decimals.clone(),
+        FieldColumn::Comment => column.comment.clone(),
+    }
+}
+
+/// The value a read-only [`DesignerFieldColumn`] shows for one column.
+pub(super) fn field_column_display(kind: DesignerFieldColumn, column: &ColumnDef) -> String {
+    match kind {
+        DesignerFieldColumn::Collation => column.collation.clone(),
+        _ => String::new(),
+    }
+}
+
 /// The auxiliary inputs owned by a designer, identified by their callback tag.
 #[derive(Clone, Copy)]
 enum InputTag {
@@ -99,14 +130,46 @@ enum InputTag {
     Engine,
     Charset,
     Collation,
+    /// The selected column's own collation (the detail panel's 排序规则 control).
+    ColumnCollation,
     AutoIncrement,
     Comment,
+    /// One draft row's 子部分 (index prefix length) in the index field editor.
+    IndexPrefix(usize),
 }
 
 /// A live in-place editor over one cell of the field grid.
 pub(super) struct FieldEdit {
     pub(super) row: usize,
     pub(super) column: FieldColumn,
+    pub(super) input: Entity<TextInput>,
+}
+
+/// The editable text columns of the unique-key grid. Its field list is picked through the same
+/// "..." popup the index grid uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum UniqueKeyColumn {
+    Name,
+}
+
+/// A live in-place editor over one text cell of the unique-key grid.
+pub(super) struct UniqueKeyEdit {
+    pub(super) row: usize,
+    pub(super) column: UniqueKeyColumn,
+    pub(super) input: Entity<TextInput>,
+}
+
+/// The editable text columns of the check-constraint grid.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CheckColumn {
+    Name,
+    Expression,
+}
+
+/// A live in-place editor over one text cell of the check-constraint grid.
+pub(super) struct CheckEdit {
+    pub(super) row: usize,
+    pub(super) column: CheckColumn,
     pub(super) input: Entity<TextInput>,
 }
 
@@ -156,7 +219,25 @@ fn apply_row_selection(
     }
 }
 
-/// The editable text columns of the index grid.
+/// The index field editor's open draft.
+///
+/// Every edit (name, 排序, 子部分, order, add/remove) lands here and only 确定 installs it; 取消 or a
+/// click outside discards it, exactly as Navicat's editor does. A draft for the primary key row edits
+/// the columns' 主键 flags instead — the model keeps that key on the columns, so its rows carry no
+/// per-column options.
+#[derive(Clone)]
+pub(super) struct IndexFieldsDraft {
+    /// The index row being edited.
+    pub(super) row: usize,
+    /// Whether this is the 主键 row.
+    pub(super) primary: bool,
+    /// The chosen columns, in index order.
+    pub(super) columns: Vec<IndexColumnDef>,
+    /// The row the footer's ↑ ↓ − act on.
+    pub(super) selected: Option<usize>,
+}
+
+/// The text editor columns of the index grid.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum IndexColumn {
     Name,
@@ -246,6 +327,21 @@ fn toggle_list(list: &mut Vec<String>, value: &str) {
     }
 }
 
+/// `base`, or `base_1` / `base_2` / ... — the first name `taken` does not already use.
+fn unique_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    let mut counter = 1;
+    loop {
+        let candidate = format!("{base}_{counter}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 /// A live in-place editor over one text cell of the index grid.
 pub(super) struct IndexEdit {
     pub(super) row: usize,
@@ -267,15 +363,13 @@ pub(super) enum FkComboField {
     OnUpdate,
 }
 
-/// Which picker of a foreign-key row is open: the child columns or the referenced columns.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum FkPicker {
-    Columns,
-    Referenced,
-}
-
 /// Per-(row, dropdown) prepaint anchors for the foreign-key grid's dropdown cells.
 pub(super) type FkComboAnchors = Rc<RefCell<BTreeMap<(usize, FkComboField), Point<Pixels>>>>;
+
+/// Each row's field drop-down anchor (the bottom-left of its field cell) in window coordinates,
+/// keyed by row. A single shared anchor cannot work here: every visible row prepaints and would
+/// overwrite it, so the list would open under whichever row happened to paint last.
+pub(super) type DesignPickerAnchors = Rc<RefCell<BTreeMap<usize, Point<Pixels>>>>;
 
 /// Referential actions offered by the foreign-key dropdowns; the empty string means the engine
 /// default (`RESTRICT`).
@@ -303,10 +397,14 @@ pub(super) struct TableDesignView {
     /// True while designing a brand-new table that has not been created yet; the table name is
     /// requested on the first save.
     pub(super) is_new: bool,
+    /// How this engine's designer is shaped: which sub-tabs, per-column controls, field-list
+    /// columns and table options it shows. Read from the connection's driver descriptor, so no
+    /// view code matches on an engine id.
+    pub(super) designer: TableDesignerSpec,
 
     pub(super) schema: TableSchema,
     pub(super) original: Option<TableSchema>,
-    pub(super) tab: DesignTab,
+    pub(super) tab: DesignerTab,
     pub(super) selected_field: Option<usize>,
     pub(super) selected_index: Option<usize>,
     /// Multi-row selections from each grid's left gutter.
@@ -318,9 +416,29 @@ pub(super) struct TableDesignView {
     /// Which index row's kind/method dropdown is open.
     pub(super) index_combo: Option<(usize, IndexComboField)>,
     pub(super) index_combo_anchor: IndexComboAnchors,
-    /// The "choose fields" popup for the selected index.
-    pub(super) index_fields_open: bool,
-    pub(super) index_fields_anchor: Rc<RefCell<Point<Pixels>>>,
+    /// The 字段 drop-down of the selected index, as a draft (see [`IndexFieldsDraft`]).
+    pub(super) index_fields_draft: Option<IndexFieldsDraft>,
+    pub(super) index_fields_anchor: DesignPickerAnchors,
+    /// The draft row whose field list is expanded (an inline list, not a floating menu: a menu would
+    /// render outside this panel's bounds and the panel's click-outside handler would close it).
+    pub(super) index_field_picker: Option<usize>,
+    /// The 子部分 input of each draft row, rebuilt whenever the draft's rows change (the wrapper
+    /// builds its inner state on the first render).
+    pub(super) index_field_prefix_inputs: BTreeMap<usize, Entity<TextInput>>,
+    /// The unique-key grid: its own selection, in-place name editor and field picker. An engine
+    /// only shows the tab when its [`TableDesignerSpec`] declares it.
+    pub(super) selected_unique_key: Option<usize>,
+    pub(super) unique_key_rows: RowSelection,
+    pub(super) unique_key_edit: Option<UniqueKeyEdit>,
+    unique_key_edit_blur: Option<Subscription>,
+    /// The unique-key row whose "choose fields" popup is open.
+    pub(super) unique_key_fields_row: Option<usize>,
+    pub(super) unique_key_fields_anchor: DesignPickerAnchors,
+    /// The check-constraint grid: selection and in-place name/expression editor.
+    pub(super) selected_check: Option<usize>,
+    pub(super) check_rows: RowSelection,
+    pub(super) check_edit: Option<CheckEdit>,
+    check_edit_blur: Option<Subscription>,
     pub(super) selected_fk: Option<usize>,
     pub(super) fk_edit: Option<FkEdit>,
     fk_edit_blur: Option<Subscription>,
@@ -329,9 +447,9 @@ pub(super) struct TableDesignView {
     pub(super) fk_combo_anchor: FkComboAnchors,
     /// The child-columns and referenced-columns pickers for the selected foreign key.
     pub(super) fk_fields_open: bool,
-    pub(super) fk_fields_anchor: Rc<RefCell<Point<Pixels>>>,
+    pub(super) fk_fields_anchor: DesignPickerAnchors,
     pub(super) fk_ref_open: bool,
-    pub(super) fk_ref_anchor: Rc<RefCell<Point<Pixels>>>,
+    pub(super) fk_ref_anchor: DesignPickerAnchors,
     /// Columns of the referenced table, loaded when its picker opens.
     pub(super) fk_ref_columns: Vec<String>,
 
@@ -362,6 +480,8 @@ pub(super) struct TableDesignView {
     pub(super) collations: Vec<String>,
     pub(super) auto_increment_input: Entity<TextInput>,
     pub(super) comment_input: Entity<TextInput>,
+    /// The detail panel's per-column 排序规则 picker (only shown by engines that declare it).
+    pub(super) column_collation_combo: Entity<ComboBox>,
 
     pub(super) hscroll: ScrollHandle,
     pub(super) hscroll_grab: Option<f32>,
@@ -424,6 +544,7 @@ impl TableDesignView {
         table: String,
         is_view: bool,
         is_new: bool,
+        designer: TableDesignerSpec,
         app: WeakEntity<AppView>,
         runtime: Arc<Runtime>,
         theme: Theme,
@@ -436,6 +557,8 @@ impl TableDesignView {
         let engine_combo = option_combo(theme, weak.clone(), InputTag::Engine, cx);
         let charset_combo = option_combo(theme, weak.clone(), InputTag::Charset, cx);
         let collation_combo = option_combo(theme, weak.clone(), InputTag::Collation, cx);
+        let column_collation_combo =
+            option_combo(theme, weak.clone(), InputTag::ColumnCollation, cx);
         let auto_increment_input = text_input(
             theme,
             String::new(),
@@ -456,9 +579,10 @@ impl TableDesignView {
             table,
             is_view,
             is_new,
+            designer,
             schema: TableSchema::default(),
             original: None,
-            tab: DesignTab::Fields,
+            tab: DesignerTab::Fields,
             selected_field: None,
             selected_index: None,
             field_rows: RowSelection::default(),
@@ -468,17 +592,29 @@ impl TableDesignView {
             index_edit_blur: None,
             index_combo: None,
             index_combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
-            index_fields_open: false,
-            index_fields_anchor: Rc::new(RefCell::new(Point::default())),
+            index_fields_draft: None,
+            index_fields_anchor: Rc::new(RefCell::new(BTreeMap::new())),
+            index_field_picker: None,
+            index_field_prefix_inputs: BTreeMap::new(),
+            selected_unique_key: None,
+            unique_key_rows: RowSelection::default(),
+            unique_key_edit: None,
+            unique_key_edit_blur: None,
+            unique_key_fields_row: None,
+            unique_key_fields_anchor: Rc::new(RefCell::new(BTreeMap::new())),
+            selected_check: None,
+            check_rows: RowSelection::default(),
+            check_edit: None,
+            check_edit_blur: None,
             selected_fk: None,
             fk_edit: None,
             fk_edit_blur: None,
             fk_combo: None,
             fk_combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             fk_fields_open: false,
-            fk_fields_anchor: Rc::new(RefCell::new(Point::default())),
+            fk_fields_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             fk_ref_open: false,
-            fk_ref_anchor: Rc::new(RefCell::new(Point::default())),
+            fk_ref_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             fk_ref_columns: Vec::new(),
             loading: false,
             saving: false,
@@ -495,6 +631,7 @@ impl TableDesignView {
             engine_combo,
             charset_combo,
             collation_combo,
+            column_collation_combo,
             engines,
             charsets: Vec::new(),
             collations: Vec::new(),
@@ -586,8 +723,20 @@ impl TableDesignView {
                 }
             }
             InputTag::Collation => self.schema.options.collation = text.to_string(),
+            InputTag::ColumnCollation => {
+                if let Some(index) = self.selected_field
+                    && let Some(column) = self.schema.columns.get_mut(index)
+                {
+                    column.collation = text.to_string();
+                }
+            }
             InputTag::AutoIncrement => self.schema.options.auto_increment = text.to_string(),
             InputTag::Comment => self.schema.options.comment = text.to_string(),
+            InputTag::IndexPrefix(row) => {
+                // The draft owns the value, so it does not go through `mark_dirty`: only 确定 does.
+                self.set_index_draft_prefix(row, text, cx);
+                return;
+            }
         }
         self.dirty = true;
         cx.notify();
@@ -602,6 +751,30 @@ impl TableDesignView {
             .unwrap_or_default();
         self.default_input
             .update(cx, |input, cx| input.set_text(default, cx));
+        // The detail panel's per-column collation picker follows the selected field.
+        if self
+            .designer
+            .column_options
+            .contains(&DesignerColumnOption::Collation)
+        {
+            let collation = self
+                .selected_field
+                .and_then(|index| self.schema.columns.get(index))
+                .map(|column| column.collation.clone())
+                .unwrap_or_default();
+            let enabled = self.selected_field.is_some();
+            let options: Vec<ComboOption> = self
+                .collations
+                .iter()
+                .cloned()
+                .map(ComboOption::plain)
+                .collect();
+            self.column_collation_combo.update(cx, |combo, cx| {
+                combo.set_options(options, cx);
+                combo.set_selected(collation, cx);
+                combo.set_enabled(enabled, cx);
+            });
+        }
     }
 
     fn sync_option_inputs(&mut self, cx: &mut Context<'_, Self>) {
@@ -709,12 +882,7 @@ impl TableDesignView {
         let Some(column_def) = self.schema.columns.get(row) else {
             return String::new();
         };
-        match column {
-            FieldColumn::Name => column_def.name.clone(),
-            FieldColumn::Length => column_def.length.clone(),
-            FieldColumn::Decimals => column_def.decimals.clone(),
-            FieldColumn::Comment => column_def.comment.clone(),
-        }
+        field_column_value(column_def, column)
     }
 
     fn set_field_value(
@@ -736,7 +904,7 @@ impl TableDesignView {
         cx.notify();
     }
 
-    fn select_field(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+    pub(super) fn select_field(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.selected_field = Some(index);
         self.field_rows.rows.clear();
         self.field_rows.rows.insert(index);
@@ -765,21 +933,33 @@ impl TableDesignView {
         cx.notify();
     }
 
-    pub(super) fn select_tab(&mut self, tab: DesignTab, cx: &mut Context<'_, Self>) {
-        self.tab = tab;
+    /// Drop every in-place editor and transient popup state of the designer. Scrolling and switching
+    /// tabs both end an edit this way (the text is already in the working copy).
+    pub(super) fn clear_editors(&mut self) {
         self.edit = None;
         self.edit_blur = None;
         self.type_combo = None;
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
-        self.index_fields_open = false;
+        self.index_fields_draft = None;
+        self.discard_index_field_inputs();
+        self.unique_key_edit = None;
+        self.unique_key_edit_blur = None;
+        self.unique_key_fields_row = None;
+        self.check_edit = None;
+        self.check_edit_blur = None;
         self.fk_edit = None;
         self.fk_edit_blur = None;
         self.fk_combo = None;
         self.fk_fields_open = false;
         self.fk_ref_open = false;
-        if matches!(tab, DesignTab::Options | DesignTab::Comment) {
+    }
+
+    pub(super) fn select_tab(&mut self, tab: DesignerTab, cx: &mut Context<'_, Self>) {
+        self.tab = tab;
+        self.clear_editors();
+        if matches!(tab, DesignerTab::Options | DesignerTab::Comment) {
             self.sync_option_inputs(cx);
         }
         cx.notify();
@@ -922,6 +1102,11 @@ impl TableDesignView {
     pub(super) fn select_type(&mut self, row: usize, data_type: &str, cx: &mut Context<'_, Self>) {
         if let Some(column) = self.schema.columns.get_mut(row) {
             column.data_type = data_type.to_string();
+            // A type that cannot carry the engine's auto-increment (SQL Server's `IDENTITY` is
+            // numeric-only) drops it, so the preview never emits an invalid column.
+            if column.auto_increment && !self.designer.auto_increment.allows(data_type) {
+                column.auto_increment = false;
+            }
         }
         self.type_combo = None;
         self.mark_dirty(cx);
@@ -934,10 +1119,30 @@ impl TableDesignView {
         self.mark_dirty(cx);
     }
 
+    /// Toggle the selected column's auto-increment (identity). Engines allow one such column per
+    /// table at most, so turning it on moves it here — the flags are a `bool` per column and only
+    /// one engine-level rule decides which of them may be set.
     pub(super) fn toggle_auto_increment(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(index) = self.selected_field
-            && let Some(column) = self.schema.columns.get_mut(index)
-        {
+        let Some(index) = self.selected_field else {
+            return;
+        };
+        let Some(column) = self.schema.columns.get(index) else {
+            return;
+        };
+        // Only a type the engine accepts may carry it (SQL Server's `IDENTITY` is numeric-only).
+        if !column.auto_increment && !self.designer.auto_increment.allows(&column.data_type) {
+            return;
+        }
+        let turning_on = !self.schema.columns[index].auto_increment;
+        if turning_on && self.designer.auto_increment.one_per_table {
+            // One identity column per table: moving it here takes it off whichever column had it.
+            for (position, other) in self.schema.columns.iter_mut().enumerate() {
+                if position != index {
+                    other.auto_increment = false;
+                }
+            }
+        }
+        if let Some(column) = self.schema.columns.get_mut(index) {
             column.auto_increment = !column.auto_increment;
             if column.auto_increment {
                 column.nullable = false;
@@ -964,24 +1169,383 @@ impl TableDesignView {
         self.mark_dirty(cx);
     }
 
-    fn unique_field_name(&self) -> String {
-        let base = t!("design.new_field").to_string();
-        if !self.schema.columns.iter().any(|column| column.name == base) {
-            return base;
+    /// Toggle the selected column's `SPARSE` flag (SQL Server).
+    pub(super) fn toggle_sparse(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(index) = self.selected_field
+            && let Some(column) = self.schema.columns.get_mut(index)
+        {
+            column.sparse = !column.sparse;
         }
-        let mut counter = 1;
-        loop {
-            let candidate = format!("{base}_{counter}");
-            if !self
-                .schema
+        self.mark_dirty(cx);
+    }
+
+    /// Whether the engine's designer shows a control fed by the character-set/collation catalogues,
+    /// so the (otherwise pointless) catalogue queries are skipped for engines without one.
+    pub(super) fn needs_option_catalogs(&self) -> bool {
+        self.designer.option_fields.iter().any(|field| {
+            matches!(
+                field,
+                DesignerOptionField::Charset | DesignerOptionField::Collation
+            )
+        }) || self
+            .designer
+            .column_options
+            .contains(&DesignerColumnOption::Collation)
+    }
+
+    // -- Unique keys (SQL Server's 唯一键; MySQL reports a unique index as an 索引) ----------------
+
+    /// A unique-key name that is not taken yet.
+    fn unique_key_name(&self) -> String {
+        unique_name(&t!("design.new_unique_key"), |candidate| {
+            self.schema
+                .unique_keys
+                .iter()
+                .any(|key| key.name == candidate)
+        })
+    }
+
+    pub(super) fn add_unique_key(&mut self, cx: &mut Context<'_, Self>) {
+        let key = UniqueKeyDef {
+            name: self.unique_key_name(),
+            columns: Vec::new(),
+        };
+        self.schema.unique_keys.push(key);
+        self.selected_unique_key = Some(self.schema.unique_keys.len() - 1);
+        self.unique_key_rows.rows.clear();
+        self.unique_key_rows
+            .rows
+            .insert(self.schema.unique_keys.len() - 1);
+        self.unique_key_rows.anchor = self.selected_unique_key;
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn delete_unique_key(&mut self, cx: &mut Context<'_, Self>) {
+        // Delete every gutter-selected row, falling back to the active one.
+        let mut targets: BTreeSet<usize> = self.unique_key_rows.rows.clone();
+        if let Some(active) = self.selected_unique_key {
+            targets.insert(active);
+        }
+        targets.retain(|row| *row < self.schema.unique_keys.len());
+        if targets.is_empty() {
+            return;
+        }
+        let first = *targets.iter().next().unwrap();
+        for row in targets.iter().rev() {
+            self.schema.unique_keys.remove(*row);
+        }
+        self.selected_unique_key = if self.schema.unique_keys.is_empty() {
+            None
+        } else {
+            Some(first.min(self.schema.unique_keys.len() - 1))
+        };
+        self.unique_key_rows.rows.clear();
+        if let Some(active) = self.selected_unique_key {
+            self.unique_key_rows.rows.insert(active);
+            self.unique_key_rows.anchor = Some(active);
+        }
+        self.unique_key_edit = None;
+        self.unique_key_edit_blur = None;
+        self.unique_key_fields_row = None;
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn select_unique_key(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        self.selected_unique_key = Some(row);
+        self.unique_key_rows.rows.clear();
+        self.unique_key_rows.rows.insert(row);
+        self.unique_key_rows.anchor = Some(row);
+        cx.notify();
+    }
+
+    /// Select one row (or extend/toggle the selection) from the unique-key grid's left gutter.
+    pub(super) fn select_unique_key_row(
+        &mut self,
+        row: usize,
+        modifiers: &Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.unique_key_edit = None;
+        self.unique_key_edit_blur = None;
+        self.unique_key_fields_row = None;
+        apply_row_selection(
+            &mut self.unique_key_rows,
+            &mut self.selected_unique_key,
+            row,
+            modifiers,
+        );
+        cx.notify();
+    }
+
+    fn set_unique_key_value(
+        &mut self,
+        row: usize,
+        column: UniqueKeyColumn,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(key) = self.schema.unique_keys.get_mut(row) {
+            match column {
+                UniqueKeyColumn::Name => key.name = text.to_string(),
+            }
+            self.dirty = true;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn begin_unique_key_edit(
+        &mut self,
+        row: usize,
+        column: UniqueKeyColumn,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(key) = self.schema.unique_keys.get(row) else {
+            return;
+        };
+        let value = match column {
+            UniqueKeyColumn::Name => key.name.clone(),
+        };
+        let weak = self.self_weak.clone();
+        let theme = self.theme;
+        let input = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                value,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.0),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    view.set_unique_key_value(row, column, text, cx)
+                });
+            }))
+        });
+        let focus = input.read(cx).focus_handle();
+        input.update(cx, |input, cx| input.set_padding_left(0.0, cx));
+        self.unique_key_edit = None;
+        self.unique_key_edit_blur = None;
+        self.unique_key_fields_row = None;
+        self.select_unique_key(row, cx);
+        self.unique_key_edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| {
+            this.finish_unique_key_edit(cx)
+        }));
+        self.unique_key_edit = Some(UniqueKeyEdit { row, column, input });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn finish_unique_key_edit(&mut self, cx: &mut Context<'_, Self>) {
+        if self.unique_key_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Open the "choose fields" popup for one unique key.
+    pub(super) fn open_unique_key_fields(
+        &mut self,
+        row: usize,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.schema.unique_keys.get(row).is_none() {
+            return;
+        }
+        self.unique_key_edit = None;
+        self.unique_key_edit_blur = None;
+        self.select_unique_key(row, cx);
+        self.unique_key_fields_row = Some(row);
+        cx.notify();
+    }
+
+    /// Add or remove `column` from a unique key's column list.
+    pub(super) fn toggle_unique_key_column(
+        &mut self,
+        row: usize,
+        column: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(key) = self.schema.unique_keys.get_mut(row) {
+            toggle_list(&mut key.columns, column);
+        }
+        self.mark_dirty(cx);
+    }
+
+    /// Create a unique key from the grid's blank placeholder row.
+    pub(super) fn begin_empty_unique_key(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let row = self.schema.unique_keys.len();
+        self.add_unique_key(cx);
+        self.begin_unique_key_edit(row, UniqueKeyColumn::Name, window, cx);
+    }
+
+    // -- Check constraints (SQL Server's 检查) ---------------------------------------------------
+
+    /// A check-constraint name that is not taken yet.
+    fn check_name(&self) -> String {
+        unique_name(&t!("design.new_check"), |candidate| {
+            self.schema
+                .checks
+                .iter()
+                .any(|check| check.name == candidate)
+        })
+    }
+
+    pub(super) fn add_check(&mut self, cx: &mut Context<'_, Self>) {
+        let check = CheckDef {
+            name: self.check_name(),
+            expression: String::new(),
+        };
+        self.schema.checks.push(check);
+        self.selected_check = Some(self.schema.checks.len() - 1);
+        self.check_rows.rows.clear();
+        self.check_rows.rows.insert(self.schema.checks.len() - 1);
+        self.check_rows.anchor = self.selected_check;
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn delete_check(&mut self, cx: &mut Context<'_, Self>) {
+        let mut targets: BTreeSet<usize> = self.check_rows.rows.clone();
+        if let Some(active) = self.selected_check {
+            targets.insert(active);
+        }
+        targets.retain(|row| *row < self.schema.checks.len());
+        if targets.is_empty() {
+            return;
+        }
+        let first = *targets.iter().next().unwrap();
+        for row in targets.iter().rev() {
+            self.schema.checks.remove(*row);
+        }
+        self.selected_check = if self.schema.checks.is_empty() {
+            None
+        } else {
+            Some(first.min(self.schema.checks.len() - 1))
+        };
+        self.check_rows.rows.clear();
+        if let Some(active) = self.selected_check {
+            self.check_rows.rows.insert(active);
+            self.check_rows.anchor = Some(active);
+        }
+        self.check_edit = None;
+        self.check_edit_blur = None;
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn select_check(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        self.selected_check = Some(row);
+        self.check_rows.rows.clear();
+        self.check_rows.rows.insert(row);
+        self.check_rows.anchor = Some(row);
+        cx.notify();
+    }
+
+    /// Select one row (or extend/toggle the selection) from the check grid's left gutter.
+    pub(super) fn select_check_row(
+        &mut self,
+        row: usize,
+        modifiers: &Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.check_edit = None;
+        self.check_edit_blur = None;
+        apply_row_selection(
+            &mut self.check_rows,
+            &mut self.selected_check,
+            row,
+            modifiers,
+        );
+        cx.notify();
+    }
+
+    fn set_check_value(
+        &mut self,
+        row: usize,
+        column: CheckColumn,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(check) = self.schema.checks.get_mut(row) {
+            match column {
+                CheckColumn::Name => check.name = text.to_string(),
+                CheckColumn::Expression => check.expression = text.to_string(),
+            }
+            self.dirty = true;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn begin_check_edit(
+        &mut self,
+        row: usize,
+        column: CheckColumn,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(check) = self.schema.checks.get(row) else {
+            return;
+        };
+        let value = match column {
+            CheckColumn::Name => check.name.clone(),
+            CheckColumn::Expression => check.expression.clone(),
+        };
+        let weak = self.self_weak.clone();
+        let theme = self.theme;
+        let input = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                value,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.0),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |view, cx| view.set_check_value(row, column, text, cx));
+            }))
+        });
+        let focus = input.read(cx).focus_handle();
+        input.update(cx, |input, cx| input.set_padding_left(0.0, cx));
+        self.check_edit = None;
+        self.check_edit_blur = None;
+        self.select_check(row, cx);
+        self.check_edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| {
+            this.finish_check_edit(cx)
+        }));
+        self.check_edit = Some(CheckEdit { row, column, input });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn finish_check_edit(&mut self, cx: &mut Context<'_, Self>) {
+        if self.check_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Create a check constraint from the grid's blank placeholder row.
+    pub(super) fn begin_empty_check(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let row = self.schema.checks.len();
+        self.add_check(cx);
+        self.begin_check_edit(row, CheckColumn::Name, window, cx);
+    }
+
+    fn unique_field_name(&self) -> String {
+        unique_name(&t!("design.new_field"), |candidate| {
+            self.schema
                 .columns
                 .iter()
                 .any(|column| column.name == candidate)
-            {
-                return candidate;
-            }
-            counter += 1;
-        }
+        })
     }
 
     fn insert_field_at(&mut self, index: usize, cx: &mut Context<'_, Self>) {
@@ -1133,7 +1697,8 @@ impl TableDesignView {
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
-        self.index_fields_open = false;
+        self.index_fields_draft = None;
+        self.discard_index_field_inputs();
         self.mark_dirty(cx);
     }
 
@@ -1155,7 +1720,8 @@ impl TableDesignView {
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
-        self.index_fields_open = false;
+        self.index_fields_draft = None;
+        self.discard_index_field_inputs();
         apply_row_selection(
             &mut self.index_rows,
             &mut self.selected_index,
@@ -1221,7 +1787,8 @@ impl TableDesignView {
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
-        self.index_fields_open = false;
+        self.index_fields_draft = None;
+        self.discard_index_field_inputs();
         self.select_index(row, cx);
         self.index_edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| {
             this.finish_index_edit(cx)
@@ -1252,7 +1819,8 @@ impl TableDesignView {
         }
         self.index_edit = None;
         self.index_edit_blur = None;
-        self.index_fields_open = false;
+        self.index_fields_draft = None;
+        self.discard_index_field_inputs();
         self.select_index(row, cx);
         self.index_combo = if self.index_combo == Some((row, field)) {
             None
@@ -1296,7 +1864,8 @@ impl TableDesignView {
         self.mark_dirty(cx);
     }
 
-    /// Open the "choose fields" popup for one index row.
+    /// Open the 字段 editor for one index row as a draft. The primary key row is editable too: the
+    /// model keeps its columns as the 主键 flags on the columns, so its draft edits those flags.
     pub(super) fn open_index_fields(
         &mut self,
         row: usize,
@@ -1306,32 +1875,219 @@ impl TableDesignView {
         let Some(index) = self.schema.indexes.get(row) else {
             return;
         };
-        if index.primary {
-            return;
-        }
+        let primary = index.primary;
+        let columns: Vec<IndexColumnDef> = if primary {
+            self.schema
+                .columns
+                .iter()
+                .filter(|column| column.primary_key)
+                .map(|column| IndexColumnDef::new(column.name.clone()))
+                .collect()
+        } else {
+            index.columns.clone()
+        };
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
         self.select_index(row, cx);
-        self.index_fields_open = true;
+        self.index_fields_draft = Some(IndexFieldsDraft {
+            row,
+            primary,
+            selected: (!columns.is_empty()).then_some(0),
+            columns,
+        });
+        self.rebuild_index_field_inputs(cx);
         cx.notify();
     }
 
-    /// Add or remove `column` from the selected index's column list.
-    pub(super) fn toggle_index_column(
+    /// Close the field draft without applying it.
+    pub(super) fn close_index_fields(&mut self, cx: &mut Context<'_, Self>) {
+        if self.index_fields_draft.take().is_some() {
+            self.discard_index_field_inputs();
+            cx.notify();
+        }
+    }
+
+    /// Apply the draft: an ordinary index takes its column list, the primary key takes the flags.
+    pub(super) fn confirm_index_fields(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(draft) = self.index_fields_draft.take() else {
+            return;
+        };
+        let columns: Vec<IndexColumnDef> = draft
+            .columns
+            .into_iter()
+            .filter(|column| !column.name.trim().is_empty())
+            .collect();
+        if draft.primary {
+            let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
+            for column in self.schema.columns.iter_mut() {
+                let primary = names.contains(&column.name);
+                column.primary_key = primary;
+                if primary {
+                    column.nullable = false;
+                }
+            }
+        } else if let Some(index) = self.schema.indexes.get_mut(draft.row) {
+            index.columns = columns;
+        }
+        self.discard_index_field_inputs();
+        self.mark_dirty(cx);
+    }
+
+    /// Drop the draft's per-row controls (`None` draft, or rows changed under them).
+    fn discard_index_field_inputs(&mut self) {
+        self.index_field_picker = None;
+        self.index_field_prefix_inputs.clear();
+    }
+
+    /// Rebuild the per-row controls after the draft's rows changed.
+    fn rebuild_index_field_inputs(&mut self, cx: &mut Context<'_, Self>) {
+        self.discard_index_field_inputs();
+        let Some(draft) = self.index_fields_draft.clone() else {
+            return;
+        };
+        // The primary key's rows carry no per-column options (the model keeps the key on the
+        // columns themselves).
+        let has_prefix = !draft.primary
+            && self
+                .designer
+                .index_columns
+                .contains(&DesignerIndexColumn::PrefixLength);
+        if !has_prefix {
+            return;
+        }
+        let theme = self.theme;
+        for (draft_row, column) in draft.columns.iter().enumerate() {
+            let weak = self.self_weak.clone();
+            let input = text_input(
+                theme,
+                column.prefix_length.clone(),
+                weak,
+                InputTag::IndexPrefix(draft_row),
+                cx,
+            );
+            self.index_field_prefix_inputs.insert(draft_row, input);
+        }
+    }
+
+    /// Expand (or collapse) one draft row's field list.
+    pub(super) fn toggle_index_field_picker(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        self.index_field_picker = if self.index_field_picker == Some(row) {
+            None
+        } else {
+            Some(row)
+        };
+        cx.notify();
+    }
+
+    /// Select the draft row the footer's ↑ ↓ − act on.
+    pub(super) fn select_index_draft_row(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        if let Some(draft) = self.index_fields_draft.as_mut() {
+            draft.selected = Some(row);
+            cx.notify();
+        }
+    }
+
+    /// Give one draft row the column the user picked from its expanded list.
+    pub(super) fn set_index_draft_name(
         &mut self,
-        row: usize,
-        column: &str,
+        draft_row: usize,
+        name: &str,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(index) = self.schema.indexes.get_mut(row) {
-            if let Some(position) = index.columns.iter().position(|existing| existing == column) {
-                index.columns.remove(position);
-            } else {
-                index.columns.push(column.to_string());
-            }
+        if let Some(draft) = self.index_fields_draft.as_mut()
+            && let Some(column) = draft.columns.get_mut(draft_row)
+        {
+            column.name = name.to_string();
         }
-        self.mark_dirty(cx);
+        self.index_field_picker = None;
+        cx.notify();
+    }
+
+    /// Flip one draft column between `ASC` and `DESC`.
+    pub(super) fn toggle_index_draft_sort(&mut self, draft_row: usize, cx: &mut Context<'_, Self>) {
+        if let Some(draft) = self.index_fields_draft.as_mut()
+            && let Some(column) = draft.columns.get_mut(draft_row)
+        {
+            column.descending = !column.descending;
+        }
+        cx.notify();
+    }
+
+    fn set_index_draft_prefix(&mut self, draft_row: usize, text: &str, cx: &mut Context<'_, Self>) {
+        if let Some(draft) = self.index_fields_draft.as_mut()
+            && let Some(column) = draft.columns.get_mut(draft_row)
+        {
+            column.prefix_length = text.to_string();
+        }
+        cx.notify();
+    }
+
+    /// Append a draft row, starting from the first column the draft does not use yet.
+    pub(super) fn add_index_draft_column(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(draft) = self.index_fields_draft.as_ref() else {
+            return;
+        };
+        let used: Vec<String> = draft
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let next = self
+            .schema
+            .columns
+            .iter()
+            .find(|column| !used.contains(&column.name))
+            .map(|column| column.name.clone())
+            .unwrap_or_default();
+        let row = draft.columns.len();
+        if let Some(draft) = self.index_fields_draft.as_mut() {
+            draft.columns.push(IndexColumnDef::new(next));
+            draft.selected = Some(row);
+        }
+        self.rebuild_index_field_inputs(cx);
+        cx.notify();
+    }
+
+    /// Remove the selected draft row (the last one when nothing is selected).
+    pub(super) fn remove_index_draft_column(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(draft) = self.index_fields_draft.as_mut() else {
+            return;
+        };
+        if draft.columns.is_empty() {
+            return;
+        }
+        let row = draft
+            .selected
+            .unwrap_or(draft.columns.len() - 1)
+            .min(draft.columns.len() - 1);
+        draft.columns.remove(row);
+        draft.selected = if draft.columns.is_empty() {
+            None
+        } else {
+            Some(row.min(draft.columns.len() - 1))
+        };
+        self.rebuild_index_field_inputs(cx);
+        cx.notify();
+    }
+
+    /// Move the selected draft row by one position (`-1` towards the first column).
+    pub(super) fn move_index_draft_column(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
+        let Some(draft) = self.index_fields_draft.as_mut() else {
+            return;
+        };
+        let Some(row) = draft.selected else {
+            return;
+        };
+        let target = row as isize + delta;
+        if target < 0 || target as usize >= draft.columns.len() {
+            return;
+        }
+        let target = target as usize;
+        draft.columns.swap(row, target);
+        draft.selected = Some(target);
+        self.rebuild_index_field_inputs(cx);
+        cx.notify();
     }
 
     pub(super) fn add_foreign_key(&mut self, cx: &mut Context<'_, Self>) {
@@ -1628,6 +2384,12 @@ impl TableDesignView {
             DesignDeleteKind::ForeignKeys => {
                 !self.fk_rows.rows.is_empty() || self.selected_fk.is_some()
             }
+            DesignDeleteKind::UniqueKeys => {
+                !self.unique_key_rows.rows.is_empty() || self.selected_unique_key.is_some()
+            }
+            DesignDeleteKind::Checks => {
+                !self.check_rows.rows.is_empty() || self.selected_check.is_some()
+            }
         };
         if !deletable {
             return;
@@ -1647,6 +2409,8 @@ impl TableDesignView {
             DesignDeleteKind::Fields => self.delete_field(cx),
             DesignDeleteKind::Indexes => self.delete_index(cx),
             DesignDeleteKind::ForeignKeys => self.delete_foreign_key(cx),
+            DesignDeleteKind::UniqueKeys => self.delete_unique_key(cx),
+            DesignDeleteKind::Checks => self.delete_check(cx),
         }
     }
 
@@ -1846,6 +2610,7 @@ impl TableDesignView {
             &self.engine_combo,
             &self.charset_combo,
             &self.collation_combo,
+            &self.column_collation_combo,
         ] {
             combo.update(cx, |combo, cx| combo.set_theme(theme, cx));
         }
@@ -1854,6 +2619,17 @@ impl TableDesignView {
 }
 
 impl AppView {
+    /// The shape this connection's engine gives the table designer. It comes from the driver's
+    /// descriptor through the registry, so the designer never matches on an engine id (and an
+    /// unknown driver falls back to the default shape).
+    pub(super) fn table_designer(&self, connection_index: usize) -> TableDesignerSpec {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| self.registry.get(&node.profile.driver))
+            .map(|driver| driver.descriptor().table_designer)
+            .unwrap_or_default()
+    }
+
     /// Open (or focus) the designer page for a table.
     pub(super) fn open_design_table(
         &mut self,
@@ -1887,6 +2663,7 @@ impl AppView {
         let app = cx.weak_entity();
         let runtime = self.runtime.clone();
         let theme = self.theme;
+        let designer = self.table_designer(connection_index);
         let entity = cx.new(|cx| {
             TableDesignView::new(
                 id,
@@ -1896,6 +2673,7 @@ impl AppView {
                 table,
                 is_view,
                 false,
+                designer,
                 app,
                 runtime,
                 theme,
@@ -1908,7 +2686,9 @@ impl AppView {
         self.active_query = None;
         entity.update(cx, |design, cx| {
             design.load_schema(cx);
-            design.load_option_catalogs(cx);
+            if design.needs_option_catalogs() {
+                design.load_option_catalogs(cx);
+            }
         });
         cx.notify();
     }
@@ -1934,6 +2714,7 @@ impl AppView {
         let app = cx.weak_entity();
         let runtime = self.runtime.clone();
         let theme = self.theme;
+        let designer = self.table_designer(connection_index);
         let entity = cx.new(|cx| {
             TableDesignView::new(
                 id,
@@ -1943,6 +2724,7 @@ impl AppView {
                 String::new(),
                 false,
                 true,
+                designer,
                 app,
                 runtime,
                 theme,
@@ -1956,7 +2738,9 @@ impl AppView {
         // Start with one field so the grid is not empty.
         entity.update(cx, |design, cx| {
             design.add_field(cx);
-            design.load_option_catalogs(cx);
+            if design.needs_option_catalogs() {
+                design.load_option_catalogs(cx);
+            }
         });
         cx.notify();
     }

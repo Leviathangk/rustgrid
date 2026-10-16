@@ -2,11 +2,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    AdvancedFields, Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind,
-    ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
-    ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab, Driver,
-    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TlsMode, UserEditorSpec,
+    AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldChoice,
+    ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec,
+    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
+    DatabaseEditorTab, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerTab,
+    Driver, DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -121,6 +122,47 @@ impl Driver for SqlServerDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
+            // SQL Server keeps unique and check constraints apart from plain indexes, so the
+            // designer gives each its own tab (MySQL reports both through 索引). Its column extras
+            // are 排序规则 and 稀疏 — 无符号/填充零 are MySQL's, and 自动递增 is an identity column.
+            table_designer: TableDesignerSpec {
+                tabs: vec![
+                    DesignerTab::Fields,
+                    DesignerTab::Indexes,
+                    DesignerTab::ForeignKeys,
+                    DesignerTab::UniqueKeys,
+                    DesignerTab::Checks,
+                    DesignerTab::Triggers,
+                    DesignerTab::Sql,
+                ],
+                column_options: vec![
+                    DesignerColumnOption::Default,
+                    DesignerColumnOption::AutoIncrement,
+                    DesignerColumnOption::Collation,
+                    DesignerColumnOption::Sparse,
+                ],
+                field_columns: vec![
+                    DesignerFieldColumn::Size,
+                    DesignerFieldColumn::Scale,
+                    DesignerFieldColumn::NotNull,
+                    DesignerFieldColumn::Computed,
+                    DesignerFieldColumn::Key,
+                    DesignerFieldColumn::Comment,
+                    DesignerFieldColumn::Collation,
+                    DesignerFieldColumn::Sparse,
+                ],
+                option_fields: Vec::new(),
+                // SQL Server has at most one `IDENTITY` column per table, only a numeric one, and
+                // `ALTER COLUMN` cannot give an existing column an `IDENTITY`: it is offered on a
+                // new column (or a new table) and shown read-only on one the table already has.
+                auto_increment: AutoIncrementRule {
+                    types: vec!["tinyint", "smallint", "int", "bigint", "decimal", "numeric"],
+                    one_per_table: true,
+                    change_existing: false,
+                },
+                // SQL Server indexes sort per column; 子部分 is MySQL's.
+                index_columns: vec![DesignerIndexColumn::Sort],
+            },
             id: DriverId::new("sqlserver"),
             display_name: "SQL Server".to_string(),
             default_port: 1433,

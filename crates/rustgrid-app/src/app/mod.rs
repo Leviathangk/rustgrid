@@ -1647,6 +1647,10 @@ enum DesignDeleteKind {
     Fields,
     Indexes,
     ForeignKeys,
+    /// SQL Server's 唯一键 grid.
+    UniqueKeys,
+    /// SQL Server's 检查 grid.
+    Checks,
 }
 
 #[derive(Clone, Copy)]

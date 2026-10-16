@@ -1,19 +1,23 @@
 use super::design::*;
 use super::*;
 
-#[derive(Clone, Copy)]
-enum DetailToggle {
-    AutoIncrement,
-    Unsigned,
-    Zerofill,
-}
+use gpui::HitboxBehavior;
+use rustgrid_core::{
+    ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerOptionField,
+    DesignerTab,
+};
 
 impl TableDesignView {
-    fn toggle_detail(&mut self, toggle: DetailToggle, cx: &mut Context<'_, Self>) {
-        match toggle {
-            DetailToggle::AutoIncrement => self.toggle_auto_increment(cx),
-            DetailToggle::Unsigned => self.toggle_unsigned(cx),
-            DetailToggle::Zerofill => self.toggle_zerofill(cx),
+    /// Flip one check-box control of the detail panel. The control is a
+    /// [`DesignerColumnOption`] so the panel stays engine-driven.
+    fn toggle_detail(&mut self, option: DesignerColumnOption, cx: &mut Context<'_, Self>) {
+        match option {
+            DesignerColumnOption::AutoIncrement => self.toggle_auto_increment(cx),
+            DesignerColumnOption::Unsigned => self.toggle_unsigned(cx),
+            DesignerColumnOption::Zerofill => self.toggle_zerofill(cx),
+            DesignerColumnOption::Sparse => self.toggle_sparse(cx),
+            // The two editor rows are not toggles.
+            DesignerColumnOption::Default | DesignerColumnOption::Collation => {}
         }
     }
 }
@@ -57,8 +61,11 @@ impl TableDesignView {
         if self.index_combo.is_some() {
             root = root.child(self.render_index_combo(cx));
         }
-        if self.index_fields_open {
+        if self.index_fields_draft.is_some() {
             root = root.child(self.render_index_fields_popup(cx));
+        }
+        if self.unique_key_fields_row.is_some() {
+            root = root.child(self.render_unique_key_fields_popup(cx));
         }
         if self.fk_combo.is_some() {
             root = root.child(self.render_fk_combo(cx));
@@ -89,9 +96,11 @@ impl TableDesignView {
 
     fn render_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
-        let fields = self.tab == DesignTab::Fields && !self.loading;
-        let indexes = self.tab == DesignTab::Indexes && !self.loading;
-        let foreign_keys = self.tab == DesignTab::ForeignKeys && !self.loading;
+        let fields = self.tab == DesignerTab::Fields && !self.loading;
+        let indexes = self.tab == DesignerTab::Indexes && !self.loading;
+        let foreign_keys = self.tab == DesignerTab::ForeignKeys && !self.loading;
+        let unique_keys = self.tab == DesignerTab::UniqueKeys && !self.loading;
+        let checks = self.tab == DesignerTab::Checks && !self.loading;
         let selected = self.selected_field.is_some();
         let can_up = self.selected_field.map(|index| index > 0).unwrap_or(false);
         let can_down = self
@@ -220,6 +229,48 @@ impl TableDesignView {
                         this.request_delete(DesignDeleteKind::ForeignKeys, cx)
                     }),
                 ));
+        } else if unique_keys {
+            let can_delete = self.selected_unique_key.is_some();
+            bar = bar
+                .child(ui::toolbar_item(
+                    "design-add-unique-key",
+                    "icons/add_field.svg",
+                    t!("design.add_unique_key").to_string(),
+                    unique_keys,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| this.add_unique_key(cx)),
+                ))
+                .child(ui::toolbar_item(
+                    "design-delete-unique-key",
+                    "icons/delete_field.svg",
+                    t!("design.delete_unique_key").to_string(),
+                    unique_keys && can_delete,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.request_delete(DesignDeleteKind::UniqueKeys, cx)
+                    }),
+                ));
+        } else if checks {
+            let can_delete = self.selected_check.is_some();
+            bar = bar
+                .child(ui::toolbar_item(
+                    "design-add-check",
+                    "icons/add_field.svg",
+                    t!("design.add_check").to_string(),
+                    checks,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| this.add_check(cx)),
+                ))
+                .child(ui::toolbar_item(
+                    "design-delete-check",
+                    "icons/delete_field.svg",
+                    t!("design.delete_check").to_string(),
+                    checks && can_delete,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.request_delete(DesignDeleteKind::Checks, cx)
+                    }),
+                ));
         }
 
         bar
@@ -238,7 +289,7 @@ impl TableDesignView {
             .bg(rgb(theme.toolbar_bg))
             .border_b_1()
             .border_color(rgb(theme.border));
-        for tab in DesignTab::ALL {
+        for tab in self.designer.tabs.iter().copied() {
             let active = self.tab == tab;
             bar = bar.child(
                 div()
@@ -287,13 +338,15 @@ impl TableDesignView {
                 .into_any_element()
         } else {
             match self.tab {
-                DesignTab::Fields => self.render_fields(cx),
-                DesignTab::Indexes => self.render_indexes(cx),
-                DesignTab::ForeignKeys => self.render_foreign_keys(cx),
-                DesignTab::Triggers => self.render_triggers(),
-                DesignTab::Options => self.render_options(cx),
-                DesignTab::Comment => self.render_comment(),
-                DesignTab::Sql => self.render_sql(),
+                DesignerTab::Fields => self.render_fields(cx),
+                DesignerTab::Indexes => self.render_indexes(cx),
+                DesignerTab::ForeignKeys => self.render_foreign_keys(cx),
+                DesignerTab::UniqueKeys => self.render_unique_keys(cx),
+                DesignerTab::Checks => self.render_checks(cx),
+                DesignerTab::Triggers => self.render_triggers(),
+                DesignerTab::Options => self.render_options(cx),
+                DesignerTab::Comment => self.render_comment(),
+                DesignerTab::Sql => self.render_sql(),
             }
         };
 
@@ -309,16 +362,11 @@ impl TableDesignView {
 
     fn render_fields(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let widths = [
-            FIELD_NAME_WIDTH,
-            FIELD_TYPE_WIDTH,
-            FIELD_LENGTH_WIDTH,
-            FIELD_DECIMALS_WIDTH,
-            FIELD_NOTNULL_WIDTH,
-            FIELD_VIRTUAL_WIDTH,
-            FIELD_KEY_WIDTH,
-            FIELD_COMMENT_WIDTH,
-        ];
+        // 列名 and 类型 lead every engine's field list; the cells after them are the engine's own
+        // (长度/小数位/虚拟 for MySQL, 大小/比例/计算列/排序规则/稀疏 for SQL Server).
+        let spec_columns = self.designer.field_columns.clone();
+        let mut widths = vec![FIELD_NAME_WIDTH, FIELD_TYPE_WIDTH];
+        widths.extend(spec_columns.iter().copied().map(field_column_width));
         let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
 
         let columns = self.schema.columns.clone();
@@ -330,15 +378,22 @@ impl TableDesignView {
             .map(|editor| (editor.row, editor.column, editor.input.clone()));
         let weak = self.self_weak.clone();
         let combo_anchor = self.combo_anchor.clone();
+        let row_widths = widths.clone();
 
         let list = uniform_list(
             SharedString::from(format!("design-fields-{}", self.id)),
             columns.len().max(1),
             move |range, _window, _cx| {
+                let spec_columns = spec_columns.clone();
                 range
                     .map(|row| {
                         if row >= columns.len() {
-                            return placeholder_row(PlaceholderKind::Field, &widths, theme, &weak);
+                            return placeholder_row(
+                                PlaceholderKind::Field,
+                                &row_widths,
+                                theme,
+                                &weak,
+                            );
                         }
                         let column = &columns[row];
                         let row_selected = field_rows.contains(row);
@@ -358,7 +413,7 @@ impl TableDesignView {
                         };
                         let gutter_weak = weak.clone();
 
-                        div()
+                        let mut row_element = div()
                             .flex()
                             .flex_row()
                             .h(px(DESIGN_ROW_HEIGHT))
@@ -414,61 +469,19 @@ impl TableDesignView {
                                 &weak,
                                 row,
                                 combo_anchor.clone(),
-                            ))
-                            .child(design_edit_cell(
-                                SharedString::from(format!("design-length-{row}")),
-                                FIELD_LENGTH_WIDTH,
-                                column.length.clone(),
-                                theme,
-                                false,
-                                &weak,
+                            ));
+                        for kind in &spec_columns {
+                            row_element = row_element.child(design_field_column_cell(
+                                *kind,
                                 row,
-                                FieldColumn::Length,
-                                editor_for(FieldColumn::Length),
-                            ))
-                            .child(design_edit_cell(
-                                SharedString::from(format!("design-decimals-{row}")),
-                                FIELD_DECIMALS_WIDTH,
-                                column.decimals.clone(),
+                                column,
+                                field_column_width(*kind),
                                 theme,
-                                false,
                                 &weak,
-                                row,
-                                FieldColumn::Decimals,
-                                editor_for(FieldColumn::Decimals),
-                            ))
-                            .child(design_check_cell(
-                                SharedString::from(format!("design-notnull-{row}")),
-                                FIELD_NOTNULL_WIDTH,
-                                !column.nullable,
-                                theme,
-                                Some((weak.clone(), row)),
-                            ))
-                            .child(design_check_cell(
-                                SharedString::from(format!("design-virtual-{row}")),
-                                FIELD_VIRTUAL_WIDTH,
-                                !column.generated.trim().is_empty(),
-                                theme,
-                                None,
-                            ))
-                            .child(design_key_cell(
-                                SharedString::from(format!("design-key-{row}")),
-                                FIELD_KEY_WIDTH,
-                                column.primary_key,
-                                theme,
-                                Some((weak.clone(), row)),
-                            ))
-                            .child(design_edit_cell(
-                                SharedString::from(format!("design-comment-{row}")),
-                                FIELD_COMMENT_WIDTH,
-                                column.comment.clone(),
-                                theme,
-                                false,
-                                &weak,
-                                row,
-                                FieldColumn::Comment,
-                                editor_for(FieldColumn::Comment),
-                            ))
+                                field_column_text(*kind).and_then(editor_for),
+                            ));
+                        }
+                        row_element
                     })
                     .collect::<Vec<_>>()
             },
@@ -478,63 +491,26 @@ impl TableDesignView {
         .min_h(px(0.0));
 
         let header = self.render_field_header(theme, &widths);
-
-        let table = div()
-            .id("design-hscroll")
-            .flex_1()
-            .min_h(px(0.0))
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .track_scroll(&self.hscroll)
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .h_full()
-                    .w(px(content_width))
-                    .child(header)
-                    .child(list),
-            );
+        let grid = self.render_grid_scaffold(cx, header, list, content_width);
 
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .min_h(px(0.0))
-                            .child(table)
-                            .child(self.render_hscrollbar(cx)),
-                    )
-                    .child(self.render_vscrollbar(cx)),
-            )
+            .child(grid)
             .child(self.render_detail())
             .into_any_element()
     }
 
-    fn render_field_header(&self, theme: Theme, widths: &[f32; 8]) -> Div {
-        let labels = [
-            "design.col.name",
-            "design.col.type",
-            "design.col.length",
-            "design.col.decimals",
-            "design.col.not_null",
-            "design.col.virtual",
-            "design.col.key",
-            "design.col.comment",
-        ];
+    fn render_field_header(&self, theme: Theme, widths: &[f32]) -> Div {
+        let mut labels: Vec<&'static str> = vec!["design.col.name", "design.col.type"];
+        labels.extend(
+            self.designer
+                .field_columns
+                .iter()
+                .map(|kind| kind.label_key()),
+        );
         let mut header = div()
             .flex()
             .flex_row()
@@ -571,15 +547,37 @@ impl TableDesignView {
         header
     }
 
+    /// The per-column detail panel. Its controls come from the engine's
+    /// [`TableDesignerSpec::column_options`], so MySQL/MariaDB show 自动递增 / 无符号 / 填充零 while
+    /// SQL Server shows 排序规则 / 稀疏, and every engine gets 默认. A control the engine cannot use
+    /// on the selected column (SQL Server's `IDENTITY` on a column the table already has, an
+    /// auto-increment on a text column) is left out rather than shown dead.
     fn render_detail(&self) -> Div {
         let theme = self.theme;
         let enabled = self.selected_field.is_some();
         let column = self
             .selected_field
             .and_then(|index| self.schema.columns.get(index));
-        let auto_increment = column.map(|column| column.auto_increment).unwrap_or(false);
-        let unsigned = column.map(|column| column.unsigned).unwrap_or(false);
-        let zerofill = column.map(|column| column.zerofill).unwrap_or(false);
+        // Where the engine accepts an auto-increment: on a type of its list, and — for an engine
+        // that cannot change a column the table already has (SQL Server's `IDENTITY`) — only on a
+        // column the table does not have yet, or in a brand-new table.
+        let rule = &self.designer.auto_increment;
+        let column_is_new = column
+            .map(|column| {
+                self.original.as_ref().is_none_or(|original| {
+                    !original
+                        .columns
+                        .iter()
+                        .any(|existing| existing.name == column.name)
+                })
+            })
+            .unwrap_or(false);
+        let identity_editable = column
+            .map(|column| {
+                (rule.change_existing || self.is_new || column_is_new)
+                    && (column.auto_increment || rule.allows(&column.data_type))
+            })
+            .unwrap_or(false);
 
         let mut panel = div()
             .flex()
@@ -592,66 +590,54 @@ impl TableDesignView {
             .gap_2()
             .bg(rgb(theme.dialog_face))
             .border_t_1()
-            .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(230.0))
-                            .flex_none()
-                            .text_size(px(12.0))
-                            .child(t!("design.default").to_string()),
-                    )
-                    .child(
-                        div()
-                            .w(px(360.0))
-                            .h(px(22.0))
-                            .when(!enabled, |style| style.opacity(0.5))
-                            .child(self.default_input.clone()),
-                    ),
-            );
+            .border_color(rgb(theme.border));
 
-        for (id, key, checked, toggle) in [
-            (
-                "design-detail-auto-increment",
-                "design.auto_increment",
-                auto_increment,
-                DetailToggle::AutoIncrement,
-            ),
-            (
-                "design-detail-unsigned",
-                "design.unsigned",
-                unsigned,
-                DetailToggle::Unsigned,
-            ),
-            (
-                "design-detail-zerofill",
-                "design.fill_zero",
-                zerofill,
-                DetailToggle::Zerofill,
-            ),
-        ] {
-            let weak = self.self_weak.clone();
-            panel = panel.child(
-                div()
-                    .id(id)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .when(enabled, |style| style.cursor_pointer())
-                    .child(checkbox_box(checked, theme))
-                    .child(div().text_size(px(12.0)).child(t!(key).to_string()))
-                    .when(enabled, |style| {
-                        style.on_click(move |_event, _window, cx| {
-                            let _ = weak.update(cx, |view, cx| view.toggle_detail(toggle, cx));
-                        })
-                    }),
-            );
+        for option in self.designer.column_options.iter().copied() {
+            // A control the engine cannot use on the selected column is left out entirely rather
+            // than shown dead: SQL Server's `IDENTITY` (one numeric column per table, and only on a
+            // new one), or MySQL's `AUTO_INCREMENT` on a type it cannot carry.
+            if option == DesignerColumnOption::AutoIncrement && !identity_editable {
+                continue;
+            }
+            let row = match option {
+                DesignerColumnOption::Default => detail_editor_row(
+                    t!(option.label_key()),
+                    div()
+                        .w(px(360.0))
+                        .h(px(22.0))
+                        .when(!enabled, |style| style.opacity(0.5))
+                        .child(self.default_input.clone())
+                        .into_any_element(),
+                ),
+                DesignerColumnOption::Collation => detail_editor_row(
+                    t!(option.label_key()),
+                    div()
+                        .w(px(360.0))
+                        .h(px(22.0))
+                        .when(!enabled, |style| style.opacity(0.5))
+                        .child(self.column_collation_combo.clone())
+                        .into_any_element(),
+                ),
+                _ => {
+                    let checked = match option {
+                        DesignerColumnOption::AutoIncrement => {
+                            column.map(|column| column.auto_increment).unwrap_or(false)
+                        }
+                        DesignerColumnOption::Unsigned => {
+                            column.map(|column| column.unsigned).unwrap_or(false)
+                        }
+                        DesignerColumnOption::Zerofill => {
+                            column.map(|column| column.zerofill).unwrap_or(false)
+                        }
+                        DesignerColumnOption::Sparse => {
+                            column.map(|column| column.sparse).unwrap_or(false)
+                        }
+                        _ => false,
+                    };
+                    detail_toggle_row(option, checked, enabled, theme, self.self_weak.clone())
+                }
+            };
+            panel = panel.child(row);
         }
 
         panel
@@ -757,12 +743,20 @@ impl TableDesignView {
                                 IndexColumn::Name,
                                 editor_for(IndexColumn::Name),
                             ))
-                            .child(index_fields_cell(
+                            .child(design_picker_cell(
                                 SharedString::from(format!("index-fields-{row}")),
                                 INDEX_FIELDS_WIDTH,
-                                index.columns.join(", "),
+                                index
+                                    .columns
+                                    .iter()
+                                    .map(|column| column.display())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
                                 theme,
-                                false,
+                                // The primary key row is editable here too: its columns are the
+                                // ones flagged 主键 in the 字段 tab.
+                                true,
+                                DesignPicker::IndexFields,
                                 &weak,
                                 row,
                                 fields_anchor.clone(),
@@ -812,48 +806,7 @@ impl TableDesignView {
 
         let header = self.render_index_header(theme, &widths);
 
-        let table = div()
-            .id("design-hscroll")
-            .flex_1()
-            .min_h(px(0.0))
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .track_scroll(&self.hscroll)
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .h_full()
-                    .w(px(content_width))
-                    .child(header)
-                    .child(list),
-            );
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .min_h(px(0.0))
-                            .child(table)
-                            .child(self.render_hscrollbar(cx)),
-                    )
-                    .child(self.render_vscrollbar(cx)),
-            )
-            .into_any_element()
+        self.render_grid_scaffold(cx, header, list, content_width)
     }
 
     fn render_index_header(&self, theme: Theme, widths: &[f32; 5]) -> Div {
@@ -1003,15 +956,15 @@ impl TableDesignView {
                                 FkColumn::Name,
                                 editor_for(FkColumn::Name),
                             ))
-                            .child(fk_picker_cell(
+                            .child(design_picker_cell(
                                 SharedString::from(format!("fk-columns-{row}")),
                                 FK_COLUMNS_WIDTH,
                                 foreign_key.columns.join(", "),
                                 theme,
-                                false,
+                                true,
+                                DesignPicker::ForeignKeyColumns,
                                 &weak,
                                 row,
-                                FkPicker::Columns,
                                 fields_anchor.clone(),
                             ))
                             .child(
@@ -1035,15 +988,15 @@ impl TableDesignView {
                                 FkColumn::ReferencedTable,
                                 editor_for(FkColumn::ReferencedTable),
                             ))
-                            .child(fk_picker_cell(
+                            .child(design_picker_cell(
                                 SharedString::from(format!("fk-ref-columns-{row}")),
                                 FK_REF_COLUMNS_WIDTH,
                                 foreign_key.referenced_columns.join(", "),
                                 theme,
-                                false,
+                                true,
+                                DesignPicker::ForeignKeyReferenced,
                                 &weak,
                                 row,
-                                FkPicker::Referenced,
                                 ref_anchor.clone(),
                             ))
                             .child(fk_choice_cell(
@@ -1078,48 +1031,7 @@ impl TableDesignView {
 
         let header = self.render_fk_header(theme, &widths);
 
-        let table = div()
-            .id("design-hscroll")
-            .flex_1()
-            .min_h(px(0.0))
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .track_scroll(&self.hscroll)
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .h_full()
-                    .w(px(content_width))
-                    .child(header)
-                    .child(list),
-            );
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .min_h(px(0.0))
-                            .child(table)
-                            .child(self.render_hscrollbar(cx)),
-                    )
-                    .child(self.render_vscrollbar(cx)),
-            )
-            .into_any_element()
+        self.render_grid_scaffold(cx, header, list, content_width)
     }
 
     fn render_fk_header(&self, theme: Theme, widths: &[f32; 7]) -> Div {
@@ -1168,6 +1080,337 @@ impl TableDesignView {
         header
     }
 
+    /// The 唯一键 grid. SQL Server keeps `UNIQUE` constraints apart from indexes, so this tab lists
+    /// them; an engine that reports uniqueness through 索引 does not declare the tab at all.
+    fn render_unique_keys(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let widths = [UQ_NAME_WIDTH, UQ_FIELDS_WIDTH];
+        let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
+        let unique_keys = self.schema.unique_keys.clone();
+        let selected = self.selected_unique_key;
+        let rows = self.unique_key_rows.clone();
+        let edit = self
+            .unique_key_edit
+            .as_ref()
+            .map(|editor| (editor.row, editor.column, editor.input.clone()));
+        let weak = self.self_weak.clone();
+        let fields_anchor = self.unique_key_fields_anchor.clone();
+
+        let list = uniform_list(
+            SharedString::from(format!("design-unique-keys-{}", self.id)),
+            unique_keys.len().max(1),
+            move |range, _window, _cx| {
+                range
+                    .map(|row| {
+                        if row >= unique_keys.len() {
+                            return placeholder_row(
+                                PlaceholderKind::UniqueKey,
+                                &widths,
+                                theme,
+                                &weak,
+                            );
+                        }
+                        let key = &unique_keys[row];
+                        let row_selected = rows.contains(row);
+                        let row_active = selected == Some(row);
+                        let row_background = if row % 2 == 1 {
+                            theme.row_alt_bg
+                        } else {
+                            theme.editor_bg
+                        };
+                        let editor = edit
+                            .as_ref()
+                            .filter(|(row_index, column_kind, _)| {
+                                *row_index == row && *column_kind == UniqueKeyColumn::Name
+                            })
+                            .map(|(_, _, input)| input.clone());
+                        let gutter_weak = weak.clone();
+
+                        div()
+                            .flex()
+                            .flex_row()
+                            .h(px(DESIGN_ROW_HEIGHT))
+                            .bg(rgb(row_background))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("uq-gutter-{row}")))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(DESIGN_ROW_HEIGHT))
+                                    .w(px(DESIGN_GUTTER_WIDTH))
+                                    .flex_none()
+                                    .border_r_1()
+                                    .border_color(rgb(theme.grid_line))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |event: &MouseDownEvent, _window, cx| {
+                                            let _ = gutter_weak.update(cx, |view, cx| {
+                                                view.select_unique_key_row(
+                                                    row,
+                                                    &event.modifiers,
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    )
+                                    .when(row_active, |gutter| {
+                                        gutter.child(
+                                            svg()
+                                                .path("icons/row_marker.svg")
+                                                .w(px(7.0))
+                                                .h(px(7.0))
+                                                .flex_none()
+                                                .text_color(rgb(theme.primary)),
+                                        )
+                                    }),
+                            )
+                            .child(unique_key_edit_cell(
+                                SharedString::from(format!("uq-name-{row}")),
+                                UQ_NAME_WIDTH,
+                                key.name.clone(),
+                                theme,
+                                row_selected,
+                                &weak,
+                                row,
+                                editor,
+                            ))
+                            .child(design_picker_cell(
+                                SharedString::from(format!("uq-fields-{row}")),
+                                UQ_FIELDS_WIDTH,
+                                key.columns.join(", "),
+                                theme,
+                                true,
+                                DesignPicker::UniqueKeyFields,
+                                &weak,
+                                row,
+                                fields_anchor.clone(),
+                            ))
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.list_scroll)
+        .flex_1()
+        .min_h(px(0.0));
+
+        let header = design_grid_header(theme, &["design.uq.name", "design.uq.fields"], &widths);
+
+        self.render_grid_scaffold(cx, header, list, content_width)
+    }
+
+    /// The 检查 grid: check constraints, edited as name + expression.
+    fn render_checks(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let widths = [CHECK_NAME_WIDTH, CHECK_EXPRESSION_WIDTH];
+        let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
+        let checks = self.schema.checks.clone();
+        let selected = self.selected_check;
+        let rows = self.check_rows.clone();
+        let edit = self
+            .check_edit
+            .as_ref()
+            .map(|editor| (editor.row, editor.column, editor.input.clone()));
+        let weak = self.self_weak.clone();
+
+        let list = uniform_list(
+            SharedString::from(format!("design-checks-{}", self.id)),
+            checks.len().max(1),
+            move |range, _window, _cx| {
+                range
+                    .map(|row| {
+                        if row >= checks.len() {
+                            return placeholder_row(PlaceholderKind::Check, &widths, theme, &weak);
+                        }
+                        let check = &checks[row];
+                        let row_selected = rows.contains(row);
+                        let row_active = selected == Some(row);
+                        let row_background = if row % 2 == 1 {
+                            theme.row_alt_bg
+                        } else {
+                            theme.editor_bg
+                        };
+                        let editor_for = |target: CheckColumn| {
+                            edit.as_ref()
+                                .filter(|(row_index, column_kind, _)| {
+                                    *row_index == row && *column_kind == target
+                                })
+                                .map(|(_, _, input)| input.clone())
+                        };
+                        let gutter_weak = weak.clone();
+
+                        div()
+                            .flex()
+                            .flex_row()
+                            .h(px(DESIGN_ROW_HEIGHT))
+                            .bg(rgb(row_background))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("check-gutter-{row}")))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(DESIGN_ROW_HEIGHT))
+                                    .w(px(DESIGN_GUTTER_WIDTH))
+                                    .flex_none()
+                                    .border_r_1()
+                                    .border_color(rgb(theme.grid_line))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |event: &MouseDownEvent, _window, cx| {
+                                            let _ = gutter_weak.update(cx, |view, cx| {
+                                                view.select_check_row(row, &event.modifiers, cx)
+                                            });
+                                        },
+                                    )
+                                    .when(row_active, |gutter| {
+                                        gutter.child(
+                                            svg()
+                                                .path("icons/row_marker.svg")
+                                                .w(px(7.0))
+                                                .h(px(7.0))
+                                                .flex_none()
+                                                .text_color(rgb(theme.primary)),
+                                        )
+                                    }),
+                            )
+                            .child(check_edit_cell(
+                                SharedString::from(format!("check-name-{row}")),
+                                CHECK_NAME_WIDTH,
+                                check.name.clone(),
+                                theme,
+                                row_selected,
+                                &weak,
+                                row,
+                                CheckColumn::Name,
+                                editor_for(CheckColumn::Name),
+                            ))
+                            .child(check_edit_cell(
+                                SharedString::from(format!("check-expression-{row}")),
+                                CHECK_EXPRESSION_WIDTH,
+                                check.expression.clone(),
+                                theme,
+                                false,
+                                &weak,
+                                row,
+                                CheckColumn::Expression,
+                                editor_for(CheckColumn::Expression),
+                            ))
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.list_scroll)
+        .flex_1()
+        .min_h(px(0.0));
+
+        let header = design_grid_header(
+            theme,
+            &["design.check.name", "design.check.expression"],
+            &widths,
+        );
+
+        self.render_grid_scaffold(cx, header, list, content_width)
+    }
+
+    /// The scroll container a designer grid lives in: the header and list scroll horizontally with
+    /// the view's own scrollbars, and the wheel drives both axes.
+    ///
+    /// A gpui `uniform_list` scrolls itself from the *bubble* phase of a `ScrollWheelEvent`, which
+    /// the grids' surrounding scrollable containers also take part in, so the designer's lists did
+    /// not scroll under the wheel. This owns a hitbox in the capture phase instead (exactly as the
+    /// table grid does): the wheel scrolls the rows, a horizontal gesture pans the columns, and a
+    /// gesture aimed at an overlay above the grid is left alone (`should_handle_scroll`).
+    fn render_grid_scaffold(
+        &self,
+        cx: &mut Context<'_, Self>,
+        header: Div,
+        list: impl IntoElement,
+        content_width: f32,
+    ) -> AnyElement {
+        let table = div()
+            .id("design-hscroll")
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .track_scroll(&self.hscroll)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .h_full()
+                    .w(px(content_width))
+                    .child(header)
+                    .child(list),
+            );
+
+        let weak = self.self_weak.clone();
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .child(table)
+                            .child(self.render_hscrollbar(cx)),
+                    )
+                    .child(self.render_vscrollbar(cx)),
+            )
+            .child(
+                canvas(
+                    |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                    move |_bounds, hitbox, window, _cx| {
+                        window.on_mouse_event(
+                            move |event: &ScrollWheelEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture
+                                    || !hitbox.should_handle_scroll(window)
+                                {
+                                    return;
+                                }
+                                let (dx, dy) = match event.delta {
+                                    ScrollDelta::Lines(delta) => {
+                                        (delta.x * DESIGN_ROW_HEIGHT, delta.y * DESIGN_ROW_HEIGHT)
+                                    }
+                                    ScrollDelta::Pixels(delta) => {
+                                        (f32::from(delta.x), f32::from(delta.y))
+                                    }
+                                };
+                                if dx == 0.0 && dy == 0.0 {
+                                    return;
+                                }
+                                let consumed = weak
+                                    .update(cx, |view, cx| view.design_scroll(dx, dy, cx))
+                                    .unwrap_or(false);
+                                if consumed {
+                                    cx.stop_propagation();
+                                }
+                            },
+                        );
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
+    }
+
     fn render_triggers(&self) -> AnyElement {
         let theme = self.theme;
         let rows = self
@@ -1196,39 +1439,40 @@ impl TableDesignView {
         )
     }
 
+    /// The table's storage options. The rows come from the engine's
+    /// [`TableDesignerSpec::option_fields`], so an engine only shows what its designer SQL honors.
     fn render_options(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         self.sync_option_combos(cx);
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .child(option_combo_row(
-                t!("design.options.engine"),
-                Some(self.engine_combo.clone()),
-                theme,
-            ))
-            .child(option_combo_row(
-                t!("design.options.charset"),
-                Some(self.charset_combo.clone()),
-                theme,
-            ))
-            .child(option_combo_row(
-                t!("design.options.collation"),
-                Some(self.collation_combo.clone()),
-                theme,
-            ))
-            .child(option_row(
-                t!("design.options.auto_increment"),
-                self.auto_increment_input.clone(),
-                theme,
-            ))
-            .child(option_row(
-                t!("design.comment_label"),
-                self.comment_input.clone(),
-                theme,
-            ));
+        let mut panel = div().flex().flex_col().gap_3().p_4();
+        for field in self.designer.option_fields.iter().copied() {
+            let row = match field {
+                DesignerOptionField::Engine => option_combo_row(
+                    t!(field.label_key()),
+                    Some(self.engine_combo.clone()),
+                    theme,
+                ),
+                DesignerOptionField::Charset => option_combo_row(
+                    t!(field.label_key()),
+                    Some(self.charset_combo.clone()),
+                    theme,
+                ),
+                DesignerOptionField::Collation => option_combo_row(
+                    t!(field.label_key()),
+                    Some(self.collation_combo.clone()),
+                    theme,
+                ),
+                DesignerOptionField::AutoIncrement => option_row(
+                    t!(field.label_key()),
+                    self.auto_increment_input.clone(),
+                    theme,
+                ),
+                DesignerOptionField::Comment => {
+                    option_row(t!(field.label_key()), self.comment_input.clone(), theme)
+                }
+            };
+            panel = panel.child(row);
+        }
         panel = panel.child(div().flex_1());
         panel.into_any_element()
     }
@@ -1441,24 +1685,329 @@ impl TableDesignView {
             .into_any_element()
     }
 
-    /// The "choose fields" popup for the selected index.
+    /// Open the field drop-down a picker cell owns (the whole cell is the trigger).
+    pub(super) fn open_design_picker(
+        &mut self,
+        row: usize,
+        picker: DesignPicker,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match picker {
+            DesignPicker::IndexFields => self.open_index_fields(row, window, cx),
+            DesignPicker::ForeignKeyColumns => self.open_fk_fields(row, window, cx),
+            DesignPicker::ForeignKeyReferenced => self.open_fk_ref(row, window, cx),
+            DesignPicker::UniqueKeyFields => self.open_unique_key_fields(row, window, cx),
+        }
+    }
+
+    /// The index's 字段 editor: its columns in order, each with the engine's per-column options
+    /// (排序 for every engine, 子部分 for MySQL/MariaDB), reordered with ↑ ↓ and removed with −.
+    ///
+    /// Everything edits a draft; 确定 installs it and 取消 (or a click outside) throws it away, so the
+    /// grid never shows a half-made change. The 主键 row opens here too — its draft edits the 主键
+    /// flags, which is where the model keeps the key — and therefore carries no per-column options.
     fn render_index_fields_popup(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let Some(row) = self.selected_index else {
-            return div().into_any_element();
-        };
-        let Some(index) = self.schema.indexes.get(row) else {
+        let Some(draft) = self.index_fields_draft.as_ref() else {
             return div().into_any_element();
         };
         let origin = *self.root_anchor.borrow();
-        let anchor = *self.index_fields_anchor.borrow();
+        let anchor = self
+            .index_fields_anchor
+            .borrow()
+            .get(&draft.row)
+            .copied()
+            .unwrap_or_default();
         let anchor = Point::new(anchor.x - origin.x, anchor.y - origin.y);
-        let current = index.columns.clone();
+        let options = !draft.primary;
+        let sort = options
+            && self
+                .designer
+                .index_columns
+                .contains(&DesignerIndexColumn::Sort);
+        let prefix = options
+            && self
+                .designer
+                .index_columns
+                .contains(&DesignerIndexColumn::PrefixLength);
+
+        let mut panel = ui::popup_panel(theme)
+            .id("design-index-fields")
+            .left(anchor.x)
+            .top(anchor.y)
+            .w(px(INDEX_FIELDS_WIDTH.max(260.0)))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.close_index_fields(cx);
+            }));
+
+        let mut header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .flex_none()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .text_color(rgb(theme.text_muted))
+            .child(
+                div()
+                    .w(px(INDEX_FIELD_NAME_WIDTH))
+                    .flex_none()
+                    .child(t!("design.index.fields").to_string()),
+            );
+        for option in [DesignerIndexColumn::Sort, DesignerIndexColumn::PrefixLength] {
+            if (option == DesignerIndexColumn::Sort && sort)
+                || (option == DesignerIndexColumn::PrefixLength && prefix)
+            {
+                header = header.child(
+                    div()
+                        .w(px(INDEX_FIELD_OPTION_WIDTH))
+                        .flex_none()
+                        .child(t!(option.label_key()).to_string()),
+                );
+            }
+        }
+        panel = panel.child(header);
+
+        let mut list = div()
+            .id("design-index-fields-list")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .min_h(px(24.0))
+            .max_h(px(240.0))
+            .overflow_y_scroll();
+        for (row, column) in draft.columns.iter().enumerate() {
+            let selected = draft.selected == Some(row);
+            // The name cell is the row's drop-down: clicking it expands the field list in place
+            // (an inline list rather than a floating menu, which this panel would treat as a click
+            // outside and close).
+            let expanded = self.index_field_picker == Some(row);
+            let mut name_cell = div()
+                .id(SharedString::from(format!("index-field-name-{row}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .w(px(INDEX_FIELD_NAME_WIDTH))
+                .h(px(20.0))
+                .flex_none()
+                .rounded(px(3.0))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.input_bg))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.toggle_index_field_picker(row, cx)
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .px_1()
+                        .overflow_hidden()
+                        .child(column.name.clone()),
+                )
+                .child(
+                    svg()
+                        .path("icons/chevron-down.svg")
+                        .w(px(10.0))
+                        .h(px(10.0))
+                        .flex_none()
+                        .mr_1()
+                        .text_color(rgb(theme.text_muted)),
+                );
+            if expanded {
+                name_cell = name_cell.border_color(rgb(theme.primary));
+            }
+            let mut line = div()
+                .id(SharedString::from(format!("index-field-row-{row}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .h(px(26.0))
+                .flex_none()
+                .cursor_pointer()
+                .when(selected, |style| style.bg(rgb(theme.tree_selected_bg)))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.select_index_draft_row(row, cx)
+                }))
+                .child(name_cell);
+            if sort {
+                let descending = column.descending;
+                line = line.child(
+                    div()
+                        .id(SharedString::from(format!("index-field-sort-{row}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(INDEX_FIELD_OPTION_WIDTH))
+                        .h(px(18.0))
+                        .flex_none()
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.input_bg))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.toggle_index_draft_sort(row, cx)
+                        }))
+                        .child(if descending { "DESC" } else { "ASC" }.to_string()),
+                );
+            }
+            if prefix {
+                let cell: AnyElement = match self.index_field_prefix_inputs.get(&row) {
+                    Some(input) => div()
+                        .w(px(INDEX_FIELD_OPTION_WIDTH))
+                        .h(px(20.0))
+                        .flex_none()
+                        .child(input.clone())
+                        .into_any_element(),
+                    None => div().w(px(INDEX_FIELD_OPTION_WIDTH)).into_any_element(),
+                };
+                line = line.child(cell);
+            }
+            list = list.child(line);
+            if expanded {
+                // The field list of this row, inline. Every column of the table is offered, so a
+                // mistake in one row is corrected in place rather than by removing and re-adding it.
+                let mut options = div()
+                    .id(SharedString::from(format!("index-field-options-{row}")))
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .max_h(px(160.0))
+                    .overflow_y_scroll()
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.dialog_bg));
+                for name in self.schema.columns.iter().map(|column| column.name.clone()) {
+                    let picked = name == column.name;
+                    let option_name = name.clone();
+                    options = options.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "index-field-option-{row}-{name}"
+                            )))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_1()
+                            .h(px(20.0))
+                            .px_2()
+                            .flex_none()
+                            .flex_none()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.set_index_draft_name(row, &option_name, cx)
+                            }))
+                            .child(name)
+                            .child(
+                                svg()
+                                    .path("icons/check.svg")
+                                    .w(px(12.0))
+                                    .h(px(12.0))
+                                    .flex_none()
+                                    .text_color(rgb(theme.tree_selected_text))
+                                    .opacity(if picked { 1.0 } else { 0.0 }),
+                            ),
+                    );
+                }
+                list = list.child(options);
+            }
+        }
+        panel = panel.child(list);
+
+        let mut footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .flex_none()
+            .border_t_1()
+            .border_color(rgb(theme.border));
+        for (id, label, delta) in [
+            ("design-index-field-up", "↑", -1isize),
+            ("design-index-field-down", "↓", 1),
+        ] {
+            footer = footer.child(ui::popup_button(
+                id,
+                label.to_string(),
+                false,
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.move_index_draft_column(delta, cx)
+                }),
+            ));
+        }
+        footer = footer
+            .child(ui::popup_button(
+                "design-index-field-add",
+                "+".to_string(),
+                false,
+                theme,
+                cx.listener(|this, _event, _window, cx| this.add_index_draft_column(cx)),
+            ))
+            .child(ui::popup_button(
+                "design-index-field-remove",
+                "−".to_string(),
+                false,
+                theme,
+                cx.listener(|this, _event, _window, cx| this.remove_index_draft_column(cx)),
+            ))
+            .child(div().flex_1())
+            .child(ui::popup_button(
+                "design-index-fields-cancel",
+                t!("form.cancel").to_string(),
+                false,
+                theme,
+                cx.listener(|this, _event, _window, cx| this.close_index_fields(cx)),
+            ))
+            .child(ui::popup_button(
+                "design-index-fields-ok",
+                t!("form.ok").to_string(),
+                true,
+                theme,
+                cx.listener(|this, _event, _window, cx| this.confirm_index_fields(cx)),
+            ));
+        panel = panel.child(footer);
+
+        deferred(panel).with_priority(100).into_any_element()
+    }
+
+    /// The "choose fields" popup for one unique key.
+    fn render_unique_key_fields_popup(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(row) = self.unique_key_fields_row else {
+            return div().into_any_element();
+        };
+        let Some(key) = self.schema.unique_keys.get(row) else {
+            return div().into_any_element();
+        };
+        let origin = *self.root_anchor.borrow();
+        let anchor = self
+            .unique_key_fields_anchor
+            .borrow()
+            .get(&row)
+            .copied()
+            .unwrap_or_default();
+        let anchor = Point::new(anchor.x - origin.x, anchor.y - origin.y);
+        let current = key.columns.clone();
         let columns = self.schema.columns.clone();
         let weak = self.self_weak.clone();
 
         let mut list = div()
-            .id("design-index-fields-list")
+            .id("design-unique-key-fields-list")
             .max_h(px(260.0))
             .overflow_y_scroll()
             .flex()
@@ -1470,7 +2019,7 @@ impl TableDesignView {
             let weak = weak.clone();
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("index-field-option-{name}")))
+                    .id(SharedString::from(format!("uq-field-option-{name}")))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1483,7 +2032,7 @@ impl TableDesignView {
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                     .on_click(move |_event, _window, cx| {
                         let _ = weak.update(cx, |view, cx| {
-                            view.toggle_index_column(row, &option_name, cx)
+                            view.toggle_unique_key_column(row, &option_name, cx)
                         });
                     })
                     .child(checkbox_box(checked, theme))
@@ -1492,12 +2041,12 @@ impl TableDesignView {
         }
 
         let popup = ui::popup_panel(theme)
-            .id("design-index-fields")
+            .id("design-unique-key-fields")
             .left(anchor.x)
             .top(anchor.y)
-            .w(px(220.0))
+            .w(px(UQ_FIELDS_WIDTH))
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.index_fields_open = false;
+                this.unique_key_fields_row = None;
                 cx.notify();
             }));
         deferred(popup.child(list))
@@ -1598,10 +2147,11 @@ impl TableDesignView {
         };
         let origin = *self.root_anchor.borrow();
         let anchor = if child {
-            *self.fk_fields_anchor.borrow()
+            self.fk_fields_anchor.borrow().get(&row).copied()
         } else {
-            *self.fk_ref_anchor.borrow()
-        };
+            self.fk_ref_anchor.borrow().get(&row).copied()
+        }
+        .unwrap_or_default();
         let anchor = Point::new(anchor.x - origin.x, anchor.y - origin.y);
         let weak = self.self_weak.clone();
 
@@ -1656,7 +2206,11 @@ impl TableDesignView {
             .id("design-fk-fields")
             .left(anchor.x)
             .top(anchor.y)
-            .w(px(220.0))
+            .w(px(if child {
+                FK_COLUMNS_WIDTH
+            } else {
+                FK_REF_COLUMNS_WIDTH
+            }))
             .on_mouse_down_out(cx.listener(move |this, _event, _window, cx| {
                 if child {
                     this.fk_fields_open = false;
@@ -1692,8 +2246,7 @@ impl TableDesignView {
     fn render_vscrollbar(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let handle = self.list_scroll.0.borrow().base_handle.clone();
-        let viewport = f32::from(handle.bounds().size.height);
-        let max = f32::from(handle.max_offset().y);
+        let (viewport, max) = self.design_scroll_extent();
         if max <= 0.0 {
             return div().into_any_element();
         }
@@ -1714,6 +2267,100 @@ impl TableDesignView {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Apply one wheel delta to the designer's grids, the same way the table grid does.
+    ///
+    /// A `uniform_list` registers **no** scroll-wheel handler of its own (unlike gpui's `list`), so
+    /// its shared scroll offset cannot simply be written: the wheel has to move the selected row and
+    /// bring it into view through `scroll_to_item`, which is the only scrolling a uniform list
+    /// performs — and is exactly what the table grid's wheel does. `dx` pans the columns through the
+    /// plain scroll handle of the surrounding container.
+    pub(super) fn design_scroll(&mut self, dx: f32, dy: f32, cx: &mut Context<'_, Self>) -> bool {
+        let mut consumed = false;
+        if dy != 0.0 {
+            consumed = self.wheel_selected_row(dy, cx);
+        }
+        if dx != 0.0 {
+            let max = f32::from(self.hscroll.max_offset().x);
+            if max > 0.0 {
+                let scroll = -f32::from(self.hscroll.offset().x);
+                let next = (scroll - dx).clamp(0.0, max);
+                if (next - scroll).abs() >= 0.5 {
+                    let y = self.hscroll.offset().y;
+                    self.hscroll.set_offset(Point::new(px(-next), y));
+                }
+                // A horizontal gesture is claimed even at the end of the columns: gpui maps a
+                // delta with no room on its axis onto the other one, so letting it bubble would
+                // roll the rows during a swipe past the last column.
+                consumed = true;
+            }
+        }
+        if consumed {
+            cx.notify();
+        }
+        consumed
+    }
+
+    /// Move the active tab's row selection by one row — towards the first row for a positive
+    /// `delta` (a wheel-up notch) — and scroll it into view. Returns whether the wheel was used.
+    fn wheel_selected_row(&mut self, delta: f32, cx: &mut Context<'_, Self>) -> bool {
+        let rows = self.design_row_count();
+        if rows == 0 {
+            return false;
+        }
+        // Scrolling ends an in-place edit, exactly as it does in the table grid: the editor's text
+        // is already in the working copy, and a focused editor must not scroll out of view.
+        self.clear_editors();
+        // One notch moves a single row, whatever the OS reports for it.
+        let step: isize = if delta > 0.0 { -1 } else { 1 };
+        let current = self.selected_design_row();
+        let Some(current) = current else {
+            // Nothing selected yet: the first notch lands on the first row, so the wheel can start
+            // walking through the grid (the table grid does the same).
+            self.select_design_row(0, cx);
+            self.list_scroll.scroll_to_item(0, ScrollStrategy::Nearest);
+            return true;
+        };
+        let next = (current as isize + step).clamp(0, rows as isize - 1) as usize;
+        if next == current {
+            // Already on the first or the last row: leave the event to whatever is behind the grid.
+            return false;
+        }
+        self.select_design_row(next, cx);
+        self.list_scroll
+            .scroll_to_item(next, ScrollStrategy::Nearest);
+        true
+    }
+
+    /// The active tab's selected row, if any.
+    fn selected_design_row(&self) -> Option<usize> {
+        match self.tab {
+            DesignerTab::Fields => self.selected_field,
+            DesignerTab::Indexes => self.selected_index,
+            DesignerTab::ForeignKeys => self.selected_fk,
+            DesignerTab::UniqueKeys => self.selected_unique_key,
+            DesignerTab::Checks => self.selected_check,
+            DesignerTab::Triggers
+            | DesignerTab::Options
+            | DesignerTab::Comment
+            | DesignerTab::Sql => None,
+        }
+    }
+
+    /// Select one row of the active tab's grid (gutter selection included, as a gutter click does).
+    fn select_design_row(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        match self.tab {
+            DesignerTab::Fields => self.select_field(row, cx),
+            DesignerTab::Indexes => self.select_index(row, cx),
+            DesignerTab::ForeignKeys => self.select_fk(row, cx),
+            DesignerTab::UniqueKeys => self.select_unique_key(row, cx),
+            DesignerTab::Checks => self.select_check(row, cx),
+            DesignerTab::Triggers
+            | DesignerTab::Options
+            | DesignerTab::Comment
+            | DesignerTab::Sql => {}
+        }
     }
 
     fn hscroll_begin(&mut self, mouse_x: Pixels, cx: &mut Context<'_, Self>) {
@@ -1750,11 +2397,39 @@ impl TableDesignView {
         cx.notify();
     }
 
+    /// The number of rows the grid on the active tab holds (fields, indexes, foreign keys, unique
+    /// keys, checks); a tab without a grid has none.
+    pub(super) fn design_row_count(&self) -> usize {
+        match self.tab {
+            DesignerTab::Fields => self.schema.columns.len(),
+            DesignerTab::Indexes => self.schema.indexes.len(),
+            DesignerTab::ForeignKeys => self.schema.foreign_keys.len(),
+            DesignerTab::UniqueKeys => self.schema.unique_keys.len(),
+            DesignerTab::Checks => self.schema.checks.len(),
+            DesignerTab::Triggers
+            | DesignerTab::Options
+            | DesignerTab::Comment
+            | DesignerTab::Sql => 0,
+        }
+    }
+
+    /// The row list's scroll extent as `(viewport_height, max_scroll)`.
+    ///
+    /// A `uniform_list` never reports its content size through `ScrollHandle::max_offset` — the
+    /// table grid computes the same extent from its row count for exactly this reason — so an
+    /// extent read from the handle is always zero, which is why the designer's vertical scrollbar
+    /// never appeared and neither the wheel nor its thumb could move the list.
+    fn design_scroll_extent(&self) -> (f32, f32) {
+        let handle = self.list_scroll.0.borrow().base_handle.clone();
+        let viewport = f32::from(handle.bounds().size.height);
+        let max = (self.design_row_count() as f32 * DESIGN_ROW_HEIGHT - viewport).max(0.0);
+        (viewport, max)
+    }
+
     fn vscroll_begin(&mut self, mouse_y: Pixels, cx: &mut Context<'_, Self>) {
         let handle = self.list_scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
-        let viewport = f32::from(bounds.size.height);
-        let max = f32::from(handle.max_offset().y);
+        let (viewport, max) = self.design_scroll_extent();
         let (thumb_h, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
@@ -1772,17 +2447,18 @@ impl TableDesignView {
     }
 
     fn vscroll_set(&self, relative: f32, grab: f32, cx: &mut Context<'_, Self>) {
-        let handle = self.list_scroll.0.borrow().base_handle.clone();
-        let viewport = f32::from(handle.bounds().size.height);
-        let max = f32::from(handle.max_offset().y);
+        let (viewport, max) = self.design_scroll_extent();
         let (_, travel) = scrollbar_thumb(viewport, max);
         if travel <= 0.0 {
             return;
         }
         let thumb_y = (relative - grab).clamp(0.0, travel);
         let scroll = thumb_y / travel * max;
-        let x = handle.offset().x;
-        handle.set_offset(Point::new(x, px(-scroll)));
+        // A uniform list scrolls by item, not by arbitrary pixels, so the thumb lands on the row
+        // that sits at that position — the closest its own scrolling can get.
+        let row = (scroll / DESIGN_ROW_HEIGHT).round() as usize;
+        self.list_scroll
+            .scroll_to_item_strict(row, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -1820,6 +2496,8 @@ enum PlaceholderKind {
     Field,
     Index,
     ForeignKey,
+    UniqueKey,
+    Check,
 }
 
 /// A blank editable row shown below the header when a designer grid is empty. Clicking any cell
@@ -1834,6 +2512,8 @@ fn placeholder_row(
         PlaceholderKind::Field => "design-field",
         PlaceholderKind::Index => "design-index",
         PlaceholderKind::ForeignKey => "design-fk",
+        PlaceholderKind::UniqueKey => "design-uq",
+        PlaceholderKind::Check => "design-check",
     };
     let mut row = div()
         .flex()
@@ -1863,6 +2543,8 @@ fn placeholder_row(
                     PlaceholderKind::Field => view.begin_empty_field(window, vcx),
                     PlaceholderKind::Index => view.begin_empty_index(window, vcx),
                     PlaceholderKind::ForeignKey => view.begin_empty_foreign_key(window, vcx),
+                    PlaceholderKind::UniqueKey => view.begin_empty_unique_key(window, vcx),
+                    PlaceholderKind::Check => view.begin_empty_check(window, vcx),
                 });
             }),
         );
@@ -1953,64 +2635,6 @@ fn index_edit_cell(
             });
         })
         .child(text)
-        .into_any_element()
-}
-
-/// The index grid's "Fields" cell: the joined column names plus a "..." button that opens the
-/// field picker.
-#[allow(clippy::too_many_arguments)]
-fn index_fields_cell(
-    id: SharedString,
-    width: f32,
-    text: String,
-    theme: Theme,
-    selected: bool,
-    weak: &WeakEntity<TableDesignView>,
-    row: usize,
-    anchor: Rc<RefCell<Point<Pixels>>>,
-) -> AnyElement {
-    let weak = weak.clone();
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .h(px(DESIGN_ROW_HEIGHT))
-        .w(px(width))
-        .flex_none()
-        .whitespace_nowrap()
-        .overflow_hidden()
-        .border_r_1()
-        .border_b_1()
-        .border_color(rgb(theme.grid_line))
-        .when(selected, |style| {
-            style.text_color(rgb(theme.grid_selection_text))
-        })
-        .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(text))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(20.0))
-                .h(px(18.0))
-                .flex_none()
-                .mr_1()
-                .border_1()
-                .border_color(rgb(theme.border))
-                .rounded(px(3.0))
-                .bg(rgb(theme.button_bg))
-                .cursor_pointer()
-                .on_children_prepainted(move |bounds, _window, _cx| {
-                    if let Some(first) = bounds.first() {
-                        *anchor.borrow_mut() = Point::new(first.left(), first.bottom());
-                    }
-                })
-                .id(SharedString::from(format!("index-fields-btn-{row}")))
-                .on_click(move |_event, window, cx| {
-                    let _ = weak.update(cx, |view, cx| view.open_index_fields(row, window, cx));
-                })
-                .child(div().text_size(px(12.0)).child("...")),
-        )
         .into_any_element()
 }
 
@@ -2211,6 +2835,314 @@ fn design_key_cell(
         .into_any_element()
 }
 
+/// One row's cell for an engine-declared field-list column. The cell is a text editor, a toggle or
+/// a read-only display depending on the column kind, so MySQL's 长度/小数位/虚拟 and SQL Server's
+/// 大小/比例/计算列/排序规则/稀疏 all render correctly.
+#[allow(clippy::too_many_arguments)]
+fn design_field_column_cell(
+    kind: DesignerFieldColumn,
+    row: usize,
+    column: &ColumnDef,
+    width: f32,
+    theme: Theme,
+    weak: &WeakEntity<TableDesignView>,
+    editor: Option<Entity<TextInput>>,
+) -> AnyElement {
+    let id = SharedString::from(format!("design-{}-{row}", field_column_id(kind)));
+    if let Some(text_column) = field_column_text(kind) {
+        return design_edit_cell(
+            id,
+            width,
+            field_column_value(column, text_column),
+            theme,
+            false,
+            weak,
+            row,
+            text_column,
+            editor,
+        );
+    }
+    match kind {
+        DesignerFieldColumn::NotNull => design_check_cell(
+            id,
+            width,
+            !column.nullable,
+            theme,
+            Some((weak.clone(), row)),
+        ),
+        DesignerFieldColumn::Generated | DesignerFieldColumn::Computed => {
+            design_check_cell(id, width, !column.generated.trim().is_empty(), theme, None)
+        }
+        DesignerFieldColumn::Sparse => design_check_cell(id, width, column.sparse, theme, None),
+        DesignerFieldColumn::Key => design_key_cell(
+            id,
+            width,
+            column.primary_key,
+            theme,
+            Some((weak.clone(), row)),
+        ),
+        _ => design_cell(id, width, theme, false)
+            .px_2()
+            .child(field_column_display(kind, column))
+            .into_any_element(),
+    }
+}
+
+/// A designer grid's header row: a gutter spacer plus one labelled cell per column.
+fn design_grid_header(theme: Theme, labels: &[&'static str], widths: &[f32]) -> Div {
+    let mut header = div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .h(px(DESIGN_HEADER_HEIGHT))
+        .w_full()
+        .bg(rgb(theme.header_bg))
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .child(
+            div()
+                .w(px(DESIGN_GUTTER_WIDTH))
+                .h(px(DESIGN_HEADER_HEIGHT))
+                .flex_none()
+                .border_r_1()
+                .border_color(rgb(theme.grid_line)),
+        );
+    for (index, key) in labels.iter().enumerate() {
+        header = header.child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(DESIGN_HEADER_HEIGHT))
+                .w(px(widths.get(index).copied().unwrap_or(120.0)))
+                .flex_none()
+                .px_2()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .border_r_1()
+                .border_color(rgb(theme.grid_line))
+                .child(t!(*key).to_string()),
+        );
+    }
+    header
+}
+
+/// Which field drop-down a picker cell opens. Every designer grid that is made of a *list* of
+/// columns (an index, a unique key, a foreign key's child and referenced columns) uses one of these.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DesignPicker {
+    /// The index grid's field list.
+    IndexFields,
+    /// A foreign key's own (child) columns.
+    ForeignKeyColumns,
+    /// A foreign key's referenced columns.
+    ForeignKeyReferenced,
+    /// The unique-key grid's field list.
+    UniqueKeyFields,
+}
+
+/// A dropdown-style cell holding a list of columns: the whole cell is the trigger (no separate
+/// "..." button), and the list it opens keeps its check boxes so a multi-column constraint stays
+/// selectable. `enabled` is `false` for a cell the designer does not edit (the primary key's field
+/// list, which is driven by the 字段 tab's 主键 box) — it keeps the space but shows no chevron.
+#[allow(clippy::too_many_arguments)]
+fn design_picker_cell(
+    id: SharedString,
+    width: f32,
+    text: String,
+    theme: Theme,
+    enabled: bool,
+    picker: DesignPicker,
+    weak: &WeakEntity<TableDesignView>,
+    row: usize,
+    anchor: DesignPickerAnchors,
+) -> AnyElement {
+    let weak = weak.clone();
+    div()
+        .flex()
+        .items_center()
+        .h(px(DESIGN_ROW_HEIGHT))
+        .w(px(width))
+        .flex_none()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .border_r_1()
+        .border_b_1()
+        .border_color(rgb(theme.grid_line))
+        .pr(px(4.0))
+        .when(enabled, |style| style.cursor_pointer())
+        .on_children_prepainted(move |bounds, _window, _cx| {
+            if let Some(first) = bounds.first() {
+                anchor
+                    .borrow_mut()
+                    .insert(row, Point::new(first.left(), first.bottom()));
+            }
+        })
+        .id(id)
+        .on_click(move |_event, window, cx| {
+            if enabled {
+                let _ = weak.update(cx, |view, cx| {
+                    view.open_design_picker(row, picker, window, cx)
+                });
+            }
+        })
+        // The text fills the row's height so the recorded anchor is the cell's own bottom edge — the
+        // drop-down list then opens flush under the cell, as a drop-down should.
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(DESIGN_ROW_HEIGHT))
+                .overflow_hidden()
+                .child(text),
+        )
+        .child(
+            svg()
+                .path("icons/chevron-down.svg")
+                .w(px(10.0))
+                .h(px(10.0))
+                .flex_none()
+                .text_color(rgb(theme.text_muted))
+                .opacity(if enabled { 1.0 } else { 0.0 }),
+        )
+        .into_any_element()
+}
+
+/// A live-editable text cell of the unique-key grid.
+#[allow(clippy::too_many_arguments)]
+fn unique_key_edit_cell(
+    id: SharedString,
+    width: f32,
+    text: String,
+    theme: Theme,
+    selected: bool,
+    weak: &WeakEntity<TableDesignView>,
+    row: usize,
+    editor: Option<Entity<TextInput>>,
+) -> AnyElement {
+    let cell = design_cell(id, width, theme, selected)
+        .when(selected, |cell| cell.bg(rgb(theme.grid_selection_bg)));
+    if let Some(editor) = editor {
+        return cell
+            .bg(rgb(theme.input_bg))
+            // The selected-cell text color (white) must not leak into the editor, or its text is
+            // invisible on the light input background.
+            .text_color(rgb(theme.text))
+            .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
+            .into_any_element();
+    }
+    let weak = weak.clone();
+    cell.pr(px(4.0))
+        .cursor_text()
+        .on_click(move |_event, window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.begin_unique_key_edit(row, UniqueKeyColumn::Name, window, cx)
+            });
+        })
+        .child(text)
+        .into_any_element()
+}
+
+/// A live-editable text cell of the check-constraint grid.
+#[allow(clippy::too_many_arguments)]
+fn check_edit_cell(
+    id: SharedString,
+    width: f32,
+    text: String,
+    theme: Theme,
+    selected: bool,
+    weak: &WeakEntity<TableDesignView>,
+    row: usize,
+    column: CheckColumn,
+    editor: Option<Entity<TextInput>>,
+) -> AnyElement {
+    let cell = design_cell(id, width, theme, selected)
+        .when(selected, |cell| cell.bg(rgb(theme.grid_selection_bg)));
+    if let Some(editor) = editor {
+        return cell
+            .bg(rgb(theme.input_bg))
+            // The selected-cell text color (white) must not leak into the editor, or its text is
+            // invisible on the light input background.
+            .text_color(rgb(theme.text))
+            .child(div().w(px(width)).h(px(DESIGN_ROW_HEIGHT)).child(editor))
+            .into_any_element();
+    }
+    let weak = weak.clone();
+    cell.pr(px(4.0))
+        .cursor_text()
+        .on_click(move |_event, window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.begin_check_edit(row, column, window, cx)
+            });
+        })
+        .child(text)
+        .into_any_element()
+}
+
+/// One labelled row of the detail panel whose control is a field (text input or drop-down).
+fn detail_editor_row(label: impl Into<String>, control: AnyElement) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .w(px(230.0))
+                .flex_none()
+                .text_size(px(12.0))
+                .child(label.into()),
+        )
+        .child(control)
+        .into_any_element()
+}
+
+/// One check-box row of the detail panel. The panel itself is muted while no field is selected.
+fn detail_toggle_row(
+    option: DesignerColumnOption,
+    checked: bool,
+    enabled: bool,
+    theme: Theme,
+    weak: WeakEntity<TableDesignView>,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!(
+            "design-detail-{}",
+            detail_option_id(option)
+        )))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .when(!enabled, |style| style.opacity(0.5))
+        .when(enabled, |style| style.cursor_pointer())
+        .child(checkbox_box(checked, theme))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .child(t!(option.label_key()).to_string()),
+        )
+        .when(enabled, |style| {
+            style.on_click(move |_event, _window, cx| {
+                let _ = weak.update(cx, |view, cx| view.toggle_detail(option, cx));
+            })
+        })
+        .into_any_element()
+}
+
+/// A stable id fragment for one detail-panel control.
+fn detail_option_id(option: DesignerColumnOption) -> &'static str {
+    match option {
+        DesignerColumnOption::Default => "default",
+        DesignerColumnOption::AutoIncrement => "auto-increment",
+        DesignerColumnOption::Unsigned => "unsigned",
+        DesignerColumnOption::Zerofill => "zerofill",
+        DesignerColumnOption::Collation => "collation",
+        DesignerColumnOption::Sparse => "sparse",
+    }
+}
+
 fn rule_label(rule: &str) -> String {
     if rule.trim().is_empty() {
         t!("design.fk.rule_default").to_string()
@@ -2249,67 +3181,6 @@ fn fk_edit_cell(
             let _ = weak.update(cx, |view, cx| view.begin_fk_edit(row, column, window, cx));
         })
         .child(text)
-        .into_any_element()
-}
-
-/// A foreign-key cell showing a column list with a "..." button that opens the matching picker.
-#[allow(clippy::too_many_arguments)]
-fn fk_picker_cell(
-    id: SharedString,
-    width: f32,
-    text: String,
-    theme: Theme,
-    selected: bool,
-    weak: &WeakEntity<TableDesignView>,
-    row: usize,
-    picker: FkPicker,
-    anchor: Rc<RefCell<Point<Pixels>>>,
-) -> AnyElement {
-    let weak = weak.clone();
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .h(px(DESIGN_ROW_HEIGHT))
-        .w(px(width))
-        .flex_none()
-        .whitespace_nowrap()
-        .overflow_hidden()
-        .border_r_1()
-        .border_b_1()
-        .border_color(rgb(theme.grid_line))
-        .when(selected, |style| {
-            style.text_color(rgb(theme.grid_selection_text))
-        })
-        .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(text))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(20.0))
-                .h(px(18.0))
-                .flex_none()
-                .mr_1()
-                .border_1()
-                .border_color(rgb(theme.border))
-                .rounded(px(3.0))
-                .bg(rgb(theme.button_bg))
-                .cursor_pointer()
-                .on_children_prepainted(move |bounds, _window, _cx| {
-                    if let Some(first) = bounds.first() {
-                        *anchor.borrow_mut() = Point::new(first.left(), first.bottom());
-                    }
-                })
-                .id(SharedString::from(format!("fk-picker-btn-{row}")))
-                .on_click(move |_event, window, cx| {
-                    let _ = weak.update(cx, |view, cx| match picker {
-                        FkPicker::Columns => view.open_fk_fields(row, window, cx),
-                        FkPicker::Referenced => view.open_fk_ref(row, window, cx),
-                    });
-                })
-                .child(div().text_size(px(12.0)).child("...")),
-        )
         .into_any_element()
 }
 

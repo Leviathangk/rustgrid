@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use rustgrid_core::{
     BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
     DriverId, Error, FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef,
-    IndexDef, ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert, RowUpdate,
-    ScriptSession, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TriggerDef,
-    ViewDetails, ViewEdit, ViewInfo,
+    IndexColumnDef, IndexDef, ObjectDump, ObjectKind, PageRequest, QueryResult, Result, RowInsert,
+    RowUpdate, ScriptSession, TableInfo, TableOptions, TablePage, TableSchema, TableStatus,
+    TriggerDef, ViewDetails, ViewEdit, ViewInfo,
 };
 use sqlx::error::DatabaseError;
 use sqlx::sqlite::{SqliteColumn, SqliteRow};
@@ -88,16 +88,30 @@ impl SqliteConnection {
         })
     }
 
-    /// The columns of one index, in index order.
-    async fn index_columns(&self, index: &str) -> Result<Vec<String>> {
-        let sql = format!("PRAGMA index_info({})", quote_identifier(index));
-        let rows = sqlx::query(AssertSqlSafe(sql))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_query_error)?;
+    /// The columns of one index, in index order, with SQLite's per-column `DESC`.
+    async fn index_columns(&self, index: &str) -> Result<Vec<IndexColumnDef>> {
+        let rows = sqlx::query(AssertSqlSafe(format!(
+            "PRAGMA index_xinfo({})",
+            quote_identifier(index)
+        )))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_query_error)?;
         Ok(rows
             .iter()
-            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            // `key = 1` keeps the index's own columns (the trailing rowid is not part of it), and an
+            // expression column has no name to round-trip.
+            .filter(|row| row.try_get::<i64, _>("key").unwrap_or(0) == 1)
+            .filter_map(|row| {
+                row.try_get::<String, _>("name")
+                    .ok()
+                    .map(|name| IndexColumnDef {
+                        name,
+                        descending: row.try_get::<i64, _>("desc").unwrap_or(0) == 1,
+                        // SQLite indexes have no prefix length (子部分 is MySQL's).
+                        prefix_length: String::new(),
+                    })
+            })
             .collect())
     }
 }
@@ -677,6 +691,7 @@ impl Connection for SqliteConnection {
                 auto_increment,
                 unsigned: false,
                 zerofill: false,
+                sparse: false,
                 comment: String::new(),
                 charset: String::new(),
                 collation: String::new(),
@@ -772,6 +787,8 @@ impl Connection for SqliteConnection {
         Ok(TableSchema {
             columns,
             indexes,
+            unique_keys: Vec::new(),
+            checks: Vec::new(),
             foreign_keys,
             triggers,
             options: TableOptions {
@@ -1559,7 +1576,13 @@ fn create_index_statements(table: &str, indexes: &[IndexDef]) -> Vec<String> {
             let columns = index
                 .columns
                 .iter()
-                .map(|column| quote_identifier(column))
+                .map(|column| {
+                    let mut sql = quote_identifier(&column.name);
+                    if column.descending {
+                        sql.push_str(" DESC");
+                    }
+                    sql
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(

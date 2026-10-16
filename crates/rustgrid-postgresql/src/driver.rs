@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
-    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TlsMode,
-    UserEditorSpec,
+    AutoIncrementRule, Connection, ConnectionConfig, DatabaseEditorSpec, DesignerColumnOption,
+    DesignerFieldColumn, DesignerIndexColumn, DesignerOptionField, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TableDesignerSpec, TlsMode, UserEditorSpec,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
@@ -78,6 +79,39 @@ impl Driver for PostgresDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
+            // PostgreSQL's designer writes columns, indexes, foreign keys and comments; its table
+            // charset/collation/auto-increment are not applied, so 选项 shows the comment only and
+            // a column carries no collation, generated-column or identity control of its own
+            // beyond 自动递增 (serial / identity are both read into it).
+            table_designer: TableDesignerSpec {
+                tabs: TableDesignerSpec::standard_tabs(),
+                column_options: vec![
+                    DesignerColumnOption::Default,
+                    DesignerColumnOption::AutoIncrement,
+                ],
+                field_columns: vec![
+                    DesignerFieldColumn::Length,
+                    DesignerFieldColumn::Decimals,
+                    DesignerFieldColumn::NotNull,
+                    DesignerFieldColumn::Key,
+                    DesignerFieldColumn::Comment,
+                ],
+                option_fields: vec![DesignerOptionField::Comment],
+                // PostgreSQL's identity/serial is one numeric column per table.
+                auto_increment: AutoIncrementRule {
+                    types: vec![
+                        "smallint",
+                        "integer",
+                        "bigint",
+                        "smallserial",
+                        "serial",
+                        "bigserial",
+                    ],
+                    ..AutoIncrementRule::default()
+                },
+                // PostgreSQL indexes sort per column; 子部分 is MySQL's.
+                index_columns: vec![DesignerIndexColumn::Sort],
+            },
             id: DriverId::new("postgresql"),
             display_name: "PostgreSQL".to_string(),
             default_port: 5432,

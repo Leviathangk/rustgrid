@@ -4,11 +4,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use oracledb::PoolConfig;
 use rustgrid_core::{
-    AdvancedFields, Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind,
-    ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
-    ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, Driver, DriverCapabilities,
-    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
-    TlsMode, UserEditorSpec,
+    AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldChoice,
+    ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec,
+    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
+    DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerTab, Driver,
+    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
 };
 
 use crate::connection::OracleConnection;
@@ -100,6 +101,37 @@ impl Driver for OracleDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
+            // Oracle's designer writes columns (identity included), indexes, foreign keys and
+            // comments; it has no table options or column collation, so 选项 is left off.
+            table_designer: TableDesignerSpec {
+                tabs: vec![
+                    DesignerTab::Fields,
+                    DesignerTab::Indexes,
+                    DesignerTab::ForeignKeys,
+                    DesignerTab::Triggers,
+                    DesignerTab::Comment,
+                    DesignerTab::Sql,
+                ],
+                column_options: vec![
+                    DesignerColumnOption::Default,
+                    DesignerColumnOption::AutoIncrement,
+                ],
+                field_columns: vec![
+                    DesignerFieldColumn::Length,
+                    DesignerFieldColumn::Decimals,
+                    DesignerFieldColumn::NotNull,
+                    DesignerFieldColumn::Key,
+                    DesignerFieldColumn::Comment,
+                ],
+                option_fields: Vec::new(),
+                // Oracle allows one `GENERATED … AS IDENTITY` column per table, on a numeric type.
+                auto_increment: AutoIncrementRule {
+                    types: vec!["number", "numeric", "decimal", "integer", "int"],
+                    ..AutoIncrementRule::default()
+                },
+                // Oracle indexes sort per column; 子部分 is MySQL's.
+                index_columns: vec![DesignerIndexColumn::Sort],
+            },
             id: DriverId::new("oracle"),
             display_name: "Oracle".to_string(),
             default_port: 1521,

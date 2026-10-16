@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use rustgrid_core::{
-    ColumnDef, ForeignKeyDef, IndexDef, Result, TableOptions, TableSchema, TriggerDef,
+    ColumnDef, ForeignKeyDef, IndexColumnDef, IndexDef, Result, TableOptions, TableSchema,
+    TriggerDef,
 };
 use sqlx::Row;
 
@@ -82,7 +83,13 @@ fn index_sql(schema: &str, table: &str, index: &IndexDef) -> String {
     let columns = index
         .columns
         .iter()
-        .map(|column| quote_identifier(column))
+        .map(|column| {
+            let mut sql = quote_identifier(&column.name);
+            if column.descending {
+                sql.push_str(" DESC");
+            }
+            sql
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -191,6 +198,7 @@ pub(crate) async fn table_schema(
             auto_increment,
             unsigned: false,
             zerofill: false,
+            sparse: false,
             comment,
             charset: String::new(),
             collation: String::new(),
@@ -201,7 +209,8 @@ pub(crate) async fn table_schema(
     }
 
     let index_rows = sqlx::query(
-        "SELECT i.relname, ix.indisunique, ix.indisprimary, a.attname \
+        "SELECT i.relname, ix.indisunique, ix.indisprimary, a.attname, \
+                (ix.indoption[k.ord - 1] & 1) = 1 AS descending \
          FROM pg_index ix \
          JOIN pg_class i ON i.oid = ix.indexrelid \
          JOIN pg_class t ON t.oid = ix.indrelid \
@@ -222,11 +231,18 @@ pub(crate) async fn table_schema(
         let unique: bool = row.try_get(1).unwrap_or(false);
         let primary: bool = row.try_get(2).unwrap_or(false);
         let column: String = row.try_get(3).unwrap_or_default();
+        // PostgreSQL indexes have no prefix length (子部分 is MySQL's).
+        let descending: bool = row.try_get(4).unwrap_or(false);
+        let index_column = IndexColumnDef {
+            name: column,
+            descending,
+            prefix_length: String::new(),
+        };
         match indexes.iter_mut().find(|index| index.name == name) {
-            Some(existing) => existing.columns.push(column),
+            Some(existing) => existing.columns.push(index_column),
             None => indexes.push(IndexDef {
                 name,
-                columns: vec![column],
+                columns: vec![index_column],
                 unique,
                 primary,
                 index_type: String::new(),
@@ -316,6 +332,8 @@ pub(crate) async fn table_schema(
     Ok(TableSchema {
         columns,
         indexes,
+        unique_keys: Vec::new(),
+        checks: Vec::new(),
         foreign_keys,
         triggers,
         options: TableOptions {

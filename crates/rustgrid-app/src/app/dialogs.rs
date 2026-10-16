@@ -1105,6 +1105,13 @@ impl AppView {
                         "design.confirm_delete_foreign_key",
                         "design.delete_foreign_key",
                     ),
+                    DesignDeleteKind::UniqueKeys => (
+                        "design.confirm_delete_unique_key",
+                        "design.delete_unique_key",
+                    ),
+                    DesignDeleteKind::Checks => {
+                        ("design.confirm_delete_check", "design.delete_check")
+                    }
                 };
                 (
                     t!("design.delete_title").to_string(),

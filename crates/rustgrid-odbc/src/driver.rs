@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use rustgrid_core::{
     AdvancedFields, Connection, ConnectionConfig, ConnectionFormSpec, ConnectionHomePage,
     DatabaseEditorSpec, Driver, DriverCapabilities, DriverDescriptor, DriverDialect,
-    DriverIconStyle, DriverId, Error, Result,
+    DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
 };
 
 use crate::api;
@@ -62,6 +62,9 @@ impl Driver for OdbcDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
+            // The generic ODBC driver does not implement the table designer at all, so it keeps the
+            // default shape; the panel is never opened for it.
+            table_designer: TableDesignerSpec::default(),
             id: DriverId::new("odbc"),
             display_name: "ODBC".to_string(),
             default_port: 0,

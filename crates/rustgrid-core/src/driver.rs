@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::capability::DriverCapabilities;
-use crate::descriptor::{ConnectionFormSpec, DriverDescriptor, DriverIconStyle};
+use crate::descriptor::{ConnectionFormSpec, DriverDescriptor, DriverIconStyle, TableDesignerSpec};
 use crate::dialect::DriverDialect;
 use crate::error::{Error, Result};
 use crate::model::{
@@ -45,6 +45,7 @@ pub trait Driver: Send + Sync {
             ),
             database_editor: self.database_editor(),
             connection_form: ConnectionFormSpec::default(),
+            table_designer: TableDesignerSpec::default(),
             order: 1000,
         }
     }
