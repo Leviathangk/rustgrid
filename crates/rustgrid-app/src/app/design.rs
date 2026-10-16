@@ -43,17 +43,18 @@ pub(super) const INDEX_COMMENT_WIDTH: f32 = 240.0;
 // The index field editor's per-row controls.
 pub(super) const INDEX_FIELD_NAME_WIDTH: f32 = 200.0;
 pub(super) const INDEX_FIELD_OPTION_WIDTH: f32 = 80.0;
-/// What a row leads its name with: the ▶ marker, the check box and the gaps between the three. The
-/// header, which has neither, offsets its 字段 label by the same amount so the 排序 / 子部分 cells line
-/// up with it.
-pub(super) const INDEX_FIELD_LEAD_WIDTH: f32 = 39.0;
+/// What a row leads its name with: the drag handle (14), the check box (14) and the `px_2` / `gap_2`
+/// spacing around them. The heading row, which has neither, offsets its 排序 / 子部分 labels by the same
+/// amount so they line up with the rows' cells.
+pub(super) const INDEX_FIELD_LEAD_WIDTH: f32 = 60.0;
 
 // The index field editor's panel metrics. Its list is as tall as the window allows (up to
 // `INDEX_FIELDS_LIST_HEIGHT`) instead of a fixed 240px that cut the footer off on a short window;
-// `INDEX_FIELDS_CHROME_HEIGHT` is the header, footer and padding around it.
+// `INDEX_FIELDS_CHROME_HEIGHT` is everything around the list — the title, the column headings, the
+// search box and the footer.
 pub(super) const INDEX_FIELDS_LIST_HEIGHT: f32 = 420.0;
 pub(super) const INDEX_FIELDS_LIST_MIN_HEIGHT: f32 = 120.0;
-pub(super) const INDEX_FIELDS_CHROME_HEIGHT: f32 = 96.0;
+pub(super) const INDEX_FIELDS_CHROME_HEIGHT: f32 = 116.0;
 
 // The foreign-key grid's columns.
 pub(super) const FK_NAME_WIDTH: f32 = 180.0;
@@ -206,7 +207,7 @@ pub(super) fn field_column_display(kind: DesignerFieldColumn, column: &ColumnDef
 }
 
 /// The auxiliary inputs owned by a designer, identified by their callback tag.
-#[derive(Clone, Copy)]
+#[derive(Clone, PartialEq, Eq)]
 enum InputTag {
     Default,
     Engine,
@@ -216,8 +217,11 @@ enum InputTag {
     ColumnCollation,
     AutoIncrement,
     Comment,
-    /// One draft row's 子部分 (index prefix length) in the index field editor.
-    IndexPrefix(usize),
+    /// The index field editor's search box.
+    IndexFieldSearch,
+    /// One field's 子部分 (index prefix length) in the index field editor, by field name — keyed by
+    /// name rather than by row so a re-order neither drops the editor nor its text.
+    IndexPrefix(String),
 }
 
 /// A live in-place editor over one cell of the field grid.
@@ -301,8 +305,8 @@ fn apply_row_selection(
     }
 }
 
-/// One row of the index field editor's list: a column of the table, whether it is a member of the
-/// index being edited, and — for a member — its own per-column options.
+/// One row of the index field editor: a column of the table, whether it is a member of the index
+/// being edited, and — for a member — its own per-column options.
 #[derive(Clone)]
 pub(super) struct IndexFieldRow {
     pub(super) name: String,
@@ -314,25 +318,22 @@ pub(super) struct IndexFieldRow {
 
 /// The index field editor's open draft.
 ///
-/// The editor is Navicat's: one row per *column of the table* with a check box, so a field is
-/// picked by ticking it rather than by typing a name, and the list can be reordered with ↑ ↓. The
-/// ticked rows, in list order, are the index's fields.
+/// The editor is the grid's 字段筛选 popup applied to an index: one row per *column of the table*
+/// with a check box, a search box above them, and drag handles to order them. The ticked rows, in
+/// list order, are the index's fields.
 ///
 /// Every edit (the ticks, 排序, 子部分, the order) lands here and only 确定 installs it; 取消 or a click
-/// outside discards it, exactly as Navicat's editor does. A draft for the primary key row edits the
-/// columns' 主键 flags instead — the model keeps that key on the columns, so its rows carry no
-/// per-column options.
+/// outside discards it. A draft for the primary key row edits the columns' 主键 flags instead — the
+/// model keeps that key on the columns, so its rows carry no per-column options.
 #[derive(Clone)]
 pub(super) struct IndexFieldsDraft {
     /// The index row being edited.
     pub(super) row: usize,
     /// Whether this is the 主键 row.
     pub(super) primary: bool,
-    /// Every column of the table, in the order the editor lists them (the table's own order at
-    /// first, permuted with ↑ ↓).
+    /// Every column of the table, in the order the editor lists them (the index's own field order
+    /// for its fields first, then the table's remaining columns, re-ordered by dragging a handle).
     pub(super) fields: Vec<IndexFieldRow>,
-    /// The row the footer's ↑ ↓ + − and the ▶ marker act on.
-    pub(super) selected: Option<usize>,
 }
 
 impl IndexFieldsDraft {
@@ -348,6 +349,16 @@ impl IndexFieldsDraft {
             })
             .collect()
     }
+}
+
+/// The field row being dragged by its handle, as the grid's 字段筛选 popup tracks it: the row it
+/// started on, where it is now, and where the press began — a re-order needs no more than the
+/// pointer's travel over fixed-height rows.
+#[derive(Clone, Copy)]
+pub(super) struct IndexFieldDrag {
+    pub(super) from: usize,
+    pub(super) current: usize,
+    pub(super) start_y: f32,
 }
 
 /// The text editor columns of the index grid.
@@ -551,9 +562,13 @@ pub(super) struct TableDesignView {
     /// The 字段 editor of the selected index, as a draft (see [`IndexFieldsDraft`]).
     pub(super) index_fields_draft: Option<IndexFieldsDraft>,
     pub(super) index_fields_anchor: DesignPickerAnchors,
-    /// The 子部分 input of each draft row that is part of the index, rebuilt whenever the draft's
-    /// rows change (the wrapper builds its inner state on the first render).
-    pub(super) index_field_prefix_inputs: BTreeMap<usize, Entity<TextInput>>,
+    /// The editor's search text, which narrows the field list.
+    pub(super) index_field_query: String,
+    /// The 子部分 inputs of the index field editor, keyed by field name.
+    pub(super) index_field_prefix_inputs: BTreeMap<String, Entity<TextInput>>,
+    pub(super) index_field_drag: Option<IndexFieldDrag>,
+    /// The editor's search field, kept across opens so its inner state survives.
+    pub(super) index_field_search_input: Entity<TextInput>,
     /// The unique-key grid: its own selection, in-place name editor and field picker. An engine
     /// only shows the tab when its [`TableDesignerSpec`] declares it.
     pub(super) selected_unique_key: Option<usize>,
@@ -651,9 +666,40 @@ fn text_input(
     cx.new(move |cx| {
         TextInput::new(theme, value, TextInputOptions::default(), cx).on_change(Rc::new(
             move |text, _window, cx| {
-                let _ = weak.update(cx, |view, cx| view.input_changed(tag, text, cx));
+                let _ = weak.update(cx, |view, cx| view.input_changed(tag.clone(), text, cx));
             },
         ))
+    })
+}
+
+/// The index field editor's search box: the grid's 字段筛选 field, with the magnifier icon, the
+/// placeholder and a clear button.
+fn make_index_field_search_input(
+    theme: Theme,
+    weak: WeakEntity<TableDesignView>,
+    cx: &mut Context<'_, TableDesignView>,
+) -> Entity<TextInput> {
+    let options = TextInputOptions {
+        placeholder: t!("design.index.fields_search").to_string().into(),
+        icon: Some("icons/search.svg"),
+        clearable: true,
+        text_size: Some(12.0),
+        size: Some(Size::XSmall),
+        ..Default::default()
+    };
+    let change = weak.clone();
+    let cancel = weak;
+    cx.new(move |cx| {
+        TextInput::new(theme, "", options, cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |view, cx| {
+                    view.input_changed(InputTag::IndexFieldSearch, text, cx);
+                });
+            }))
+            .on_cancel(Rc::new(move |_window, cx| {
+                // Escape clears the search and closes the editor.
+                let _ = cancel.update(cx, |view, cx| view.close_index_fields(cx));
+            }))
     })
 }
 
@@ -672,7 +718,7 @@ fn option_combo(
         ComboBox::new(theme, Vec::new(), String::new(), OPTION_COMBO_WIDTH, cx)
             .field_width(OPTION_COMBO_WIDTH)
             .on_select(Rc::new(move |value, _window, cx| {
-                let _ = weak.update(cx, |view, cx| view.input_changed(tag, value, cx));
+                let _ = weak.update(cx, |view, cx| view.input_changed(tag.clone(), value, cx));
             }))
     })
 }
@@ -710,6 +756,7 @@ impl TableDesignView {
             cx,
         );
         let comment_input = text_input(theme, String::new(), weak.clone(), InputTag::Comment, cx);
+        let index_field_search_input = make_index_field_search_input(theme, weak.clone(), cx);
 
         Self {
             app,
@@ -737,7 +784,10 @@ impl TableDesignView {
             index_combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             index_fields_draft: None,
             index_fields_anchor: Rc::new(RefCell::new(BTreeMap::new())),
+            index_field_query: String::new(),
             index_field_prefix_inputs: BTreeMap::new(),
+            index_field_drag: None,
+            index_field_search_input,
             selected_unique_key: None,
             unique_key_rows: RowSelection::default(),
             unique_key_edit: None,
@@ -880,9 +930,15 @@ impl TableDesignView {
             }
             InputTag::AutoIncrement => self.schema.options.auto_increment = text.to_string(),
             InputTag::Comment => self.schema.options.comment = text.to_string(),
-            InputTag::IndexPrefix(row) => {
+            InputTag::IndexFieldSearch => {
+                // The search only narrows the editor's list; it changes nothing in the draft.
+                self.index_field_query = text.to_string();
+                cx.notify();
+                return;
+            }
+            InputTag::IndexPrefix(field) => {
                 // The draft owns the value, so it does not go through `mark_dirty`: only 确定 does.
-                self.set_index_draft_prefix(row, text, cx);
+                self.set_index_draft_prefix(&field, text, cx);
                 return;
             }
         }
@@ -2190,6 +2246,30 @@ impl TableDesignView {
             return;
         };
         let primary = index.primary;
+        let fields = self.index_field_rows(row, primary);
+        self.index_edit = None;
+        self.index_edit_blur = None;
+        self.index_combo = None;
+        self.index_field_query.clear();
+        self.index_field_search_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.select_index(row, cx);
+        self.index_fields_draft = Some(IndexFieldsDraft {
+            row,
+            primary,
+            fields,
+        });
+        self.rebuild_index_field_inputs(cx);
+        cx.notify();
+    }
+
+    /// The editor's rows for one index: the index's own fields first, in the order the index holds
+    /// them, then every other column of the table in its own order. Ticking is what makes a column
+    /// a field; the list's order is what the index stores.
+    fn index_field_rows(&self, row: usize, primary: bool) -> Vec<IndexFieldRow> {
+        let Some(index) = self.schema.indexes.get(row) else {
+            return Vec::new();
+        };
         let members: Vec<IndexColumnDef> = if primary {
             self.schema
                 .columns
@@ -2200,42 +2280,43 @@ impl TableDesignView {
         } else {
             index.columns.clone()
         };
-        let fields: Vec<IndexFieldRow> = self
-            .schema
-            .columns
+        let mut fields: Vec<IndexFieldRow> = members
             .iter()
-            .map(|column| {
-                let member = members
-                    .iter()
-                    .find(|member| member.name == column.name)
-                    .cloned()
-                    .unwrap_or_else(|| IndexColumnDef::new(column.name.clone()));
-                IndexFieldRow {
-                    name: column.name.clone(),
-                    member: members
-                        .iter()
-                        .any(|candidate| candidate.name == column.name),
-                    descending: member.descending,
-                    prefix_length: member.prefix_length,
-                }
+            .map(|member| IndexFieldRow {
+                name: member.name.clone(),
+                member: true,
+                descending: member.descending,
+                prefix_length: member.prefix_length.clone(),
             })
             .collect();
-        self.index_edit = None;
-        self.index_edit_blur = None;
-        self.index_combo = None;
-        self.select_index(row, cx);
-        // The caret starts on the first field that is part of the index, so ↑ ↓ + − have something
-        // to act on; on a brand-new index that is the first row.
-        let selected = fields
-            .iter()
-            .position(|field| field.member)
-            .or((!fields.is_empty()).then_some(0));
-        self.index_fields_draft = Some(IndexFieldsDraft {
-            row,
-            primary,
-            fields,
-            selected,
-        });
+        fields.extend(
+            self.schema
+                .columns
+                .iter()
+                .filter(|column| !members.iter().any(|member| member.name == column.name))
+                .map(|column| IndexFieldRow {
+                    name: column.name.clone(),
+                    member: false,
+                    descending: false,
+                    prefix_length: String::new(),
+                }),
+        );
+        fields
+    }
+
+    /// 重置: put the draft back to the index's own fields (and its own order).
+    pub(super) fn index_fields_reset(&mut self, cx: &mut Context<'_, Self>) {
+        let Some((row, primary)) = self
+            .index_fields_draft
+            .as_ref()
+            .map(|draft| (draft.row, draft.primary))
+        else {
+            return;
+        };
+        let fields = self.index_field_rows(row, primary);
+        if let Some(draft) = self.index_fields_draft.as_mut() {
+            draft.fields = fields;
+        }
         self.rebuild_index_field_inputs(cx);
         cx.notify();
     }
@@ -2270,15 +2351,18 @@ impl TableDesignView {
         self.mark_dirty(cx);
     }
 
-    /// Drop the draft's per-row controls (`None` draft, or rows changed under them).
+    /// Drop the draft's per-field controls (`None` draft, or fields changed under them).
     fn discard_index_field_inputs(&mut self) {
         self.index_field_prefix_inputs.clear();
+        self.index_field_drag = None;
     }
 
-    /// Rebuild the per-row controls after the draft's rows changed.
+    /// Bring the per-field controls in line with the draft: one 子部分 editor per field that is part
+    /// of the index. The editors are keyed by field name, so a re-order keeps them (and the text the
+    /// user may be typing) as they are.
     fn rebuild_index_field_inputs(&mut self, cx: &mut Context<'_, Self>) {
-        self.discard_index_field_inputs();
         let Some(draft) = self.index_fields_draft.clone() else {
+            self.discard_index_field_inputs();
             return;
         };
         // The primary key's rows carry no per-column options, and 子部分 only applies to a field that
@@ -2288,12 +2372,16 @@ impl TableDesignView {
                 .designer
                 .index_columns
                 .contains(&DesignerIndexColumn::PrefixLength);
-        if !has_prefix {
-            return;
-        }
+        let members: Vec<&IndexFieldRow> = if has_prefix {
+            draft.fields.iter().filter(|field| field.member).collect()
+        } else {
+            Vec::new()
+        };
+        self.index_field_prefix_inputs
+            .retain(|name, _| members.iter().any(|field| &field.name == name));
         let theme = self.theme;
-        for (draft_row, field) in draft.fields.iter().enumerate() {
-            if !field.member {
+        for field in members {
+            if self.index_field_prefix_inputs.contains_key(&field.name) {
                 continue;
             }
             let weak = self.self_weak.clone();
@@ -2301,18 +2389,11 @@ impl TableDesignView {
                 theme,
                 field.prefix_length.clone(),
                 weak,
-                InputTag::IndexPrefix(draft_row),
+                InputTag::IndexPrefix(field.name.clone()),
                 cx,
             );
-            self.index_field_prefix_inputs.insert(draft_row, input);
-        }
-    }
-
-    /// Select the draft row the footer's ↑ ↓ + − act on.
-    pub(super) fn select_index_draft_row(&mut self, row: usize, cx: &mut Context<'_, Self>) {
-        if let Some(draft) = self.index_fields_draft.as_mut() {
-            draft.selected = Some(row);
-            cx.notify();
+            self.index_field_prefix_inputs
+                .insert(field.name.clone(), input);
         }
     }
 
@@ -2322,7 +2403,6 @@ impl TableDesignView {
             && let Some(field) = draft.fields.get_mut(row)
         {
             field.member = !field.member;
-            draft.selected = Some(row);
         }
         self.rebuild_index_field_inputs(cx);
         cx.notify();
@@ -2338,71 +2418,69 @@ impl TableDesignView {
         cx.notify();
     }
 
-    fn set_index_draft_prefix(&mut self, draft_row: usize, text: &str, cx: &mut Context<'_, Self>) {
+    fn set_index_draft_prefix(&mut self, field: &str, text: &str, cx: &mut Context<'_, Self>) {
         if let Some(draft) = self.index_fields_draft.as_mut()
-            && let Some(field) = draft.fields.get_mut(draft_row)
+            && let Some(row) = draft.fields.iter_mut().find(|row| row.name == field)
         {
-            field.prefix_length = text.to_string();
+            row.prefix_length = text.to_string();
         }
         cx.notify();
     }
 
-    /// The footer's `+`: add the selected field to the index, or the first field the index does
-    /// not have when the caret is not on one.
-    pub(super) fn add_index_draft_column(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(draft) = self.index_fields_draft.as_mut() else {
-            return;
-        };
-        let row = draft
-            .selected
-            .filter(|row| draft.fields.get(*row).is_some_and(|field| !field.member))
-            .or_else(|| draft.fields.iter().position(|field| !field.member));
-        let Some(row) = row else {
-            return;
-        };
-        draft.fields[row].member = true;
-        draft.selected = Some(row);
-        self.rebuild_index_field_inputs(cx);
+    /// Start dragging one field row by its handle. Only the handle starts a drag, so clicking the
+    /// row (or its check box) still ticks the field.
+    pub(super) fn index_field_drag_start(
+        &mut self,
+        row: usize,
+        start_y: f32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.index_field_drag = Some(IndexFieldDrag {
+            from: row,
+            current: row,
+            start_y,
+        });
         cx.notify();
     }
 
-    /// The footer's `−`: take the selected field out of the index (the last one when the caret is
-    /// not on a field of it).
-    pub(super) fn remove_index_draft_column(&mut self, cx: &mut Context<'_, Self>) {
+    /// Re-order the dragged field as the pointer crosses row boundaries — in the draft only, so 取消
+    /// still throws the whole order away.
+    pub(super) fn index_field_drag_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(drag) = self.index_field_drag else {
+            return;
+        };
         let Some(draft) = self.index_fields_draft.as_mut() else {
+            self.index_field_drag = None;
             return;
         };
-        let row = draft
-            .selected
-            .filter(|row| draft.fields.get(*row).is_some_and(|field| field.member))
-            .or_else(|| draft.fields.iter().rposition(|field| field.member));
-        let Some(row) = row else {
-            return;
-        };
-        draft.fields[row].member = false;
-        draft.selected = Some(row);
-        self.rebuild_index_field_inputs(cx);
-        cx.notify();
-    }
-
-    /// Move the selected draft row by one position (`-1` towards the top of the list), which is how
-    /// the index's field order is set.
-    pub(super) fn move_index_draft_column(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
-        let Some(draft) = self.index_fields_draft.as_mut() else {
-            return;
-        };
-        let Some(row) = draft.selected else {
-            return;
-        };
-        let target = row as isize + delta;
-        if target < 0 || target as usize >= draft.fields.len() {
+        let len = draft.fields.len();
+        if len == 0 {
+            self.index_field_drag = None;
             return;
         }
-        let target = target as usize;
-        draft.fields.swap(row, target);
-        draft.selected = Some(target);
-        self.rebuild_index_field_inputs(cx);
+        let steps = ((f32::from(event.position.y) - drag.start_y) / DESIGN_ROW_HEIGHT).round();
+        let target = (drag.from as isize + steps as isize).clamp(0, len as isize - 1) as usize;
+        if target == drag.current {
+            return;
+        }
+        let field = draft.fields.remove(drag.current);
+        draft.fields.insert(target, field);
+        self.index_field_drag = Some(IndexFieldDrag {
+            current: target,
+            ..drag
+        });
         cx.notify();
+    }
+
+    /// Finish a drag.
+    pub(super) fn index_field_drag_end(&mut self, cx: &mut Context<'_, Self>) {
+        if self.index_field_drag.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub(super) fn add_foreign_key(&mut self, cx: &mut Context<'_, Self>) {

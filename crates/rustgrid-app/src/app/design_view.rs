@@ -1732,9 +1732,9 @@ impl TableDesignView {
         }
     }
 
-    /// The index's 字段 editor, shaped like Navicat's: one row per *column of the table* with a check
-    /// box, its 排序 and its 子部分 (the engine's own per-column options), and the footer's ↑ ↓ + − plus
-    /// 取消 / 确定.
+    /// The index's 字段 editor: the grid's 字段筛选 popup applied to an index — one row per *column of
+    /// the table* with a check box, a search box above the list, drag handles to order the fields
+    /// (the index's field order), the engine's own per-column options (排序 / 子部分) and 取消 / 确定.
     ///
     /// Everything edits a draft; 确定 installs it and 取消 (or a click outside) throws it away, so the
     /// grid never shows a half-made change. The 主键 row opens here too — its draft ticks the 主键
@@ -1743,7 +1743,8 @@ impl TableDesignView {
     /// The panel is sized from the table's own names — a long field (CUSTOMER_GRP_SCH_DETAIL_ID) is
     /// shown in full instead of being wrapped — and from the room the view has: it opens under the
     /// cell, or above it when that is where the space is, and the list takes whatever height is left
-    /// so the footer's buttons are never pushed out of the window.
+    /// so the footer's buttons are never pushed out of the window. Its header and footer carry the
+    /// chrome tint (`dialog_face`), so the panel does not read as part of the pane behind it.
     fn render_index_fields_popup(
         &self,
         _window: &mut Window,
@@ -1776,8 +1777,8 @@ impl TableDesignView {
                 .index_columns
                 .contains(&DesignerIndexColumn::PrefixLength);
         let width = index_fields_panel_width(&self.designer, &self.schema.columns, draft.primary);
-        // The row's own name cell, and what the header (which has no ▶ or check box) offsets its
-        // 字段 label by so the 排序 / 子部分 headings line up with the cells.
+        // The row's own name cell, and what the header (which has no drag handle or check box)
+        // offsets its 字段 label by so the 排序 / 子部分 headings line up with the cells.
         let name_width = index_fields_name_width(&self.schema.columns);
         let lead_width = INDEX_FIELD_LEAD_WIDTH;
         let below = view_height - anchor_y - INDEX_FIELDS_CHROME_HEIGHT;
@@ -1787,6 +1788,10 @@ impl TableDesignView {
         let open_up = view_height > 0.0 && below < INDEX_FIELDS_LIST_MIN_HEIGHT && above > below;
         let list_height = if open_up { above } else { below }
             .clamp(INDEX_FIELDS_LIST_MIN_HEIGHT, INDEX_FIELDS_LIST_HEIGHT);
+        let needle = self.index_field_query.trim().to_lowercase();
+        let dragged = self.index_field_drag.map(|drag| drag.current);
+        let member_count = draft.fields.iter().filter(|field| field.member).count();
+        let total = draft.fields.len();
 
         let mut panel = ui::popup_panel(theme)
             .id("design-index-fields")
@@ -1796,7 +1801,16 @@ impl TableDesignView {
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.close_index_fields(cx);
-            }));
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.index_field_drag_move(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    this.index_field_drag_end(cx);
+                }),
+            );
         if open_up {
             // Above the cell: the panel's bottom edge sits on the cell's top edge, never below the
             // view's own bottom (which is what a negative offset would mean).
@@ -1805,28 +1819,55 @@ impl TableDesignView {
             panel = panel.top(anchor.y);
         }
 
-        let mut header = div()
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .h(px(24.0))
+            .flex_none()
+            .bg(rgb(theme.dialog_face))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme.text))
+                    .child(t!("design.index.fields").to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!("{member_count}/{total}")),
+            );
+        panel = panel.child(header);
+
+        let mut columns = div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
             .px_2()
-            .py_1()
+            .h(px(20.0))
             .flex_none()
+            .bg(rgb(theme.dialog_face))
             .border_b_1()
             .border_color(rgb(theme.border))
+            .text_size(px(11.0))
             .text_color(rgb(theme.text_muted))
             .child(
-                div()
-                    .w(px(name_width + lead_width))
-                    .flex_none()
-                    .child(t!("design.index.fields").to_string()),
+                // The panel's title already names the field list, so this row only heads the
+                // engine's own option cells — the gap lines them up with the rows' cells.
+                div().w(px(name_width + lead_width)).flex_none(),
             );
         for option in [DesignerIndexColumn::Sort, DesignerIndexColumn::PrefixLength] {
             if (option == DesignerIndexColumn::Sort && sort)
                 || (option == DesignerIndexColumn::PrefixLength && prefix)
             {
-                header = header.child(
+                columns = columns.child(
                     div()
                         .w(px(INDEX_FIELD_OPTION_WIDTH))
                         .flex_none()
@@ -1834,7 +1875,15 @@ impl TableDesignView {
                 );
             }
         }
-        panel = panel.child(header);
+        panel = panel.child(columns);
+
+        panel = panel.child(
+            div()
+                .px_2()
+                .py_1()
+                .flex_none()
+                .child(self.index_field_search_input.clone()),
+        );
 
         let mut list = div()
             .id("design-index-fields-list")
@@ -1844,10 +1893,14 @@ impl TableDesignView {
             .min_h(px(24.0))
             .max_h(px(list_height))
             .overflow_y_scroll();
+        let mut rows = 0usize;
         for (row, field) in draft.fields.iter().enumerate() {
-            let selected = draft.selected == Some(row);
-            // A row is the whole cell: ticking its check box adds (or removes) the field, and
-            // clicking it moves the ▶ marker the footer's ↑ ↓ + − work from.
+            if !needle.is_empty() && !field.name.to_lowercase().contains(&needle) {
+                continue;
+            }
+            rows += 1;
+            // The handle is the only place a press starts a re-order, so clicking the row (or its
+            // check box) still ticks the field.
             let mut line = div()
                 .id(SharedString::from(format!("index-field-row-{row}")))
                 .flex()
@@ -1857,54 +1910,66 @@ impl TableDesignView {
                 .px_2()
                 .h(px(DESIGN_ROW_HEIGHT))
                 .flex_none()
-                .cursor_pointer()
-                .when(selected, |style| style.bg(rgb(theme.tree_selected_bg)))
-                .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.select_index_draft_row(row, cx)
-                }))
+                .when(dragged == Some(row), |style| {
+                    style.bg(rgb(theme.tree_selected_bg))
+                })
                 .child(
-                    // The row marker, as the grids' own gutter draws it.
                     div()
-                        .w(px(10.0))
-                        .flex_none()
+                        .id(SharedString::from(format!("index-field-handle-{row}")))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .when(selected, |marker| {
-                            marker.child(
-                                svg()
-                                    .path("icons/row_marker.svg")
-                                    .w(px(7.0))
-                                    .h(px(7.0))
-                                    .flex_none()
-                                    .text_color(rgb(theme.primary)),
-                            )
-                        }),
+                        .w(px(14.0))
+                        .h_full()
+                        .flex_none()
+                        .cursor_grab()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                this.index_field_drag_start(row, f32::from(event.position.y), cx);
+                            }),
+                        )
+                        .child(
+                            svg()
+                                .path("icons/drag_handle.svg")
+                                .w(px(14.0))
+                                .h(px(14.0))
+                                .flex_none()
+                                .text_color(rgb(theme.text_muted)),
+                        ),
                 )
                 .child(
                     div()
                         .id(SharedString::from(format!("index-field-check-{row}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
                         .flex_none()
+                        .h_full()
+                        .rounded_sm()
                         .cursor_pointer()
+                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.toggle_index_draft_member(row, cx)
                         }))
-                        .child(checkbox_box(field.member, theme)),
-                )
-                .child(
-                    // The field's own name, never wrapped (the column is fitted to the table's
-                    // longest one) and never clipped away from the caret.
-                    div()
-                        .w(px(name_width))
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_color(rgb(if field.member {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        }))
-                        .child(field.name.clone()),
+                        .child(checkbox_box(field.member, theme))
+                        .child(
+                            // The field's own name, never wrapped (the column is fitted to the
+                            // table's longest one) and never clipped away from the caret.
+                            div()
+                                .w(px(name_width))
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_size(px(12.0))
+                                .text_color(rgb(if field.member {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                }))
+                                .child(field.name.clone()),
+                        ),
                 );
             if sort && field.member {
                 let descending = field.descending;
@@ -1931,7 +1996,8 @@ impl TableDesignView {
                 line = line.child(div().w(px(INDEX_FIELD_OPTION_WIDTH)).flex_none());
             }
             if prefix {
-                let cell: AnyElement = match self.index_field_prefix_inputs.get(&row) {
+                // 子部分 belongs to the fields the index has, so an unticked row keeps the cell empty.
+                let cell: AnyElement = match self.index_field_prefix_inputs.get(&field.name) {
                     Some(input) => div()
                         .w(px(INDEX_FIELD_OPTION_WIDTH))
                         .h(px(20.0))
@@ -1944,62 +2010,69 @@ impl TableDesignView {
             }
             list = list.child(line);
         }
+        if rows == 0 {
+            list = list.child(
+                div()
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .px_2()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("design.index.fields_empty").to_string()),
+            );
+        }
         panel = panel.child(list);
 
-        let mut footer = div()
+        let footer = div()
             .flex()
             .flex_row()
             .items_center()
+            .justify_between()
             .gap_1()
             .px_2()
             .py_1()
             .flex_none()
+            .bg(rgb(theme.dialog_face))
             .border_t_1()
-            .border_color(rgb(theme.border));
-        for (id, label, delta) in [
-            ("design-index-field-up", "↑", -1isize),
-            ("design-index-field-down", "↓", 1),
-        ] {
-            footer = footer.child(ui::popup_button(
-                id,
-                label.to_string(),
-                false,
-                theme,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.move_index_draft_column(delta, cx)
-                }),
-            ));
-        }
-        footer = footer
-            .child(ui::popup_button(
-                "design-index-field-add",
-                "+".to_string(),
-                false,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.add_index_draft_column(cx)),
-            ))
-            .child(ui::popup_button(
-                "design-index-field-remove",
-                "−".to_string(),
-                false,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.remove_index_draft_column(cx)),
-            ))
-            .child(div().flex_1())
-            .child(ui::popup_button(
-                "design-index-fields-cancel",
-                t!("form.cancel").to_string(),
-                false,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.close_index_fields(cx)),
-            ))
-            .child(ui::popup_button(
-                "design-index-fields-ok",
-                t!("form.ok").to_string(),
-                true,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.confirm_index_fields(cx)),
-            ));
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .id("design-index-fields-reset")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(20.0))
+                    .px_2()
+                    .rounded_sm()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.index_fields_reset(cx)))
+                    .child(t!("design.index.fields_reset").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(ui::popup_button(
+                        "design-index-fields-cancel",
+                        t!("form.cancel").to_string(),
+                        false,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.close_index_fields(cx)),
+                    ))
+                    .child(ui::popup_button(
+                        "design-index-fields-ok",
+                        t!("form.ok").to_string(),
+                        true,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.confirm_index_fields(cx)),
+                    )),
+            );
         panel = panel.child(footer);
 
         deferred(panel).with_priority(100).into_any_element()
