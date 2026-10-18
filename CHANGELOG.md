@@ -9,6 +9,41 @@ All notable changes to RustGrid are documented in this file. The format is based
 UI labels are quoted as the app shows them, so this file quotes the English strings;
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) quotes the 简体中文 ones.
 
+## [0.0.14] - 2026-10-18
+
+### Added
+
+- Options → Shortcuts: every shortcut is a command you can rebind — search the list, click a field and
+  press the new keys, ↺ restores its default, ✕ removes it, and a conflict is flagged on both rows.
+- The connection tree and the object list work from the keyboard: arrows, Page Up / Page Down,
+  Home / End, ← / → to collapse and expand, Enter, F2, and typing a name jumps to it.
+- Tabs: Ctrl+Q opens a query, Ctrl+W closes the tab, Ctrl+Tab / Ctrl+Shift+Tab walk them in the tab
+  bar's order, and the tab menu shows each action's shortcut.
+- The table grid moves like a spreadsheet (arrows, Page Up / Page Down, Home / End, Ctrl+Home /
+  Ctrl+End, Tab, Shift extends), F5 reloads in place, and F2 opens a value editor under the grid.
+- The query editor: Ctrl+K or Ctrl+/ toggles a comment, Ctrl+D duplicates, Ctrl+T swaps lines,
+  Alt+↑ / Alt+↓ move them, and Format SQL is undoable.
+- Queries run statement by statement on one connection: each keeps its own result, error and time,
+  and the Info tab logs them with the failing statement marked.
+- A MySQL dump with `DELIMITER` and `CREATE PROCEDURE` bodies runs as it does in the mysql client.
+- The next start reopens the query tabs (with unsaved text), the connections, the open databases and
+  the table tabs that were open.
+- Options → General: the statement limit per run, stopping at the first error, and keeping the object
+  search across tabs; right-click a setting to copy its name or path.
+
+### Changed
+
+- Comments follow Navicat: `--`, `//`, `#` (MySQL) and an unclosed `/*` comment out the rest of the
+  line with or without a space, and what looks commented out is never sent to the server.
+- Completion offers the statement's own columns and aliases first where a column is expected.
+- Clicking a cell that is already selected edits it; ← / → inside a cell stay there.
+- Close Other Tabs and Close All are on Ctrl+Alt+W and Ctrl+Shift+W, rebindable like every command.
+
+### Fixed
+
+- A `DELIMITER GO` no longer ends a statement inside a word such as `CATEGORY`.
+- `END$$` ends a statement, so a routine written without a space before its delimiter splits.
+
 ## [0.0.13] - 2026-10-16
 
 ### Added
