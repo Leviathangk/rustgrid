@@ -244,56 +244,87 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
         .collect()
 }
 
-/// The ids of the tree rows that are currently visible, in draw order, for keyboard navigation.
-fn collect_visible_ids(
-    entries: &[GroupEntry],
-    connections: &[TreeConnection],
-    out: &mut Vec<String>,
-) {
-    for entry in entries {
-        match entry {
-            GroupEntry::Group(group) => {
-                out.push(format!("group-{}", group.id));
-                if group.expanded {
-                    collect_visible_ids(&group.children, connections, out);
-                }
-            }
-            GroupEntry::Connection(id) => {
-                let Some(conn) = connections.iter().find(|conn| &conn.id == id) else {
-                    continue;
-                };
-                out.push(format!("conn-{}", conn.index));
-                if !conn.expanded {
-                    continue;
-                }
-                let Loadable::Loaded(databases) = &conn.databases else {
-                    continue;
-                };
-                for db in databases {
-                    out.push(format!("db-{}-{}", conn.index, db.index));
-                    if !db.expanded {
-                        continue;
-                    }
-                    let schema_engine = !db.schemas.is_empty();
-                    if let Loadable::Loaded(tables) = &db.tables {
-                        for table in tables {
-                            let visible = if schema_engine {
-                                table
-                                    .schema
-                                    .as_ref()
-                                    .is_some_and(|schema| db.expanded_schemas.contains(schema))
-                            } else {
-                                db.categories.tables
-                            };
-                            if visible {
-                                out.push(format!("tbl-{}-{}-{}", conn.index, db.index, table.name));
-                            }
-                        }
-                    }
-                }
-            }
+/// What a tree row does when the keyboard expands, collapses or opens it.
+type NavAction = Rc<dyn Fn(&mut TreePane, &mut Window, &mut Context<'_, TreePane>)>;
+
+/// One drawn tree row, recorded by its renderer in draw order so keyboard navigation walks exactly
+/// what is on screen (groups, connections, databases, schemas, categories and their objects).
+#[derive(Clone)]
+pub(super) struct NavRow {
+    id: String,
+    /// The visible name, for typing a name to jump to the row.
+    label: String,
+    /// Nesting level; a row's parent is the nearest row above it with a smaller depth.
+    depth: usize,
+    /// `Some(expanded)` for a row with children, `None` for a leaf.
+    expanded: Option<bool>,
+    /// Expand / collapse this row (Right / Left).
+    toggle: Option<NavAction>,
+    /// Open this row (Enter): its double-click action.
+    open: Option<NavAction>,
+    /// The table / view a table row stands for, so F2 knows what to rename.
+    table: Option<(usize, usize, String, bool)>,
+}
+
+impl NavRow {
+    fn new(id: String, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            depth: 0,
+            expanded: None,
+            toggle: None,
+            open: None,
+            table: None,
         }
     }
+
+    /// A row with children: Right / Left expand and collapse it, and Enter does the same.
+    fn branch(mut self, expanded: bool, toggle: NavAction) -> Self {
+        self.expanded = Some(expanded);
+        self.open = Some(toggle.clone());
+        self.toggle = Some(toggle);
+        self
+    }
+
+    fn opens(mut self, open: NavAction) -> Self {
+        self.open = Some(open);
+        self
+    }
+}
+
+/// How long a pause ends a typed name: the next key starts a new one (Explorer-like). Shared with
+/// the object list.
+pub(super) const TYPEAHEAD_RESET: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// The index of the parent of row `index`: the nearest row above it with a smaller depth.
+fn nav_parent(depths: &[usize], index: usize) -> Option<usize> {
+    let depth = *depths.get(index)?;
+    (0..index)
+        .rev()
+        .find(|&candidate| depths[candidate] < depth)
+}
+
+/// The row a typed `prefix` jumps to: the first row after `current` (wrapping) whose label starts
+/// with it, ignoring case. A one-letter prefix starts after the current row, so repeating a letter
+/// cycles through the rows that begin with it; a longer prefix may stay on the current row.
+pub(super) fn typeahead_target(
+    labels: &[&str],
+    current: Option<usize>,
+    prefix: &str,
+) -> Option<usize> {
+    if labels.is_empty() || prefix.is_empty() {
+        return None;
+    }
+    let prefix = prefix.to_lowercase();
+    let start = match current {
+        Some(index) if prefix.chars().count() == 1 => index + 1,
+        Some(index) => index,
+        None => 0,
+    };
+    (0..labels.len())
+        .map(|offset| (start + offset) % labels.len())
+        .find(|&index| labels[index].to_lowercase().starts_with(&prefix))
 }
 
 impl TreePane {
@@ -308,136 +339,256 @@ impl TreePane {
             theme: Theme::dark(),
             visible_ids: Vec::new(),
             selection: BTreeSet::new(),
+            nav_rows: Vec::new(),
+            nav_build: std::cell::RefCell::new(Vec::new()),
+            nav_depth: std::cell::Cell::new(0),
+            row_bounds: Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+            typeahead: String::new(),
+            typeahead_at: None,
+            nav_generation: 0,
         }
+    }
+
+    /// Record `row` (drawn at the current depth) for keyboard navigation and return it wrapped so
+    /// its window bounds are captured each frame. Call it before drawing the row's children.
+    fn nav_row(&self, row: impl IntoElement, mut nav: NavRow) -> AnyElement {
+        nav.depth = self.nav_depth.get();
+        let id = nav.id.clone();
+        self.nav_build.borrow_mut().push(nav);
+        let bounds = self.row_bounds.clone();
+        div()
+            .w_full()
+            .child(row)
+            .on_children_prepainted(move |children, _window, _cx| {
+                if let Some(row) = children.first() {
+                    bounds.borrow_mut().insert(id.clone(), *row);
+                }
+            })
+            .into_any_element()
+    }
+
+    /// Draw a row's children one level deeper.
+    fn nested<R>(&self, draw: impl FnOnce() -> R) -> R {
+        self.nav_depth.set(self.nav_depth.get() + 1);
+        let result = draw();
+        self.nav_depth.set(self.nav_depth.get() - 1);
+        result
+    }
+
+    /// The index of the selected row in the last frame's rows.
+    fn nav_index(&self) -> Option<usize> {
+        let selected = self.selected.as_ref()?;
+        self.nav_rows.iter().position(|row| &row.id == selected)
+    }
+
+    /// Select row `index` from the keyboard: highlight it, keep the multi-selection in step and
+    /// scroll it into view.
+    fn nav_select(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let Some(row) = self.nav_rows.get(index) else {
+            return;
+        };
+        let id = row.id.clone();
+        self.selected = Some(id.clone());
+        self.selected_table = row.table.clone();
+        // A selectable row (connection / group) becomes the single selection; any other row clears
+        // the multi-selection. Only the tree redraws now; the rest of the app catches up once the
+        // keys settle, so holding an arrow key stays smooth.
+        if let Some(app) = self.app.upgrade() {
+            let selectable = list_ops::is_tree_selectable(&id);
+            app.update(cx, |app, _| {
+                if selectable {
+                    app.tree_selection.select_one(id.clone());
+                } else {
+                    app.tree_selection.clear();
+                }
+            });
+        }
+        self.reveal(&id);
+        self.nav_generation += 1;
+        let generation = self.nav_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NAV_SETTLE).await;
+            let _ = this.update(cx, |tree, cx| {
+                if tree.nav_generation == generation
+                    && let Some(app) = tree.app.upgrade()
+                {
+                    app.update(cx, |_, cx| cx.notify());
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Move the selection by `delta` rows (clamped), or to the first row when nothing is selected.
+    fn nav_move(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
+        if self.nav_rows.is_empty() {
+            return;
+        }
+        let last = self.nav_rows.len() - 1;
+        let next = match self.nav_index() {
+            Some(index) => index.saturating_add_signed(delta).min(last),
+            None => 0,
+        };
+        self.nav_select(next, cx);
+    }
+
+    /// How many rows one Page Up / Page Down moves: a screenful, less one row of context.
+    fn nav_page(&self) -> isize {
+        let height = f32::from(self.scroll.bounds().size.height);
+        ((height / 22.0).floor() as isize - 1).max(1)
+    }
+
+    /// Scroll the row `id` into view if the last frame drew it outside the visible area.
+    fn reveal(&self, id: &str) {
+        if let Some(row) = self.row_bounds.borrow().get(id).copied() {
+            ui::reveal_vertically(&self.scroll, row);
+        }
+    }
+
+    /// Right: expand a collapsed row, or step into an expanded row's first child.
+    fn nav_expand(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.nav_index() else {
+            return self.nav_move(0, cx);
+        };
+        let row = self.nav_rows[index].clone();
+        match row.expanded {
+            Some(false) => {
+                if let Some(toggle) = row.toggle {
+                    toggle(self, window, cx);
+                }
+            }
+            Some(true)
+                if self
+                    .nav_rows
+                    .get(index + 1)
+                    .is_some_and(|next| next.depth > row.depth) =>
+            {
+                self.nav_select(index + 1, cx);
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Left: collapse an expanded row, or move to the parent of any other row.
+    fn nav_collapse(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.nav_index() else {
+            return self.nav_move(0, cx);
+        };
+        let row = self.nav_rows[index].clone();
+        if row.expanded == Some(true)
+            && let Some(toggle) = row.toggle
+        {
+            toggle(self, window, cx);
+        } else {
+            let depths: Vec<usize> = self.nav_rows.iter().map(|row| row.depth).collect();
+            if let Some(parent) = nav_parent(&depths, index) {
+                self.nav_select(parent, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Enter: open the selected row (a table's grid, a routine, a query, or expand a branch).
+    fn nav_open(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.nav_index() else {
+            return;
+        };
+        if let Some(open) = self.nav_rows[index].open.clone() {
+            open(self, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Typing a name jumps to the next row whose label starts with it; a pause starts a new name.
+    /// Returns whether the keystroke was used.
+    fn nav_typeahead(&mut self, keystroke: &Keystroke, cx: &mut Context<'_, Self>) -> bool {
+        let modifiers = keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || self.rename_row.is_some() {
+            return false;
+        }
+        let Some(character) = keystroke
+            .key_char
+            .as_ref()
+            .and_then(|text| text.chars().next())
+            .filter(|character| !character.is_control())
+        else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        if self
+            .typeahead_at
+            .is_none_or(|at| now.duration_since(at) > TYPEAHEAD_RESET)
+        {
+            self.typeahead.clear();
+        }
+        self.typeahead_at = Some(now);
+        self.typeahead.push(character);
+        let labels: Vec<&str> = self.nav_rows.iter().map(|row| row.label.as_str()).collect();
+        if let Some(target) = typeahead_target(&labels, self.nav_index(), &self.typeahead) {
+            self.nav_select(target, cx);
+        }
+        true
     }
 
     pub(super) fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }
 
-    /// Tree keyboard handling: arrow/Home/End navigation, Enter to open, and F2 to rename.
-    fn tree_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let keystroke = &event.keystroke;
-        // Ctrl/Cmd+A selects every visible connection/group row.
-        if (keystroke.modifiers.control || keystroke.modifiers.platform)
-            && !keystroke.modifiers.alt
-            && keystroke.key.eq_ignore_ascii_case("a")
-        {
+    /// Keys no command claims: typing a name jumps to the matching row. The navigation keys
+    /// (arrows, Page Up/Down, Home/End, Enter, F2, Ctrl+A) are keymap commands handled by the
+    /// `tree_*` actions.
+    fn tree_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.nav_typeahead(&event.keystroke, cx) {
             cx.stop_propagation();
-            let selectable: Vec<String> = self
-                .visible_ids
-                .iter()
-                .filter(|id| list_ops::is_tree_selectable(id))
-                .cloned()
-                .collect();
-            if let Some(app) = self.app.upgrade() {
-                app.update(cx, |app, cx| app.tree_select_all(&selectable, cx));
-            }
-            cx.notify();
-            return;
-        }
-        if keystroke.modifiers.control || keystroke.modifiers.platform || keystroke.modifiers.alt {
-            return;
-        }
-        match keystroke.key.as_str() {
-            "up" | "down" | "home" | "end" => {
-                if self.visible_ids.is_empty() {
-                    return;
-                }
-                cx.stop_propagation();
-                let current = self
-                    .selected
-                    .as_ref()
-                    .and_then(|selected| self.visible_ids.iter().position(|id| id == selected));
-                let next = match keystroke.key.as_str() {
-                    "up" => current.map(|index| index.saturating_sub(1)).unwrap_or(0),
-                    "down" => current
-                        .map(|index| (index + 1).min(self.visible_ids.len() - 1))
-                        .unwrap_or(0),
-                    "home" => 0,
-                    "end" => self.visible_ids.len() - 1,
-                    _ => return,
-                };
-                let id = self.visible_ids[next].clone();
-                self.selected = Some(id.clone());
-                self.selected_table = None;
-                // Keep the multi-selection in step: a selectable row becomes the single selection,
-                // any other row clears it.
-                if let Some(app) = self.app.upgrade() {
-                    let selectable = list_ops::is_tree_selectable(&id);
-                    app.update(cx, |app, cx| {
-                        if selectable {
-                            app.tree_selection.select_one(id.clone());
-                        } else {
-                            app.tree_selection.clear();
-                        }
-                        cx.notify();
-                    });
-                }
-                self.scroll_selected_into_view(cx);
-                cx.notify();
-            }
-            "enter" => {
-                if let Some(id) = self.selected.clone() {
-                    cx.stop_propagation();
-                    self.activate_tree_id(&id, cx);
-                }
-            }
-            _ => {
-                if !keystroke.key.eq_ignore_ascii_case("f2") {
-                    return;
-                }
-                // F2 on a group renames the group in place.
-                if let Some(id) = self.selected.as_deref()
-                    && let Some(rest) = id.strip_prefix("group-")
-                    && let Ok(group_id) = rest.parse::<u64>()
-                {
-                    cx.stop_propagation();
-                    let Some(app) = self.app.upgrade() else {
-                        return;
-                    };
-                    app.update(cx, |app, cx| app.begin_group_rename(group_id, window, cx));
-                    cx.notify();
-                    return;
-                }
-                let Some((connection_index, database_index, name, is_view)) =
-                    self.selected_table.clone()
-                else {
-                    return;
-                };
-                cx.stop_propagation();
-                let Some(app) = self.app.upgrade() else {
-                    return;
-                };
-                app.update(cx, |app, cx| {
-                    app.begin_rename_table(
-                        RowPane::Tree,
-                        connection_index,
-                        database_index,
-                        name,
-                        is_view,
-                        window,
-                        cx,
-                    );
-                    app.notify_rename_pane(RowPane::Tree, cx);
-                });
-                cx.notify();
-            }
         }
     }
 
-    /// Scroll the selected tree row into view after a keyboard move.
-    fn scroll_selected_into_view(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(selected) = self.selected.as_ref() else {
+    /// Ctrl/Cmd+A selects every visible connection/group row.
+    fn tree_select_all(&mut self, cx: &mut Context<'_, Self>) {
+        let selectable: Vec<String> = self
+            .visible_ids
+            .iter()
+            .filter(|id| list_ops::is_tree_selectable(id))
+            .cloned()
+            .collect();
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, cx| app.tree_select_all(&selectable, cx));
+        }
+        cx.notify();
+    }
+
+    /// F2: rename the selected group or table in place.
+    fn tree_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(app) = self.app.upgrade() else {
             return;
         };
-        let Some(index) = self.visible_ids.iter().position(|id| id == selected) else {
+        if let Some(id) = self.selected.as_deref()
+            && let Some(rest) = id.strip_prefix("group-")
+            && let Ok(group_id) = rest.parse::<u64>()
+        {
+            app.update(cx, |app, cx| app.begin_group_rename(group_id, window, cx));
+            cx.notify();
+            return;
+        }
+        let Some((connection_index, database_index, name, is_view)) = self.selected_table.clone()
+        else {
             return;
         };
-        let _ = cx;
-        // Rough row offset (22px rows); enough to keep the moved selection on screen.
-        let offset = (index as f32 * 22.0 - 40.0).max(0.0);
-        self.scroll.set_offset(Point::new(px(0.0), px(offset)));
+        app.update(cx, |app, cx| {
+            app.begin_rename_table(
+                RowPane::Tree,
+                connection_index,
+                database_index,
+                name,
+                is_view,
+                window,
+                cx,
+            );
+            app.notify_rename_pane(RowPane::Tree, cx);
+        });
+        cx.notify();
     }
 
     /// Enter/click activation for a structural tree row.
@@ -669,10 +820,15 @@ impl TreePane {
         if let Some(color) = connection.color {
             body = body.bg(rgba(color.tint(theme, 0x33)));
         }
-        let body = body.child(tree_row_with_rect(
-            self.app.clone(),
-            row,
-            format!("conn-{index}"),
+        let nav_id = format!("conn-{index}");
+        let toggle_id = nav_id.clone();
+        let body = body.child(self.nav_row(
+            tree_row_with_rect(self.app.clone(), row, nav_id.clone()),
+            NavRow::new(nav_id, connection.name.clone()).branch(
+                connection.expanded,
+                // Expanding a closed connection connects it; see `activate_tree_id`.
+                Rc::new(move |this, _window, cx| this.activate_tree_id(&toggle_id, cx)),
+            ),
         ));
 
         let mut sub = div().flex().flex_col().w_full();
@@ -691,16 +847,20 @@ impl TreePane {
                     sub = sub.child(tree_message(error.clone(), 26.0, theme.danger));
                 }
                 Loadable::Loaded(databases) => {
-                    for database in databases {
-                        sub = sub.child(self.render_database(
-                            index,
-                            database,
-                            &connection.saved_queries,
-                            connection.supports_routines,
-                            connection.supports_schemas,
-                            cx,
-                        ));
-                    }
+                    sub = self.nested(|| {
+                        let mut sub = sub;
+                        for database in databases {
+                            sub = sub.child(self.render_database(
+                                index,
+                                database,
+                                &connection.saved_queries,
+                                connection.supports_routines,
+                                connection.supports_schemas,
+                                cx,
+                            ));
+                        }
+                        sub
+                    });
                 }
             }
         }
@@ -820,10 +980,20 @@ impl TreePane {
                     .whitespace_nowrap()
                     .child(database.name.clone()),
             );
+        let nav_id = format!("db-{connection_index}-{database_index}");
+        let toggle_id = nav_id.clone();
+        let row = self.nav_row(
+            row,
+            NavRow::new(nav_id, database.name.clone()).branch(
+                database.expanded,
+                Rc::new(move |this, _window, cx| this.activate_tree_id(&toggle_id, cx)),
+            ),
+        );
 
         let mut sub = div().flex().flex_col().w_full();
 
         if database.expanded {
+            self.nav_depth.set(self.nav_depth.get() + 1);
             match &database.tables {
                 Loadable::Idle => {}
                 Loadable::Loading => {
@@ -869,6 +1039,7 @@ impl TreePane {
                     }
                 }
             }
+            self.nav_depth.set(self.nav_depth.get() - 1);
         }
 
         div().flex().flex_col().w_full().child(row).child(sub)
@@ -965,25 +1136,56 @@ impl TreePane {
                 },
             ))
             .child(div().child(schema.to_string()));
+        let toggle_name = schema.to_string();
+        let open_name = schema.to_string();
+        let toggle_app = self.app.clone();
+        let open_app = self.app.clone();
+        let row = self.nav_row(
+            row,
+            NavRow::new(
+                format!("schema-{connection_index}-{database_index}-{schema}"),
+                schema,
+            )
+            .branch(
+                expanded,
+                Rc::new(move |_this, _window, cx| {
+                    let name = toggle_name.clone();
+                    let _ = toggle_app.update(cx, |app, cx| {
+                        app.toggle_schema(connection_index, database_index, name, cx)
+                    });
+                }),
+            )
+            // Enter does what a double-click does: open the schema.
+            .opens(Rc::new(move |_this, _window, cx| {
+                let name = open_name.clone();
+                let _ = open_app.update(cx, |app, cx| {
+                    app.select_schema(connection_index, database_index, name, cx)
+                });
+            })),
+        );
 
         let mut sub = div().flex().flex_col().w_full();
         if expanded {
             // Every category lives under the schema, so the whole tree reads as
             // database → schema → 表/视图/函数/查询/备份.
-            for category in Category::ALL {
-                if category == Category::Functions && !supports_routines {
-                    continue;
+            sub = self.nested(|| {
+                let mut sub = sub;
+                for category in Category::ALL {
+                    if category == Category::Functions && !supports_routines {
+                        continue;
+                    }
+                    sub = sub.child(self.render_category(
+                        connection_index,
+                        database_index,
+                        Some(schema),
+                        category,
+                        database,
+                        saved_queries,
+                        cx,
+                    ));
                 }
-                sub = sub.child(self.render_category(
-                    connection_index,
-                    database_index,
-                    Some(schema),
-                    category,
-                    database,
-                    saved_queries,
-                    cx,
-                ));
-            }
+                sub
+            });
         }
 
         div().flex().flex_col().w_full().child(row).child(sub)
@@ -1091,8 +1293,31 @@ impl TreePane {
             .child(tree_chevron(expanded, theme.chevron))
             .child(tree_icon(category.icon_path(), icon_color))
             .child(div().child(label));
+        let toggle_app = self.app.clone();
+        let toggle_schema = schema.map(str::to_string);
+        let row = self.nav_row(
+            row,
+            NavRow::new(
+                format!(
+                    "cat-{connection_index}-{database_index}-{scope}-{}",
+                    category.id()
+                ),
+                t!(category.label()).to_string(),
+            )
+            .branch(
+                expanded,
+                Rc::new(move |_this, _window, cx| {
+                    let schema = toggle_schema.clone();
+                    let _ = toggle_app.update(cx, |app, cx| {
+                        app.toggle_category(connection_index, database_index, schema, category, cx)
+                    });
+                }),
+            ),
+        );
 
         let mut sub = div().flex().flex_col().w_full();
+        let depth = self.nav_depth.get();
+        self.nav_depth.set(depth + 1);
         if expanded {
             match category {
                 Category::Tables | Category::Views => {
@@ -1108,7 +1333,7 @@ impl TreePane {
                             {
                                 continue;
                             }
-                            sub = sub.child(self.render_table(
+                            let element = self.render_table(
                                 connection_index,
                                 database_index,
                                 leaf_index,
@@ -1116,7 +1341,38 @@ impl TreePane {
                                 indent + 18.0,
                                 table,
                                 cx,
+                            );
+                            // Enter opens the table's data grid, like a double-click.
+                            let open_app = self.app.clone();
+                            let open_database = database.name.clone();
+                            let open_table = table.name.clone();
+                            let is_view = table.is_view;
+                            let mut nav = NavRow::new(
+                                format!("tbl-{connection_index}-{database_index}-{}", table.name),
+                                table.name.clone(),
+                            )
+                            .opens(Rc::new(
+                                move |_this, _window, cx| {
+                                    let (database, table) =
+                                        (open_database.clone(), open_table.clone());
+                                    let _ = open_app.update(cx, |app, cx| {
+                                        app.select_table(
+                                            connection_index,
+                                            database,
+                                            table,
+                                            is_view,
+                                            cx,
+                                        )
+                                    });
+                                },
                             ));
+                            nav.table = Some((
+                                connection_index,
+                                database_index,
+                                table.name.clone(),
+                                is_view,
+                            ));
+                            sub = sub.child(self.nav_row(element, nav));
                             leaf_index += 1;
                         }
                     }
@@ -1140,7 +1396,7 @@ impl TreePane {
                             {
                                 continue;
                             }
-                            sub = sub.child(self.render_routine(
+                            let element = self.render_routine(
                                 connection_index,
                                 database_index,
                                 index,
@@ -1148,7 +1404,33 @@ impl TreePane {
                                 indent + 18.0,
                                 routine,
                                 cx,
+                            );
+                            // Enter opens the routine's editor, like a double-click.
+                            let open_app = self.app.clone();
+                            let open_database = database.name.clone();
+                            let open_name = routine.name.clone();
+                            let kind = routine.kind;
+                            let nav = NavRow::new(
+                                format!("rtn-{connection_index}-{database_index}-{}", routine.name),
+                                split_schema(&routine.name)
+                                    .map_or(routine.name.as_str(), |(_, name)| name),
+                            )
+                            .opens(Rc::new(
+                                move |_this, _window, cx| {
+                                    let (database, name) =
+                                        (open_database.clone(), open_name.clone());
+                                    let _ = open_app.update(cx, |app, cx| {
+                                        app.open_routine_by_name(
+                                            connection_index,
+                                            database,
+                                            name,
+                                            kind,
+                                            cx,
+                                        )
+                                    });
+                                },
                             ));
+                            sub = sub.child(self.nav_row(element, nav));
                         }
                     }
                 },
@@ -1163,17 +1445,26 @@ impl TreePane {
                                 None => query.schema.is_none(),
                             }
                     }) {
-                        sub = sub.child(self.render_saved_query(
-                            connection_index,
-                            database_index,
-                            query,
-                            cx,
-                        ));
+                        let element =
+                            self.render_saved_query(connection_index, database_index, query, cx);
+                        // Enter opens the saved query, like a double-click.
+                        let open_app = self.app.clone();
+                        let file_index = query.index;
+                        let nav = NavRow::new(
+                            format!("qry-{connection_index}-{database_index}-{}", query.index),
+                            query.name.clone(),
+                        )
+                        .opens(Rc::new(move |_this, _window, cx| {
+                            let _ =
+                                open_app.update(cx, |app, cx| app.open_saved_query(file_index, cx));
+                        }));
+                        sub = sub.child(self.nav_row(element, nav));
                     }
                 }
                 _ => {}
             }
         }
+        self.nav_depth.set(depth);
 
         div().flex().flex_col().w_full().child(row).child(sub)
     }
@@ -1667,14 +1958,29 @@ impl TreePane {
             .child(tree_icon("icons/folder.svg", theme.icon_group))
             .child(label);
         let row = tree_row_with_rect(self.app.clone(), row, format!("group-{id}"));
+        let toggle_id = row_id.clone();
+        let row = self.nav_row(
+            row,
+            NavRow::new(row_id, group.name.clone()).branch(
+                group.expanded,
+                Rc::new(move |this, _window, cx| this.activate_tree_id(&toggle_id, cx)),
+            ),
+        );
 
         let mut body = div().flex().flex_col().w_full().child(row);
         if group.expanded {
-            let mut children = div().flex().flex_col().w_full().pl(px(12.0));
-            for child in &group.children {
-                children =
-                    children.child(self.render_tree_entry(child, connections, group_rename, cx));
-            }
+            let children = self.nested(|| {
+                let mut children = div().flex().flex_col().w_full().pl(px(12.0));
+                for child in &group.children {
+                    children = children.child(self.render_tree_entry(
+                        child,
+                        connections,
+                        group_rename,
+                        cx,
+                    ));
+                }
+                children
+            });
             body = body.child(children);
         }
         body.into_any_element()
@@ -1703,8 +2009,9 @@ impl Render for TreePane {
         self.rename_row = rename;
         self.selection = tree_selection.into_iter().collect();
 
-        self.visible_ids.clear();
-        collect_visible_ids(&layout, &connections, &mut self.visible_ids);
+        // The row renderers record every drawn row here, in draw order (see `nav_row`).
+        self.nav_build.borrow_mut().clear();
+        self.nav_depth.set(0);
 
         let mut list = div().flex().flex_col().w_full();
         if layout.is_empty() {
@@ -1720,6 +2027,13 @@ impl Render for TreePane {
             list =
                 list.child(self.render_tree_entry(entry, &connections, group_rename.as_ref(), cx));
         }
+        self.nav_rows = std::mem::take(&mut *self.nav_build.borrow_mut());
+        self.visible_ids = self.nav_rows.iter().map(|row| row.id.clone()).collect();
+        // Rows that are no longer drawn must not keep stale bounds.
+        let drawn: BTreeSet<&str> = self.nav_rows.iter().map(|row| row.id.as_str()).collect();
+        self.row_bounds
+            .borrow_mut()
+            .retain(|id, _| drawn.contains(id.as_str()));
 
         // The drag hit-test reads last frame's rectangles; drop them now so the rows can republish
         // them during this frame's paint. The drop indicator itself is drawn by `AppView` (which
@@ -1729,6 +2043,7 @@ impl Render for TreePane {
         }
 
         let container = div()
+            .relative()
             .flex()
             .flex_col()
             .w_full()
@@ -1737,6 +2052,7 @@ impl Render for TreePane {
             .child(
                 div()
                     .id("sidebar-scroll")
+                    .key_context(TREE_CONTEXT)
                     .flex()
                     .flex_col()
                     .w_full()
@@ -1746,6 +2062,46 @@ impl Render for TreePane {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .track_focus(&self.focus)
+                    // Keyboard navigation: keymap commands, rebindable from Options → Shortcuts.
+                    .on_action(cx.listener(|this, _: &TreeUp, _window, cx| this.nav_move(-1, cx)))
+                    .on_action(cx.listener(|this, _: &TreeDown, _window, cx| this.nav_move(1, cx)))
+                    .on_action(cx.listener(|this, _: &TreePageUp, _window, cx| {
+                        let page = this.nav_page();
+                        this.nav_move(-page, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &TreePageDown, _window, cx| {
+                        let page = this.nav_page();
+                        this.nav_move(page, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &TreeHome, _window, cx| {
+                        if !this.nav_rows.is_empty() {
+                            this.nav_select(0, cx);
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &TreeEnd, _window, cx| {
+                        if let Some(last) = this.nav_rows.len().checked_sub(1) {
+                            this.nav_select(last, cx);
+                        }
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &TreeExpand, window, cx| this.nav_expand(window, cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &TreeCollapse, window, cx| {
+                        this.nav_collapse(window, cx)
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &TreeOpen, window, cx| this.nav_open(window, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &TreeRename, window, cx| {
+                            this.tree_rename(window, cx)
+                        }),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &TreeSelectAll, _window, cx| {
+                            this.tree_select_all(cx)
+                        }),
+                    )
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                         this.tree_key(event, window, cx);
                     }))
@@ -1792,6 +2148,13 @@ impl Render for TreePane {
                         }),
                     )
                     .child(list),
+            )
+            // gpui does not paint a scrollbar for an overflow container; this one can be dragged,
+            // and clicking its track jumps there.
+            .child(
+                Scrollbar::vertical(&self.scroll)
+                    .mode(ScrollbarMode::Always)
+                    .id("sidebar-scrollbar"),
             );
         let app = self.app.clone();
         div()
@@ -1893,4 +2256,33 @@ pub(super) fn tree_marquee_element(
     )
     .with_priority(61)
     .into_any_element()
+}
+
+#[cfg(test)]
+mod nav_tests {
+    use super::{nav_parent, typeahead_target};
+
+    #[test]
+    fn a_rows_parent_is_the_nearest_shallower_row_above_it() {
+        // conn, db, Tables, t1, t2, Views, db2
+        let depths = [0, 1, 2, 3, 3, 2, 1];
+        assert_eq!(nav_parent(&depths, 0), None);
+        assert_eq!(nav_parent(&depths, 3), Some(2));
+        assert_eq!(nav_parent(&depths, 4), Some(2));
+        assert_eq!(nav_parent(&depths, 5), Some(1));
+        assert_eq!(nav_parent(&depths, 6), Some(0));
+    }
+
+    #[test]
+    fn typing_jumps_to_the_next_matching_row_and_repeating_a_letter_cycles() {
+        let labels = ["Tables", "customers", "orders", "Customer_notes", "users"];
+        assert_eq!(typeahead_target(&labels, None, "c"), Some(1));
+        assert_eq!(typeahead_target(&labels, Some(1), "c"), Some(3));
+        assert_eq!(typeahead_target(&labels, Some(3), "c"), Some(1));
+        // A longer name may stay on the current row.
+        assert_eq!(typeahead_target(&labels, Some(1), "cust"), Some(1));
+        assert_eq!(typeahead_target(&labels, Some(1), "customer_"), Some(3));
+        assert_eq!(typeahead_target(&labels, Some(0), "zz"), None);
+        assert_eq!(typeahead_target(&[], None, "a"), None);
+    }
 }

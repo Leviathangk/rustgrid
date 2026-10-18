@@ -267,6 +267,12 @@ impl UserEditorSpec {
 pub trait ScriptSession: Send {
     /// Run one statement on the pinned connection and report its outcome.
     async fn execute(&mut self, sql: &str) -> Result<QueryResult>;
+
+    /// Run one statement and return every result set it produced (a stored procedure's `CALL`
+    /// can return several). The default returns [`ScriptSession::execute`]'s single result.
+    async fn execute_many(&mut self, sql: &str) -> Result<Vec<QueryResult>> {
+        Ok(vec![self.execute(sql).await?])
+    }
 }
 
 #[async_trait]

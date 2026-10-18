@@ -816,19 +816,19 @@ fn readonly_combo_field(
 /// session dropped there aborted the whole app (silently — a release build has no console) the
 /// moment the script finished. Routing every release through this guard covers the run ending, a
 /// stop/abort, and the task itself being dropped.
-struct ScriptSessionGuard {
-    runtime: Arc<Runtime>,
-    session: Option<Box<dyn rustgrid_core::ScriptSession>>,
+pub(super) struct ScriptSessionGuard {
+    pub(super) runtime: Arc<Runtime>,
+    pub(super) session: Option<Box<dyn rustgrid_core::ScriptSession>>,
 }
 
 impl ScriptSessionGuard {
     /// Take the session out to run one statement on it.
-    fn take(&mut self) -> Option<Box<dyn rustgrid_core::ScriptSession>> {
+    pub(super) fn take(&mut self) -> Option<Box<dyn rustgrid_core::ScriptSession>> {
         self.session.take()
     }
 
     /// Put the session back after a statement ran.
-    fn restore(&mut self, session: Box<dyn rustgrid_core::ScriptSession>) {
+    pub(super) fn restore(&mut self, session: Box<dyn rustgrid_core::ScriptSession>) {
         self.session = Some(session);
     }
 }

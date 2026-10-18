@@ -6,7 +6,9 @@
 //! [`CompletionSource`] the app keeps refreshed.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{App, Task, Window};
 use gpui_kit::component::input::CompletionProvider;
@@ -56,14 +58,89 @@ pub(crate) struct CompletionScope {
 pub(crate) struct CompletionSource {
     catalog: Arc<std::sync::RwLock<CompletionCatalog>>,
     scope: Arc<std::sync::RwLock<CompletionScope>>,
+    /// Starts loading a table's columns into the catalog: `(connection, database, table)`.
+    load_columns: Option<ColumnLoader>,
+    /// The column targets a popup has already waited for, `(connection, database, table)`: a load
+    /// that failed or was too slow must not cost every later popup the whole [`COLUMN_WAIT`] again.
+    waited: Arc<std::sync::Mutex<std::collections::HashSet<(usize, String, String)>>>,
 }
+
+/// Asks the app to load a table's columns into the completion catalog.
+pub(crate) type ColumnLoader = Rc<dyn Fn(&mut App, usize, String, String)>;
+
+/// How long the popup waits for the columns of the statement's tables to arrive before it opens
+/// without them (they are usually there within one round trip).
+const COLUMN_WAIT: Duration = Duration::from_millis(1200);
 
 impl CompletionSource {
     pub(crate) fn new(catalog: Arc<std::sync::RwLock<CompletionCatalog>>) -> Self {
         Self {
             catalog,
             scope: Arc::new(std::sync::RwLock::new(CompletionScope::default())),
+            load_columns: None,
+            waited: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    /// Let the provider request the columns it is missing (see [`ColumnLoader`]).
+    pub(crate) fn with_column_loader(mut self, loader: ColumnLoader) -> Self {
+        self.load_columns = Some(loader);
+        self
+    }
+
+    /// The `(database, table)` catalog keys of the columns `context` would offer.
+    fn column_targets(&self, context: &sql::SqlCompletionContext) -> Vec<(String, String)> {
+        let scope = self.scope.read().expect("completion scope lock");
+        match context.qualifier.last() {
+            Some(qualifier) => resolve_qualified_table(context, qualifier)
+                .and_then(|table| catalog_target(&scope, table))
+                .into_iter()
+                .collect(),
+            None => context
+                .tables
+                .iter()
+                .filter_map(|table| catalog_target(&scope, table))
+                .collect(),
+        }
+    }
+
+    /// The column targets whose columns the catalog does not hold yet.
+    fn missing_columns(&self, targets: &[(String, String)]) -> Vec<(String, String)> {
+        let Some(connection) = self
+            .scope
+            .read()
+            .expect("completion scope lock")
+            .connection_index
+        else {
+            return Vec::new();
+        };
+        let catalog = self.catalog.read().expect("completion catalog lock");
+        targets
+            .iter()
+            .filter(|(database, table)| {
+                !catalog
+                    .columns
+                    .contains_key(&(connection, database.clone(), table.clone()))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The targets of `missing` a popup has not waited for yet, recorded as waited for: the wait
+    /// is worth it once per table, not on every keystroke.
+    fn take_unwaited(
+        &self,
+        connection: usize,
+        missing: &[(String, String)],
+    ) -> Vec<(String, String)> {
+        let mut waited = self.waited.lock().expect("completion wait lock");
+        missing
+            .iter()
+            .filter(|(database, table)| {
+                waited.insert((connection, database.clone(), table.clone()))
+            })
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn with_scope(
@@ -134,7 +211,7 @@ impl CompletionProvider for SqlCompletionProvider {
         offset: usize,
         _trigger: CompletionContext,
         _window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Task<anyhow::Result<CompletionResponse>> {
         let sql_text = text.to_string();
         let dialect = self
@@ -144,20 +221,65 @@ impl CompletionProvider for SqlCompletionProvider {
             .expect("completion scope lock")
             .dialect;
         let context = sql::completion_context(&sql_text, offset, dialect);
-        let mut items = build_items(&self.source, &context);
         // Anchor the replacement range explicitly. gpui's completion menu derives it from the
         // offset of the *first* keystroke that opened the menu (`trigger_start_offset`), so
         // accepting "SELECT" after typing "sele" inserts at the wrong place ("seSELECT"). An
         // explicit `text_edit` overrides that range with the real identifier fragment
         // (`prefix_start..offset`).
         let range = replacement_range(text, &context, offset);
-        for item in &mut items {
-            item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
-                range,
-                new_text: item.label.clone(),
-            }));
+        let respond = move |source: &CompletionSource, context: &sql::SqlCompletionContext| {
+            let mut items = build_items(source, context);
+            for item in &mut items {
+                item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+                    range,
+                    new_text: item.label.clone(),
+                }));
+            }
+            CompletionResponse::Array(items)
+        };
+
+        // Where columns belong, wait (briefly) for the statement's tables' columns instead of
+        // opening on table names: the first popup after naming a table is the one that matters.
+        let missing = if context.suppress || context.kind == sql::SqlCompletionKind::Table {
+            Vec::new()
+        } else {
+            self.source
+                .missing_columns(&self.source.column_targets(&context))
+        };
+        let connection = self
+            .source
+            .scope
+            .read()
+            .expect("completion scope lock")
+            .connection_index;
+        let (Some(loader), Some(connection)) = (self.source.load_columns.clone(), connection)
+        else {
+            return Task::ready(Ok(respond(&self.source, &context)));
+        };
+        if missing.is_empty() {
+            return Task::ready(Ok(respond(&self.source, &context)));
         }
-        Task::ready(Ok(CompletionResponse::Array(items)))
+        for (database, table) in missing.clone() {
+            let loader = loader.clone();
+            // Deferred: the app may be mid-update while the editor asks for completions.
+            cx.defer(move |cx| loader(cx, connection, database, table));
+        }
+        // Wait for a target only the first time it is asked for: a load that failed or was too slow
+        // then does not delay every later popup by the whole COLUMN_WAIT.
+        let waiting = self.source.take_unwaited(connection, &missing);
+        if waiting.is_empty() {
+            return Task::ready(Ok(respond(&self.source, &context)));
+        }
+        let source = self.source.clone();
+        cx.spawn(async move |cx| {
+            let started = std::time::Instant::now();
+            while started.elapsed() < COLUMN_WAIT && !source.missing_columns(&waiting).is_empty() {
+                cx.background_executor()
+                    .timer(Duration::from_millis(40))
+                    .await;
+            }
+            Ok(respond(&source, &context))
+        })
     }
 
     fn is_completion_trigger(&self, _offset: usize, new_text: &str, _cx: &mut App) -> bool {
@@ -177,12 +299,33 @@ const GROUP_COMMON_KEYWORDS: u8 = 1;
 const GROUP_TABLES: u8 = 2;
 const GROUP_KEYWORDS: u8 = 3;
 const GROUP_FUNCTIONS: u8 = 4;
+/// Where a column is expected: the tables and aliases the statement names (to qualify a column).
+const GROUP_SCOPE: u8 = 5;
+/// Where a column is expected: every other table of the catalog, after everything else.
+const GROUP_OTHER_TABLES: u8 = 6;
+
+/// The rank of a group in the popup. Where a column is expected (`SELECT |`, `WHERE |`, ...), the
+/// statement's columns and its own tables / aliases come first and the rest of the catalog's tables
+/// last; where a table is expected (`FROM |`), Navicat's order holds.
+fn group_rank(group: u8, column_position: bool) -> u8 {
+    if !column_position {
+        return group;
+    }
+    match group {
+        GROUP_COLUMNS => 0,
+        GROUP_SCOPE => 1,
+        GROUP_COMMON_KEYWORDS => 2,
+        GROUP_FUNCTIONS => 3,
+        GROUP_KEYWORDS => 4,
+        _ => 5,
+    }
+}
 
 /// Whether a group's candidates keep the order they were built in instead of being re-sorted by
 /// length and then alphabetically: the table's own field order for columns, and the curated usage
 /// order of [`sql::COMMON_KEYWORDS`] for the everyday keywords.
 fn keeps_build_order(group: u8) -> bool {
-    matches!(group, GROUP_COLUMNS | GROUP_COMMON_KEYWORDS)
+    matches!(group, GROUP_COLUMNS | GROUP_COMMON_KEYWORDS | GROUP_SCOPE)
 }
 
 /// Build the completion items for a caret context, ordering columns → everyday keywords → tables →
@@ -248,9 +391,34 @@ fn build_items(
         }
     }
 
+    // Where a column is expected and the statement names tables: offer those tables' aliases
+    // and names (to qualify a column) right after the columns.
+    let column_position = qualifier.is_none()
+        && context.kind == sql::SqlCompletionKind::Column
+        && !context.tables.is_empty();
+    if column_position {
+        for table in &context.tables {
+            if let Some(alias) = &table.alias {
+                items.push((
+                    GROUP_SCOPE,
+                    completion_item(alias, &table.name, CompletionItemKind::VARIABLE),
+                ));
+            }
+            items.push((
+                GROUP_SCOPE,
+                completion_item(&table.name, "table", CompletionItemKind::CLASS),
+            ));
+        }
+    }
+
     // 2. Tables: all loaded tables, or the qualifier database's tables. With a schema selected,
     // only that schema's tables are offered (the schema selector's filtering).
     let table_kind = CompletionItemKind::CLASS;
+    let tables_group = if column_position {
+        GROUP_OTHER_TABLES
+    } else {
+        GROUP_TABLES
+    };
     if let Some(connection) = connection {
         let mut tables: Vec<(String, String)> = Vec::new();
         for ((conn, database), names) in &catalog.tables {
@@ -276,7 +444,7 @@ fn build_items(
         tables.dedup();
         for (name, database) in tables {
             let label = display_name(&name, scope.schema.as_deref());
-            items.push((GROUP_TABLES, completion_item(&label, &database, table_kind)));
+            items.push((tables_group, completion_item(&label, &database, table_kind)));
         }
     }
 
@@ -337,10 +505,13 @@ fn build_items(
         })
         .collect();
     filtered.sort_by(|a, b| {
-        // The closest match leads, and at equal quality the group above decides — the everyday
-        // keyword before the table names (Navicat's order).
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.cmp(&b.1))
+        // The closest match leads (a whole-word or prefix match before a match inside the name),
+        // and at equal closeness the group decides — the everyday keyword before the table names
+        // (Navicat's order), and where a column is expected the statement's columns first.
+        a.0.tier()
+            .cmp(&b.0.tier())
+            .then_with(|| group_rank(a.1, column_position).cmp(&group_rank(b.1, column_position)))
+            .then_with(|| a.0.cmp(&b.0))
             // Within a group the candidate closest to what was typed leads: `fr` offers `FREE`
             // before `FREEZE` before `FRAME_ROW`. Columns keep the table's own field order and the
             // everyday keywords their curated usage order, so those two groups are left as built.
@@ -375,6 +546,18 @@ enum Match {
     Substring,
     /// The typed characters appear in order but apart (`wms_asn` for `wsn`).
     Subsequence,
+}
+
+impl Match {
+    /// Exact and prefix matches rank together (the group then decides), above a match inside the
+    /// name, above a loose subsequence.
+    fn tier(self) -> u8 {
+        match self {
+            Match::Exact | Match::Prefix => 0,
+            Match::Substring => 1,
+            Match::Subsequence => 2,
+        }
+    }
 }
 
 /// How `label` matches the already-lowercased `fragment`, or `None` when it does not match at all.

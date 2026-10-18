@@ -496,7 +496,7 @@ impl AppView {
         let index = self.queries.len() - 1;
         self.activate_query(index, cx);
         if parameters.is_empty() {
-            self.run_query(false, cx);
+            self.run_query(RunScope::All, cx);
         }
     }
 

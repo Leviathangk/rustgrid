@@ -202,6 +202,9 @@ impl AppView {
         self.options_grid_show_comments = self.grid_show_comments;
         self.options_grid_show_types = self.grid_show_types;
         self.options_shortcuts = self.shortcuts.clone();
+        self.options_preserve_object_search = self.preserve_object_search;
+        self.options_stop_on_error = self.stop_on_error;
+        self.set_options_max_statements(self.max_statements_per_run.to_string(), cx);
         self.recording_shortcut = None;
         self.ensure_shortcut_search(cx);
         self.ensure_language_combo(cx);
@@ -394,6 +397,12 @@ impl AppView {
         self.grid_show_comments = self.options_grid_show_comments;
         self.grid_show_types = self.options_grid_show_types;
         self.shortcuts = self.options_shortcuts.clone();
+        self.preserve_object_search = self.options_preserve_object_search;
+        self.stop_on_error = self.options_stop_on_error;
+        // An empty or invalid entry keeps the current limit.
+        if let Ok(limit) = self.options_max_statements.trim().parse::<u32>() {
+            self.max_statements_per_run = limit;
+        }
         self.recording_shortcut = None;
         // Re-bind every command: the previously bound keystrokes are shadowed by a `NoAction`
         // so a changed or cleared shortcut stops firing.
@@ -501,7 +510,10 @@ impl AppView {
                             // The content pane sits on the dialog's own background while the nav
                             // keeps the tinted face, so the two sides read as separate surfaces.
                             .bg(rgb(theme.dialog_bg))
-                            .overflow_y_scroll()
+                            // The shortcuts page scrolls its own list under a fixed search box.
+                            .when(self.options_section != OptionsSection::Shortcuts, |pane| {
+                                pane.overflow_y_scroll()
+                            })
                             .child(self.options_body(cx)),
                     ),
             )
@@ -516,7 +528,92 @@ impl AppView {
                     .border_color(rgb(theme.border))
                     .child(self.options_footer(cx)),
             )
+            .children(self.options_copy_menu_element(cx))
             .into_any_element()
+    }
+
+    /// A right-click handler for a setting's row: offers to copy its name, or its path for sharing
+    /// ("Options › General › …").
+    fn copy_label_menu(
+        &self,
+        label: String,
+        cx: &mut Context<'_, Self>,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+            cx.stop_propagation();
+            this.options_copy_menu = Some((event.position, label.clone()));
+            cx.notify();
+        })
+    }
+
+    /// The setting's right-click menu, when open.
+    fn options_copy_menu_element(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+        let (position, label) = self.options_copy_menu.clone()?;
+        let path = format!(
+            "{} › {} › {label}",
+            t!("options.title"),
+            options_section_label(self.options_section)
+        );
+        let copy = |text: String| {
+            cx.listener(move |this, _event, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                this.options_copy_menu = None;
+                cx.notify();
+            })
+        };
+        let items = div()
+            .flex()
+            .flex_col()
+            .w(px(190.0))
+            .p_0p5()
+            .child(self.context_item(
+                "options-copy-name",
+                t!("options.copy_name").to_string(),
+                copy(label),
+            ))
+            .child(self.context_item(
+                "options-copy-path",
+                t!("options.copy_path").to_string(),
+                copy(path),
+            ));
+        Some(
+            ui::popup_panel(self.theme)
+                .id("options-copy-menu")
+                .left(position.x)
+                .top(position.y)
+                .on_mouse_down_out(cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.options_copy_menu = None;
+                    cx.notify();
+                }))
+                .child(items)
+                .into_any_element(),
+        )
+    }
+
+    /// Open the Options window on `section` and point out the setting `highlight` (an element id)
+    /// for a few seconds.
+    pub(super) fn open_options_at(
+        &mut self,
+        section: OptionsSection,
+        highlight: &'static str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.open_options(cx);
+        self.options_section = section;
+        self.options_highlight = Some(highlight);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.options_highlight == Some(highlight) {
+                    app.options_highlight = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The left navigation: 常规, 编辑器 and 关于.
@@ -625,8 +722,17 @@ impl AppView {
             .flex()
             .flex_col()
             .w_full()
-            .max_h(px(380.0))
-            .overflow_y_scroll();
+            .flex_1()
+            .min_h(px(0.0))
+            .pr_2()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("options.shortcuts.hint").to_string()),
+            );
         let mut any = false;
         for group in keymap::CommandGroup::ALL {
             let rows: Vec<AnyElement> = keymap::COMMANDS
@@ -660,26 +766,18 @@ impl AppView {
             );
         }
 
+        // Only the search box stays put; the hint and the commands scroll together beneath it.
         div()
             .flex()
             .flex_col()
             .gap_3()
             .w_full()
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .child(t!("options.shortcuts").to_string()),
-            )
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("options.shortcuts.hint").to_string()),
-            )
+            .h_full()
+            .min_h(px(0.0))
             .children(
                 self.options_shortcut_search
                     .clone()
-                    .map(|search| div().w(px(260.0)).child(search)),
+                    .map(|search| div().flex_none().w(px(260.0)).child(search)),
             )
             .child(list)
     }
@@ -858,6 +956,10 @@ impl AppView {
                     t!("options.data.show_comments").to_string(),
                     self.options_grid_show_comments,
                 )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.data.show_comments").to_string(), cx),
+                )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_grid_show_comments = !this.options_grid_show_comments;
                     cx.notify();
@@ -869,6 +971,10 @@ impl AppView {
                     "options-grid-show-types",
                     t!("options.data.show_types").to_string(),
                     self.options_grid_show_types,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.data.show_types").to_string(), cx),
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_grid_show_types = !this.options_grid_show_types;
@@ -903,6 +1009,106 @@ impl AppView {
                     )
                     .child(self.language_combo(cx)),
             )
+            .child(
+                toggle_row(
+                    self.theme,
+                    "options-preserve-object-search",
+                    t!("options.general.preserve_object_search").to_string(),
+                    self.options_preserve_object_search,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(
+                        t!("options.general.preserve_object_search").to_string(),
+                        cx,
+                    ),
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_preserve_object_search = !this.options_preserve_object_search;
+                    cx.notify();
+                })),
+            )
+            .child(
+                div()
+                    .id(OPTIONS_MAX_STATEMENTS)
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_3()
+                    .p_1()
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgba(0))
+                    // Pointed out (from the query's statement-limit notice): an accent frame.
+                    .when(
+                        self.options_highlight == Some(OPTIONS_MAX_STATEMENTS),
+                        |row| {
+                            row.border_color(rgb(self.theme.primary))
+                                .bg(rgba(self.theme.primary << 8 | 0x1f))
+                        },
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.copy_label_menu(t!("options.general.max_statements").to_string(), cx),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .child(t!("options.general.max_statements").to_string()),
+                    )
+                    .children(
+                        self.options_max_statements_input
+                            .clone()
+                            .map(|input| div().w(px(80.0)).flex_none().child(input)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(self.theme.text_muted))
+                            .child(t!("options.general.max_statements_hint").to_string()),
+                    ),
+            )
+            .child(
+                toggle_row(
+                    self.theme,
+                    "options-stop-on-error",
+                    t!("options.general.stop_on_error").to_string(),
+                    self.options_stop_on_error,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.general.stop_on_error").to_string(), cx),
+                )
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_stop_on_error = !this.options_stop_on_error;
+                    cx.notify();
+                })),
+            )
+    }
+
+    /// Stage the statement limit and show it in its field (built on first use).
+    fn set_options_max_statements(&mut self, value: String, cx: &mut Context<'_, Self>) {
+        self.options_max_statements = value.clone();
+        if let Some(input) = self.options_max_statements_input.clone() {
+            input.update(cx, |input, cx| input.set_text(value, cx));
+            return;
+        }
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let input = cx.new(move |cx| {
+            TextInput::new(theme, value, TextInputOptions::default(), cx).on_change(Rc::new(
+                move |text, _window, cx| {
+                    // Keep only the digits, so the field always holds a valid count.
+                    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+                    let _ = weak.update(cx, |app, cx| {
+                        app.options_max_statements = digits;
+                        cx.notify();
+                    });
+                },
+            ))
+        });
+        self.options_max_statements_input = Some(input);
     }
 
     /// The 编辑器 page: a live preview plus the editor settings.
@@ -942,6 +1148,10 @@ impl AppView {
                     t!("options.editor.line_numbers").to_string(),
                     self.options_editor_line_numbers,
                 )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.editor.line_numbers").to_string(), cx),
+                )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_editor_line_numbers = !this.options_editor_line_numbers;
                     cx.notify();
@@ -953,6 +1163,10 @@ impl AppView {
                     "options-editor-word-wrap",
                     t!("options.editor.word_wrap").to_string(),
                     self.options_editor_word_wrap,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.editor.word_wrap").to_string(), cx),
                 )
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_editor_word_wrap = !this.options_editor_word_wrap;
@@ -1023,6 +1237,12 @@ impl AppView {
                     this.options_grid_show_comments = false;
                     this.options_grid_show_types = false;
                     this.options_shortcuts.clear();
+                    this.options_preserve_object_search = false;
+                    this.options_stop_on_error = false;
+                    this.set_options_max_statements(
+                        rustgrid_config::DEFAULT_MAX_STATEMENTS.to_string(),
+                        cx,
+                    );
                     this.recording_shortcut = None;
                     cx.notify();
                 }),
@@ -1105,6 +1325,21 @@ fn is_function_key(key: &str) -> bool {
     key.strip_prefix('f')
         .and_then(|number| number.parse::<u8>().ok())
         .is_some_and(|number| (1..=24).contains(&number))
+}
+
+/// The element id of the statement-limit setting, so other views can point it out.
+pub(super) const OPTIONS_MAX_STATEMENTS: &str = "options-max-statements";
+
+/// A section's name in the Options navigation.
+fn options_section_label(section: OptionsSection) -> String {
+    match section {
+        OptionsSection::General => t!("options.general"),
+        OptionsSection::Editor => t!("options.editor"),
+        OptionsSection::Shortcuts => t!("options.shortcuts"),
+        OptionsSection::Data => t!("options.data"),
+        OptionsSection::About => t!("options.about"),
+    }
+    .to_string()
 }
 
 #[cfg(test)]

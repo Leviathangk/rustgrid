@@ -256,6 +256,9 @@ impl TextInput {
                             // it so it is not reported as a user edit.
                             this.programmatic_value = None;
                         } else {
+                            // A real edit: report it, and forget the programmatic value so a
+                            // later edit back to that same text is not mistaken for its echo.
+                            this.programmatic_value = None;
                             this.pending_change = Some(value);
                         }
                         cx.notify();

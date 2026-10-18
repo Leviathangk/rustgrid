@@ -69,6 +69,13 @@ impl GridView {
                     self.cell_press = None;
                     self.add_or_remove_range(row, col, row, col);
                 } else {
+                    // Clicking the cell that is already selected edits it (Navicat).
+                    self.cell_press_reselect =
+                        self.state.selection.as_ref().is_some_and(|selection| {
+                            selection.ranges.len() == 1
+                                && selection.active().anchor == (row, col)
+                                && selection.active().cursor == (row, col)
+                        });
                     self.state.selection = Some(CellSelection::new(row, col));
                     self.cell_press = Some((row, col));
                 }
@@ -380,16 +387,11 @@ impl GridView {
             return;
         }
         if self.cell_editor.is_some() {
-            // The in-place editor owns the caret keys while its text still has room; the kit
-            // propagates left/right once the caret sits at the edge, so the grid moves to the
-            // adjacent cell (spreadsheet-like). Up/down arrive as `MoveCellUp`/`MoveCellDown`.
+            // Edit mode (Excel / DataGrip): Left / Right move the caret within the cell and stop at
+            // its edges (the kit propagates them there) instead of leaving the cell. Up / Down
+            // (also `MoveCellUp` / `MoveCellDown`) save the value and move the selection.
             match keystroke.key.as_str() {
-                "left" => {
-                    self.cell_editor_move(0, -1, window, cx);
-                    cx.stop_propagation();
-                }
-                "right" => {
-                    self.cell_editor_move(0, 1, window, cx);
+                "left" | "right" => {
                     cx.stop_propagation();
                 }
                 "up" => {
@@ -428,9 +430,16 @@ impl GridView {
                     "right" => new_col = (new_col + 1).min(col_count - 1),
                     _ => {}
                 }
-                self.state.selection = Some(CellSelection::new(new_row, new_col));
+                // Spreadsheet behaviour: the view follows the cursor, and Shift extends the active
+                // range from its anchor.
+                let anchor = keystroke.modifiers.shift.then(|| {
+                    self.state
+                        .selection
+                        .as_ref()
+                        .map_or((row, col), |selection| selection.active().anchor)
+                });
+                self.grid_select_cell((new_row, new_col), anchor, cx);
                 cx.stop_propagation();
-                cx.notify();
             }
             "delete" => {
                 self.set_selection_null(cx);
@@ -893,19 +902,10 @@ impl GridView {
             (row, col)
         };
 
-        if (next_row, next_col) == (row, col) {
-            // Already at the last cell: Tab simply closes the editor.
-            cx.notify();
-            return;
-        }
-
-        self.state.selection = Some(CellSelection::new(next_row, next_col));
-        if next_row != row {
-            self.list_scroll
-                .scroll_to_item(next_row, ScrollStrategy::Nearest);
-        }
-        self.begin_edit((next_row, next_col), None, window, cx);
-        cx.notify();
+        // Save and move the selection (no new editor, like Excel); focus returns to the grid so
+        // the keys keep working.
+        self.grid_select_cell((next_row, next_col), None, cx);
+        window.focus(&self.focus, cx);
     }
 
     /// Arrow in a cell editor: stage the current value and move the editor to the adjacent cell
@@ -931,18 +931,10 @@ impl GridView {
         }
         let next_row = (row as isize + d_row).clamp(0, row_count as isize - 1) as usize;
         let next_col = (col as isize + d_col).clamp(0, column_count as isize - 1) as usize;
-        if (next_row, next_col) == (row, col) {
-            // At the grid edge there is no adjacent cell: commit and keep the selection in place.
-            cx.notify();
-            return;
-        }
-        self.state.selection = Some(CellSelection::new(next_row, next_col));
-        if next_row != row {
-            self.list_scroll
-                .scroll_to_item(next_row, ScrollStrategy::Nearest);
-        }
-        self.begin_edit((next_row, next_col), None, window, cx);
-        cx.notify();
+        // Save and move the selection (no new editor); at the grid edge it stays put. Either way
+        // focus returns to the grid, so the keys keep working.
+        self.grid_select_cell((next_row, next_col), None, cx);
+        window.focus(&self.focus, cx);
     }
 
     pub(super) fn cancel_editor(&mut self, cx: &mut Context<'_, Self>) {
@@ -950,5 +942,158 @@ impl GridView {
         self.cell_editor_blur_subscription = None;
         self.date_picker = None;
         cx.notify();
+    }
+}
+
+/// A table-grid keyboard jump (keymap commands; the arrow keys stay on `grid_key`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GridJump {
+    PageUp,
+    PageDown,
+    RowStart,
+    RowEnd,
+    First,
+    Last,
+    Next,
+    Prev,
+}
+
+/// Where `jump` takes the cursor at `(row, col)` in a `rows` x `cols` grid, paging by `page` rows.
+/// Next / Prev walk the cells row by row (Tab / Shift+Tab, wrapping onto the neighbouring row) and
+/// stop at the first / last cell.
+fn grid_jump_target(
+    (row, col): (usize, usize),
+    rows: usize,
+    cols: usize,
+    jump: GridJump,
+    page: usize,
+) -> (usize, usize) {
+    let (last_row, last_col) = (rows.saturating_sub(1), cols.saturating_sub(1));
+    match jump {
+        GridJump::PageUp => (row.saturating_sub(page.max(1)), col),
+        GridJump::PageDown => ((row + page.max(1)).min(last_row), col),
+        GridJump::RowStart => (row, 0),
+        GridJump::RowEnd => (row, last_col),
+        GridJump::First => (0, 0),
+        GridJump::Last => (last_row, last_col),
+        GridJump::Next if col < last_col => (row, col + 1),
+        GridJump::Next if row < last_row => (row + 1, 0),
+        GridJump::Prev if col > 0 => (row, col - 1),
+        GridJump::Prev if row > 0 => (row - 1, last_col),
+        GridJump::Next | GridJump::Prev => (row, col),
+    }
+}
+
+impl GridView {
+    /// Move the cursor for a keyboard jump (`extend`: Shift, grow the active range instead). Not
+    /// while a cell editor or the date picker is open: those own the keys.
+    pub(super) fn grid_jump(&mut self, jump: GridJump, extend: bool, cx: &mut Context<'_, Self>) {
+        if self.cell_editor.is_some() || self.date_picker.is_some() {
+            return;
+        }
+        let rows = self.display_row_count();
+        let cols = self.state.visible_columns;
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let (cursor, anchor) = match self.state.selection.as_ref() {
+            Some(selection) => (selection.active_cursor(), selection.active().anchor),
+            None => ((0, 0), (0, 0)),
+        };
+        let target = grid_jump_target(cursor, rows, cols, jump, self.grid_page_rows());
+        self.grid_select_cell(target, extend.then_some(anchor), cx);
+    }
+
+    /// Select `cell` (extending from `anchor` when given) and scroll it into view.
+    pub(super) fn grid_select_cell(
+        &mut self,
+        (row, col): (usize, usize),
+        anchor: Option<(usize, usize)>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.state.selection = Some(CellSelection::single(
+            anchor.unwrap_or((row, col)),
+            (row, col),
+        ));
+        self.list_scroll
+            .scroll_to_item(row, ScrollStrategy::Nearest);
+        self.reveal_column(col);
+        cx.notify();
+    }
+
+    /// How many rows one Page Up / Page Down moves: a screenful less one row of context.
+    fn grid_page_rows(&self) -> usize {
+        let height = f32::from(self.hscroll.bounds().size.height);
+        ((height / GRID_ROW_HEIGHT).floor() as usize)
+            .saturating_sub(2)
+            .max(1)
+    }
+
+    /// Scroll horizontally so column `col` is fully visible.
+    fn reveal_column(&self, col: usize) {
+        let widths = &self.state.column_widths;
+        let left = GRID_GUTTER_WIDTH + widths.iter().take(col).sum::<f32>();
+        let right = left + widths.get(col).copied().unwrap_or(0.0);
+        let viewport = f32::from(self.hscroll.bounds().size.width);
+        if viewport <= 0.0 {
+            return;
+        }
+        let shown = -f32::from(self.hscroll.offset().x);
+        let start = if left - GRID_GUTTER_WIDTH < shown {
+            left - GRID_GUTTER_WIDTH
+        } else if right > shown + viewport {
+            right - viewport
+        } else {
+            return;
+        };
+        let max = f32::from(self.hscroll.max_offset().x);
+        let mut offset = self.hscroll.offset();
+        offset.x = px(-start.clamp(0.0, max.max(0.0)));
+        self.hscroll.set_offset(offset);
+    }
+}
+
+#[cfg(test)]
+mod jump_tests {
+    use super::{GridJump, grid_jump_target};
+
+    #[test]
+    fn paging_and_edges() {
+        assert_eq!(
+            grid_jump_target((5, 2), 100, 4, GridJump::PageDown, 20),
+            (25, 2)
+        );
+        assert_eq!(
+            grid_jump_target((95, 2), 100, 4, GridJump::PageDown, 20),
+            (99, 2)
+        );
+        assert_eq!(
+            grid_jump_target((5, 2), 100, 4, GridJump::PageUp, 20),
+            (0, 2)
+        );
+        assert_eq!(
+            grid_jump_target((5, 2), 100, 4, GridJump::RowStart, 20),
+            (5, 0)
+        );
+        assert_eq!(
+            grid_jump_target((5, 2), 100, 4, GridJump::RowEnd, 20),
+            (5, 3)
+        );
+        assert_eq!(
+            grid_jump_target((5, 2), 100, 4, GridJump::First, 20),
+            (0, 0)
+        );
+        assert_eq!(
+            grid_jump_target((5, 2), 100, 4, GridJump::Last, 20),
+            (99, 3)
+        );
+    }
+
+    #[test]
+    fn tab_wraps_across_rows_and_stops_at_the_ends() {
+        assert_eq!(grid_jump_target((0, 3), 2, 4, GridJump::Next, 1), (1, 0));
+        assert_eq!(grid_jump_target((1, 3), 2, 4, GridJump::Next, 1), (1, 3));
+        assert_eq!(grid_jump_target((1, 0), 2, 4, GridJump::Prev, 1), (0, 3));
+        assert_eq!(grid_jump_target((0, 0), 2, 4, GridJump::Prev, 1), (0, 0));
     }
 }

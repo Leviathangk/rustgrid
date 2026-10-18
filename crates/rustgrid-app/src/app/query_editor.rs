@@ -56,6 +56,12 @@ impl AppView {
                 supports_schemas,
                 dialect,
             );
+        let loader_app = cx.weak_entity();
+        let source = source.with_column_loader(Rc::new(move |cx, connection, database, table| {
+            let _ = loader_app.update(cx, |app, cx| {
+                app.ensure_query_columns(cx, connection, &database, &table);
+            });
+        }));
         let scope_handle = source.scope_handle();
         let provider: Rc<dyn gpui_kit::component::input::CompletionProvider> =
             Rc::new(sql_completion::SqlCompletionProvider::new(source));
@@ -104,8 +110,8 @@ impl AppView {
                     .map(|driver| driver.dialect())
                     .unwrap_or_default(),
             };
-            let referenced =
-                sql::referenced_tables(&sql::current_statement(text, text.len(), scope.dialect));
+            // Every statement's tables, not only the last one's: the caret may be in any.
+            let referenced = sql::referenced_tables(text);
             for table in referenced {
                 if let Some((database, table)) = sql_completion::catalog_target(&scope, &table) {
                     self.ensure_query_columns(cx, connection_index, &database, &table);
@@ -178,14 +184,14 @@ impl AppView {
                 }
             }))
             .on_action(cx.listener(move |this, _: &RunQuery, _window, cx| {
-                // 运行: the whole editor, regardless of the selection.
+                // 运行 (Navicat's Ctrl+R): the selection when there is one, else the whole editor.
                 this.activate_query(index, cx);
-                this.run_query(false, cx);
+                this.run_query(RunScope::SelectionOrAll, cx);
             }))
             .on_action(cx.listener(move |this, _: &RunSelectedQuery, _window, cx| {
                 // Bring the tab that owns this editor to the front, then run its selection.
                 this.activate_query(index, cx);
-                this.run_query(true, cx);
+                this.run_query(RunScope::SelectionOrStatement, cx);
             }))
             .on_action(cx.listener(move |this, _: &AcceptCompletion, window, cx| {
                 // Tab confirms the completion popup exactly like Enter. The kit has no Tab
@@ -208,6 +214,32 @@ impl AppView {
                     }
                 }),
             )
+            // Line commands (keymap): each is a pure `line_edit` function applied as one undoable
+            // replacement.
+            .on_action(cx.listener(move |this, _: &ToggleComment, window, cx| {
+                let hash = this.query_uses_hash_comments(index);
+                this.edit_query_lines(index, window, cx, move |text, selection| {
+                    Some(line_edit::toggle_comment(text, selection, hash))
+                });
+            }))
+            .on_action(cx.listener(move |this, _: &DuplicateLines, window, cx| {
+                this.edit_query_lines(index, window, cx, |text, selection| {
+                    Some(line_edit::duplicate(text, selection))
+                });
+            }))
+            .on_action(cx.listener(move |this, _: &SwapLineUp, window, cx| {
+                this.edit_query_lines(index, window, cx, line_edit::swap_with_previous);
+            }))
+            .on_action(cx.listener(move |this, _: &MoveLinesUp, window, cx| {
+                this.edit_query_lines(index, window, cx, |text, selection| {
+                    line_edit::move_lines(text, selection, true)
+                });
+            }))
+            .on_action(cx.listener(move |this, _: &MoveLinesDown, window, cx| {
+                this.edit_query_lines(index, window, cx, |text, selection| {
+                    line_edit::move_lines(text, selection, false)
+                });
+            }))
             .child(editor)
             .into_any_element()
     }
@@ -292,76 +324,359 @@ impl AppView {
     }
 
     /// The 信息 tab: the executed script and one status line per statement result.
-    pub(super) fn render_query_info(&self, query_index: usize) -> AnyElement {
-        let theme = self.theme;
+    pub(super) fn render_query_info(
+        &mut self,
+        query_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let Some(query) = self.queries.get(query_index) else {
             return div().into_any_element();
         };
-        if let Some(error) = &query.result_error {
-            // The error is a driver/SQL message the user needs to read and copy, so it renders as
-            // selectable text (mouse-drag select + Ctrl+C) rather than a plain label.
-            return div()
-                .id("query-error")
+        let id = query.id;
+        let skipped = query.skipped_statements;
+        let ran = query.results.len();
+        let mysql = self.query_uses_hash_comments(query_index);
+        let (text, spans) = query_info_text(query, mysql);
+        let theme = self.theme;
+        let decorations = info_decorations(&spans, theme, cx);
+        let editor = self
+            .query_info_editors
+            .entry(id)
+            .or_insert_with(|| {
+                cx.new(|cx| {
+                    ui::SqlEditor::new(cx).options(ui::SqlEditorOptions {
+                        language: "text".into(),
+                        line_number: false,
+                        readonly: true,
+                        ..Default::default()
+                    })
+                })
+            })
+            .clone();
+        if editor.read(cx).text() != text {
+            editor.update(cx, |editor, cx| {
+                editor.set_text(text, cx);
+                editor.set_decorations(decorations, cx);
+            });
+        }
+        // The statement limit's notice: what was skipped, and a link to the setting.
+        let notice = (skipped > 0).then(|| {
+            div()
                 .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .w_full()
-                .p_2()
-                .overflow_y_scroll()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .bg(rgba(theme.warning << 8 | 0x22))
                 .text_size(px(12.0))
-                .text_color(rgb(theme.danger))
-                .child(gpui_kit::base::SelectableText::new(
-                    "query-error-text",
-                    error.clone(),
-                ))
-                .into_any_element();
-        }
-        let mut body = div().flex().flex_col().gap_2().p_2().w_full();
-        for (index, result) in query.results.iter().enumerate() {
-            let status = if result.has_result_set {
-                t!("query.result_rows", count = result.row_count).to_string()
-            } else if result.rows_affected > 0 {
-                t!("query.rows_affected", count = result.rows_affected).to_string()
-            } else {
-                t!("query.executed").to_string()
-            };
-            body = body.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child(format!("{} {}", t!("query.statement"), index + 1)),
-                    )
-                    .child(div().text_size(px(11.5)).child(status)),
-            );
-        }
-        if let Some(elapsed) = query.last_elapsed {
-            body = body.child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(format!(
-                        "{}: {:.3}s",
-                        t!("query.elapsed"),
-                        elapsed.as_secs_f64()
-                    )),
-            );
-        }
+                .child(t!("query.limit_notice", ran = ran, skipped = skipped).to_string())
+                .child(
+                    div()
+                        .id("query-limit-link")
+                        .text_color(rgb(theme.primary))
+                        .underline()
+                        .cursor_pointer()
+                        .child(t!("query.limit_link").to_string())
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.open_options_at(
+                                OptionsSection::General,
+                                super::options::OPTIONS_MAX_STATEMENTS,
+                                cx,
+                            );
+                        })),
+                )
+        });
         div()
             .id("query-info")
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .overflow_y_scroll()
-            .child(body)
+            .children(notice)
+            .child(editor)
             .into_any_element()
+    }
+}
+
+/// What a span of the 信息 log is, for colouring.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum InfoSpan {
+    /// SQL text, coloured like the editor.
+    Sql(sql_lex::TokenKind),
+    /// Where in the statement the server's error points (`near '…'`).
+    ErrorLocation,
+    /// An error line.
+    Error,
+    /// The quoted part of an error line the server points at.
+    ErrorFocus,
+    /// Outcome and time lines.
+    Muted,
+}
+
+/// Turn the log's spans into editor decorations in the theme's colours.
+fn info_decorations(
+    spans: &[(std::ops::Range<usize>, InfoSpan)],
+    theme: Theme,
+    cx: &App,
+) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+    let highlight = &gpui_kit::component::Theme::global(cx).highlight_theme;
+    let danger: gpui::Hsla = rgb(theme.danger).into();
+    let muted: gpui::Hsla = rgb(theme.text_muted).into();
+    spans
+        .iter()
+        .filter_map(|(range, span)| {
+            let style = match span {
+                InfoSpan::Sql(kind) => highlight.style(match kind {
+                    sql_lex::TokenKind::Keyword => "keyword",
+                    sql_lex::TokenKind::Function => "function",
+                    sql_lex::TokenKind::String => "string",
+                    sql_lex::TokenKind::Number => "number",
+                    sql_lex::TokenKind::Comment => "comment",
+                })?,
+                InfoSpan::ErrorLocation => gpui::HighlightStyle {
+                    underline: Some(gpui::UnderlineStyle {
+                        color: Some(danger),
+                        thickness: px(1.5),
+                        wavy: true,
+                    }),
+                    background_color: Some(danger.opacity(0.15)),
+                    ..Default::default()
+                },
+                InfoSpan::Error => gpui::HighlightStyle {
+                    color: Some(danger),
+                    ..Default::default()
+                },
+                InfoSpan::ErrorFocus => gpui::HighlightStyle {
+                    color: Some(danger),
+                    font_weight: Some(FontWeight::BOLD),
+                    background_color: Some(danger.opacity(0.15)),
+                    ..Default::default()
+                },
+                InfoSpan::Muted => gpui::HighlightStyle {
+                    color: Some(muted),
+                    ..Default::default()
+                },
+            };
+            Some((range.clone(), style))
+        })
+        .collect()
+}
+
+/// The part of a server error that points into the statement: MySQL's `near '…' at line N` and
+/// PostgreSQL's `at or near "…"`. Returns the byte range of the quoted text inside `error`.
+fn error_focus(error: &str) -> Option<std::ops::Range<usize>> {
+    for (open, close) in [("near '", '\''), ("near \"", '"')] {
+        if let Some(at) = error.find(open) {
+            let start = at + open.len();
+            // MySQL quotes the rest of the statement, which may itself contain quotes: the
+            // closing quote is the one before ` at line`, else the last one.
+            let end = error[start..]
+                .find(&format!("{close} at line"))
+                .map(|offset| start + offset)
+                .or_else(|| error.rfind(close).filter(|&end| end >= start))?;
+            return Some(start..end);
+        }
+    }
+    None
+}
+
+/// The 信息 tab's text, as Navicat's Message tab writes it: each statement, then right under it
+/// its outcome (rows, affected rows or the error, in red) and its time; plus the spans to colour.
+fn query_info_text(
+    query: &QueryTab,
+    mysql: bool,
+) -> (String, Vec<(std::ops::Range<usize>, InfoSpan)>) {
+    let mut out = String::new();
+    let mut spans = Vec::new();
+    let push_line = |out: &mut String, spans: &mut Vec<_>, line: &str, span: InfoSpan| {
+        let start = out.len();
+        out.push_str(line);
+        spans.push((start..out.len(), span));
+        out.push('\n');
+    };
+    if let Some(error) = &query.result_error {
+        push_line(&mut out, &mut spans, error, InfoSpan::Error);
+        if let Some(elapsed) = query.last_elapsed {
+            let line = format!("> {}: {}", t!("query.elapsed"), format_elapsed(elapsed));
+            push_line(&mut out, &mut spans, &line, InfoSpan::Muted);
+        }
+        return (out, spans);
+    }
+    for result in &query.results {
+        let statement = result.statement.trim();
+        let statement_start = out.len();
+        out.push_str(statement);
+        for (range, kind) in sql_lex::tokens(statement, mysql) {
+            spans.push((
+                statement_start + range.start..statement_start + range.end,
+                InfoSpan::Sql(kind),
+            ));
+        }
+        out.push('\n');
+        match &result.error {
+            Some(error) => {
+                let line = format!("> {error}");
+                let line_start = out.len();
+                push_line(&mut out, &mut spans, &line, InfoSpan::Error);
+                if let Some(focus) = error_focus(&line) {
+                    let quoted = &line[focus.clone()];
+                    spans.push((
+                        line_start + focus.start..line_start + focus.end,
+                        InfoSpan::ErrorFocus,
+                    ));
+                    // Point at the same place in the statement (MySQL quotes the statement from
+                    // there on; an empty quote means its end).
+                    let location = if quoted.is_empty() {
+                        statement.len().saturating_sub(1)..statement.len()
+                    } else {
+                        let first_line = quoted.lines().next().unwrap_or(quoted);
+                        match statement.find(first_line) {
+                            Some(at) => at..at + first_line.len(),
+                            None => 0..0,
+                        }
+                    };
+                    if !location.is_empty() {
+                        spans.push((
+                            statement_start + location.start..statement_start + location.end,
+                            InfoSpan::ErrorLocation,
+                        ));
+                    }
+                }
+            }
+            None => {
+                let outcome = if result.has_result_set {
+                    t!("query.result_rows", count = result.row_count).to_string()
+                } else if result.rows_affected > 0 {
+                    t!("query.rows_affected", count = result.rows_affected).to_string()
+                } else {
+                    t!("query.executed").to_string()
+                };
+                push_line(
+                    &mut out,
+                    &mut spans,
+                    &format!("> {outcome}"),
+                    InfoSpan::Muted,
+                );
+            }
+        }
+        let time = format!(
+            "> {}: {}",
+            t!("query.elapsed"),
+            format_elapsed(result.elapsed)
+        );
+        push_line(&mut out, &mut spans, &time, InfoSpan::Muted);
+        out.push('\n');
+    }
+    if query.results.len() > 1
+        && let Some(elapsed) = query.last_elapsed
+    {
+        let line = format!("{}: {}", t!("query.total_elapsed"), format_elapsed(elapsed));
+        push_line(&mut out, &mut spans, &line, InfoSpan::Muted);
+    }
+    (out, spans)
+}
+
+impl AppView {
+    /// Apply a line edit to query tab `index`'s editor (see [`line_edit`]).
+    fn edit_query_lines(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+        edit: impl FnOnce(&str, std::ops::Range<usize>) -> Option<line_edit::LineEdit>,
+    ) {
+        if let Some(Some(editor)) = self.query_editors.get(index) {
+            let editor = editor.clone();
+            editor.update(cx, |editor, cx| editor.edit_lines(edit, window, cx));
+        }
+    }
+
+    /// Whether query tab `index` runs against MySQL / MariaDB, where `#` also starts a comment
+    /// (so the comment toggle removes it).
+    pub(super) fn query_uses_hash_comments(&self, index: usize) -> bool {
+        self.queries
+            .get(index)
+            .and_then(|tab| tab.connection_index)
+            .is_some_and(|connection| {
+                self.driver_dialect(connection) == rustgrid_core::DriverDialect::Mysql
+            })
+    }
+
+    /// The toolbar's run timer: live while the query runs, then how long the last run took.
+    pub(super) fn query_timer(&mut self, index: usize, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(tab) = self.queries.get(index) else {
+            return div().into_any_element();
+        };
+        let (elapsed, running) = match (tab.run_started, tab.last_elapsed) {
+            (Some(started), _) if tab.running => (Some(started.elapsed()), true),
+            (_, last) => (last, false),
+        };
+        if running && !self.query_timer_scheduled {
+            // Tick about ten times a second while the query runs.
+            self.query_timer_scheduled = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let _ = this.update(cx, |view, cx| {
+                    view.query_timer_scheduled = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        div()
+            .flex_none()
+            .px_2()
+            .text_size(px(11.5))
+            .text_color(rgb(if running {
+                theme.text
+            } else {
+                theme.text_muted
+            }))
+            .children(elapsed.map(format_elapsed))
+            .into_any_element()
+    }
+}
+
+/// A run time as the query toolbar and the 信息 tab show it: milliseconds under a minute
+/// (`835 ms`, `12450 ms`), then minutes and seconds (`2 min 05 s`).
+pub(super) fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let millis = elapsed.as_millis();
+    if millis < 60_000 {
+        format!("{millis} ms")
+    } else {
+        let seconds = elapsed.as_secs();
+        format!("{} min {:02} s", seconds / 60, seconds % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_elapsed;
+    use std::time::Duration;
+
+    #[test]
+    fn the_error_points_at_the_quoted_part() {
+        let error = "1064 (42000): You have an error in your SQL syntax; check the manual that \
+                     corresponds to your MySQL server version for the right syntax to use near \
+                     'FORM t' at line 1";
+        let focus = super::error_focus(error).expect("focus");
+        assert_eq!(&error[focus], "FORM t");
+        let error = "syntax error at or near \"FORM\"";
+        assert_eq!(&error[super::error_focus(error).expect("focus")], "FORM");
+        assert!(super::error_focus("Table 'x' doesn't exist").is_none());
+    }
+
+    #[test]
+    fn run_times_read_in_milliseconds_then_minutes() {
+        assert_eq!(format_elapsed(Duration::from_micros(835_400)), "835 ms");
+        assert_eq!(format_elapsed(Duration::from_millis(12_450)), "12450 ms");
+        assert_eq!(format_elapsed(Duration::from_secs(125)), "2 min 05 s");
     }
 }

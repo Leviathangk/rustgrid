@@ -1,7 +1,9 @@
 //! `SqlEditor`: the app-facing SQL editor, wrapping gpui-kit's `Editor`/`EditorState`.
 //!
-//! gpui-kit's editor owns the text, selection, undo/redo, multi-cursor, search and tree-sitter
-//! highlighting; this wrapper keeps feature code off `EditorState` directly. Like `ui::TextInput`
+//! gpui-kit's editor owns the text, selection, undo/redo, multi-cursor and search; this wrapper
+//! keeps feature code off `EditorState` directly. SQL is coloured by RustGrid's own lexer
+//! ([`crate::app::sql_lex`]) rather than the tree-sitter grammar, so `#`, `//`, `--x` and an
+//! unclosed `/*` look commented out exactly when they will not run. Like `ui::TextInput`
 //! / `ui::ComboBox`, the inner state needs a `&mut Window`, so it is built on the first render and
 //! pending mutations are flushed there.
 
@@ -15,11 +17,13 @@ use gpui::{
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{
-    Copy, Cut, Editor, EditorState, Enter, InputEvent, Paste, Redo, SelectAll, Undo,
+    Copy, Cut, Editor, EditorState, Enter, InputEvent, Paste, Redo, SelectAll, TextDecoration,
+    TextDecorationCollection, Undo,
 };
 use gpui_kit::component::native_menu::NativeMenu;
 
 use crate::app::sql_completion::CompletionScope;
+use crate::app::sql_lex::TokenKind;
 use rustgrid_core::DriverDialect;
 
 /// Options applied when the editor is first built.
@@ -58,6 +62,17 @@ pub(crate) struct SqlEditor {
     /// rebuild the editor.
     scope: Option<Arc<RwLock<CompletionScope>>>,
     state: Option<Entity<EditorState>>,
+    /// The SQL colouring (keywords, strings, numbers, comments), from [`crate::app::sql_lex`].
+    highlights: Option<TextDecorationCollection>,
+    /// MySQL / MariaDB lexing rules (`#` comments, backslash escapes), from the tab's driver.
+    mysql: bool,
+    /// Caller-provided colouring (the query 信息 log), applied once the inner state exists.
+    custom: Option<TextDecorationCollection>,
+    pending_custom: Option<Vec<TextDecoration>>,
+    /// Take the keyboard focus as soon as the inner editor is built (see `focus_when_ready`).
+    focus_on_build: bool,
+    /// The theme colours the highlights were painted with, to repaint after a theme change.
+    painted_with: Option<[Option<gpui::HighlightStyle>; 5]>,
     subscriptions: Vec<Subscription>,
     /// A `set_text` requested before the state existed (or that still needs applying).
     pending_text: Option<String>,
@@ -78,6 +93,12 @@ impl SqlEditor {
             provider: None,
             scope: None,
             state: None,
+            highlights: None,
+            focus_on_build: false,
+            custom: None,
+            pending_custom: None,
+            mysql: false,
+            painted_with: None,
             subscriptions: Vec::new(),
             pending_text: None,
             pending_replace: false,
@@ -117,8 +138,13 @@ impl SqlEditor {
         schema: Option<String>,
         supports_schemas: bool,
         dialect: DriverDialect,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        let mysql = dialect == DriverDialect::Mysql;
+        if mysql != self.mysql {
+            self.mysql = mysql;
+            self.refresh_highlights(cx);
+        }
         if let Some(scope) = &self.scope
             && let Ok(mut scope) = scope.write()
         {
@@ -134,6 +160,14 @@ impl SqlEditor {
         &self.text
     }
 
+    /// The editor's text right now (the selection offsets index into exactly this).
+    pub(crate) fn live_text(&self, cx: &App) -> String {
+        match self.state.as_ref() {
+            Some(state) => state.read(cx).value().to_string(),
+            None => self.text.clone(),
+        }
+    }
+
     /// The active selection as byte offsets (`start == end` when nothing is selected).
     pub(crate) fn selected_range(&self, cx: &App) -> (usize, usize) {
         let Some(state) = self.state.as_ref() else {
@@ -141,6 +175,68 @@ impl SqlEditor {
         };
         let range = state.read(cx).selected_range();
         (range.start, range.end)
+    }
+
+    /// Apply a line edit (comment toggle, duplicate, move, swap) computed from the current text and
+    /// selection, as one undoable replacement, then restore the edit's selection. `edit` returning
+    /// `None` (e.g. moving the first line up) leaves the document alone.
+    pub(crate) fn edit_lines(
+        &mut self,
+        edit: impl FnOnce(&str, Range<usize>) -> Option<crate::app::line_edit::LineEdit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.state.clone() else {
+            return;
+        };
+        let (text, selection) = {
+            let state = state.read(cx);
+            (state.value().to_string(), state.selected_range())
+        };
+        let Some(edit) = edit(&text, selection) else {
+            return;
+        };
+        state.update(cx, |state, cx| {
+            state.set_selected_range(edit.range.clone(), cx);
+            state.replace(edit.text.clone(), window, cx);
+            state.set_selected_range(edit.selection.clone(), cx);
+            // Keep typing where you were (the caret stays visible).
+            state.focus(window, cx);
+        });
+    }
+
+    /// Colour ranges of the text (replacing the previous ones), e.g. the 信息 log's errors.
+    pub(crate) fn set_decorations(
+        &mut self,
+        decorations: Vec<(Range<usize>, gpui::HighlightStyle)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_custom = Some(
+            decorations
+                .into_iter()
+                .map(|(range, style)| TextDecoration::new(range, style))
+                .collect(),
+        );
+        cx.notify();
+    }
+
+    /// Focus the editor now, or the moment its inner state is built (on its first render), so
+    /// keys typed right after opening it never reach the view behind it.
+    pub(crate) fn focus_when_ready(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = self.state.clone() {
+            state.update(cx, |state, cx| state.focus(window, cx));
+        } else {
+            self.focus_on_build = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) -> bool {
+        let Some(state) = self.state.clone() else {
+            return false;
+        };
+        state.update(cx, |state, cx| state.focus(window, cx));
+        true
     }
 
     /// Put a cursor on every occurrence of the selected text (or of the word at the caret when
@@ -221,8 +317,13 @@ impl SqlEditor {
             let options = self.options.clone();
             let provider = self.provider.clone();
             let state = cx.new(|cx| {
+                let language = if options.language.as_ref() == "sql" {
+                    plain_sql_language()
+                } else {
+                    options.language.clone()
+                };
                 let mut state = EditorState::new(window, cx)
-                    .language(options.language.clone())
+                    .language(language)
                     .line_number(options.line_number);
                 if let Some(provider) = provider {
                     state.lsp_mut().completion_provider = Some(provider);
@@ -237,7 +338,16 @@ impl SqlEditor {
                     }
                 },
             ));
+            if options.language.as_ref() == "sql" {
+                self.highlights = Some(state.update(cx, |state, cx| {
+                    state.create_decorations_collection(Vec::new(), cx)
+                }));
+            }
+            if std::mem::take(&mut self.focus_on_build) {
+                state.update(cx, |state, cx| state.focus(window, cx));
+            }
             self.state = Some(state);
+            self.refresh_highlights(cx);
         }
         if let Some(pending) = self.pending_text.take() {
             if let Some(state) = self.state.clone()
@@ -247,7 +357,52 @@ impl SqlEditor {
                 state.update(cx, |state, cx| state.set_value(pending, window, cx));
             }
             self.pending_replace = false;
+            self.refresh_highlights(cx);
         }
+        if let (Some(state), Some(decorations)) = (self.state.clone(), self.pending_custom.take()) {
+            match self.custom.as_ref() {
+                Some(collection) => collection.set(decorations, cx),
+                None => {
+                    self.custom = Some(state.update(cx, |state, cx| {
+                        state.create_decorations_collection(decorations, cx)
+                    }));
+                }
+            }
+        }
+        // A theme switch changes the colours: repaint.
+        if self.highlights.is_some() && self.painted_with != Some(highlight_palette(cx)) {
+            self.refresh_highlights(cx);
+        }
+    }
+
+    /// Recolour the text (after an edit, a dialect change or a theme switch).
+    fn refresh_highlights(&mut self, cx: &mut Context<Self>) {
+        let (Some(state), Some(collection)) = (self.state.as_ref(), self.highlights.as_ref())
+        else {
+            return;
+        };
+        let palette = highlight_palette(cx);
+        self.painted_with = Some(palette);
+        let [keyword, function, string, number, comment] = palette;
+        let text = state.read(cx).value().to_string();
+        let decorations = if text.len() > MAX_HIGHLIGHT_BYTES {
+            Vec::new()
+        } else {
+            crate::app::sql_lex::tokens(&text, self.mysql)
+                .into_iter()
+                .filter_map(|(range, kind)| {
+                    let style = match kind {
+                        TokenKind::Keyword => keyword,
+                        TokenKind::Function => function,
+                        TokenKind::String => string,
+                        TokenKind::Number => number,
+                        TokenKind::Comment => comment,
+                    }?;
+                    Some(TextDecoration::new(range, style))
+                })
+                .collect()
+        };
+        collection.set(decorations, cx);
     }
 
     fn on_inner_change(&mut self, cx: &mut Context<Self>) {
@@ -256,6 +411,7 @@ impl SqlEditor {
         };
         let text = state.read(cx).value().to_string();
         self.text = text.clone();
+        self.refresh_highlights(cx);
         if self.suppress_change {
             self.suppress_change = false;
             return;
@@ -303,6 +459,34 @@ impl Render for SqlEditor {
             .test_support()
             .into_any_element()
     }
+}
+
+/// Above this size the text is left uncoloured (lexing runs on every edit).
+const MAX_HIGHLIGHT_BYTES: usize = 4 << 20;
+
+/// The editor language SQL editors use: the SQL grammar (for bracket and string awareness) with
+/// its highlight queries removed, since [`crate::app::sql_lex`] colours the text. Registered once.
+fn plain_sql_language() -> SharedString {
+    const NAME: &str = "rustgrid-sql";
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        let registry = gpui_kit::component::highlighter::LanguageRegistry::singleton();
+        if let Some(mut config) = registry.language("sql") {
+            config.name = NAME.into();
+            config.highlights = SharedString::default();
+            config.injections = SharedString::default();
+            config.locals = SharedString::default();
+            config.injection_languages = Vec::new();
+            registry.register(NAME, &config);
+        }
+    });
+    NAME.into()
+}
+
+/// The theme's keyword, function, string, number and comment styles.
+fn highlight_palette(cx: &App) -> [Option<gpui::HighlightStyle>; 5] {
+    let theme = &gpui_kit::component::Theme::global(cx).highlight_theme;
+    ["keyword", "function", "string", "number", "comment"].map(|name| theme.style(name))
 }
 
 /// The SQL editor's right-click menu: the app's 运行已选择的 first, then the standard edit items.

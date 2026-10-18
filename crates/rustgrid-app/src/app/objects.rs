@@ -95,6 +95,57 @@ fn object_row_with_rect(
     super::list_ops::row_with_rect(app, row, MarqueeTarget::Objects, key)
 }
 
+/// One object-list navigation key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObjectStep {
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+/// Where `step` moves the selection in a list of `count` objects laid out column-major with
+/// `per_column` items per column (`usize::MAX` for the single-column 详细列表), paging by `page`
+/// items. With nothing selected any key starts at the first object. `None` means "stay".
+fn object_nav_target(
+    current: Option<usize>,
+    count: usize,
+    step: ObjectStep,
+    per_column: usize,
+    page: usize,
+) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let last = count - 1;
+    let Some(index) = current else {
+        return Some(0);
+    };
+    let target = match step {
+        ObjectStep::Up => index.checked_sub(1)?,
+        ObjectStep::Down => (index + 1).min(last),
+        // Left / Right move one column in the 平铺网格; the 详细列表 has a single column.
+        ObjectStep::Left if per_column != usize::MAX => index.checked_sub(per_column)?,
+        ObjectStep::Right if per_column != usize::MAX => {
+            // Into the next column's same row, or its last item when that column is shorter.
+            if index / per_column == last / per_column {
+                return None;
+            }
+            (index + per_column).min(last)
+        }
+        ObjectStep::Left | ObjectStep::Right => return None,
+        ObjectStep::PageUp => index.saturating_sub(page.max(1)),
+        ObjectStep::PageDown => (index + page.max(1)).min(last),
+        ObjectStep::Home => 0,
+        ObjectStep::End => last,
+    };
+    (target != index).then_some(target)
+}
+
 impl AppView {
     pub(super) fn render_object_toolbar(
         &self,
@@ -843,6 +894,10 @@ impl ObjectPane {
             visible_keys: Vec::new(),
             focus: cx.focus_handle(),
             theme,
+            mode: ViewMode::default(),
+            typeahead: String::new(),
+            typeahead_at: None,
+            nav_generation: 0,
         }
     }
 
@@ -1781,40 +1836,159 @@ impl ObjectPane {
         app.update(cx, |app, cx| app.submit_rename(cx));
     }
 
-    /// F2 starts editing the selected object's name in place; Ctrl/Cmd+A selects every visible row.
+    /// Keys no command claims: typing a name jumps to the first object starting with it. The
+    /// navigation keys, Enter, F2 and Ctrl+A are keymap commands (the `Object*` actions).
     fn object_key(
         &mut self,
         event: &KeyDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         let keystroke = &event.keystroke;
-        if (keystroke.modifiers.control || keystroke.modifiers.platform)
-            && !keystroke.modifiers.alt
-            && keystroke.key.eq_ignore_ascii_case("a")
-        {
-            cx.stop_propagation();
-            let visible = self.visible_keys.clone();
-            if let Some(app) = self.app.upgrade() {
-                app.update(cx, |app, _| app.objects_selection.select_all(&visible));
-            }
-            self.sync_single_from_app(cx);
-            self.notify_app(cx);
-            cx.notify();
+        let modifiers = keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || self.renaming(cx) {
             return;
         }
-        if keystroke.modifiers.control
-            || keystroke.modifiers.platform
-            || keystroke.modifiers.alt
-            || !keystroke.key.eq_ignore_ascii_case("f2")
-        {
-            return;
-        }
-        let Some(name) = self.selected.clone() else {
+        let Some(character) = keystroke
+            .key_char
+            .as_ref()
+            .and_then(|text| text.chars().next())
+            .filter(|character| !character.is_control())
+        else {
             return;
         };
         cx.stop_propagation();
-        self.begin_rename(name, window, cx);
+        let now = std::time::Instant::now();
+        if self
+            .typeahead_at
+            .is_none_or(|at| now.duration_since(at) > super::sidebar::TYPEAHEAD_RESET)
+        {
+            self.typeahead.clear();
+        }
+        self.typeahead_at = Some(now);
+        self.typeahead.push(character);
+        let labels: Vec<String> = self
+            .visible_keys
+            .iter()
+            .map(|key| object_display(key))
+            .collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        if let Some(target) =
+            super::sidebar::typeahead_target(&labels, self.object_index(), &self.typeahead)
+        {
+            self.object_select(target, cx);
+        }
+    }
+
+    /// Whether this pane's in-place rename editor is open (typing then belongs to it).
+    fn renaming(&self, cx: &App) -> bool {
+        self.app
+            .upgrade()
+            .is_some_and(|app| app.read(cx).rename_row(RowPane::Objects).is_some())
+    }
+
+    /// The index of the selected object in the last render's order.
+    fn object_index(&self) -> Option<usize> {
+        let selected = self.selected.as_ref()?;
+        self.visible_keys.iter().position(|key| key == selected)
+    }
+
+    /// Select object `index` from the keyboard (replacing the multi-selection) and scroll it into
+    /// view, from the row bounds the last frame recorded.
+    fn object_select(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let Some(key) = self.visible_keys.get(index).cloned() else {
+            return;
+        };
+        // Move the highlight now (only this list redraws); the info pane and toolbar follow once
+        // the keys settle, so holding an arrow key does not load every object it passes.
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, _| app.objects_selection.select_one(key.clone()));
+        }
+        self.selected = Some(key.clone());
+        self.nav_generation += 1;
+        let generation = self.nav_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NAV_SETTLE).await;
+            let _ = this.update(cx, |pane, cx| {
+                if pane.nav_generation == generation {
+                    pane.sync_single_from_app(cx);
+                    pane.notify_app(cx);
+                }
+            });
+        })
+        .detach();
+        let bounds = self
+            .app
+            .upgrade()
+            .and_then(|app| app.read(cx).objects_row_rects.get(&key).copied());
+        if let Some(bounds) = bounds {
+            match self.mode {
+                ViewMode::Detail => self.detail_scroll.reveal(bounds),
+                ViewMode::Grid => self.grid.reveal(bounds),
+            }
+        }
+        cx.notify();
+    }
+
+    /// Move the selection for one navigation key, following the current layout.
+    fn object_step(&mut self, step: ObjectStep, cx: &mut Context<'_, Self>) {
+        let count = self.visible_keys.len();
+        if count == 0 {
+            return;
+        }
+        // The size of one item, from the last frame, for paging by a screenful.
+        let item = self.visible_keys.first().and_then(|key| {
+            self.app
+                .upgrade()
+                .and_then(|app| app.read(cx).objects_row_rects.get(key).copied())
+        });
+        let (per_column, page) = match self.mode {
+            ViewMode::Detail => {
+                let row_height = item.map_or(24.0, |bounds| f32::from(bounds.size.height));
+                let rows = (self.detail_scroll.viewport_height() / row_height.max(1.0)) as usize;
+                (usize::MAX, rows.saturating_sub(1).max(1))
+            }
+            ViewMode::Grid => {
+                let per_column = self.grid.rows_per_column().max(1);
+                let width = item.map_or(160.0, |bounds| f32::from(bounds.size.width));
+                let columns = (self.grid.viewport_width() / width.max(1.0)) as usize;
+                (per_column, per_column * columns.max(1))
+            }
+        };
+        if let Some(target) = object_nav_target(self.object_index(), count, step, per_column, page)
+        {
+            self.object_select(target, cx);
+        }
+    }
+
+    /// Ctrl/Cmd+A selects every visible object.
+    fn object_select_all(&mut self, cx: &mut Context<'_, Self>) {
+        let visible = self.visible_keys.clone();
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, _| app.objects_selection.select_all(&visible));
+        }
+        self.sync_single_from_app(cx);
+        self.notify_app(cx);
+        cx.notify();
+    }
+
+    /// F2 starts editing the selected object's name in place.
+    fn object_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Some(name) = self.selected.clone() {
+            self.begin_rename(name, window, cx);
+        }
+    }
+
+    /// Enter opens the selected object as a double-click does.
+    fn object_open(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(name) = self.selected.clone() else {
+            return;
+        };
+        match (self.category, self.selected_routine) {
+            (Category::Functions, Some(kind)) => self.open_routine_named(name, kind, cx),
+            (Category::Functions, None) => {}
+            _ => self.open_object_named(name, cx),
+        }
     }
 
     /// Ask `AppView` to open the in-place rename editor for `name` in this pane's row.
@@ -2019,6 +2193,7 @@ impl Render for ObjectPane {
             )
         };
 
+        self.mode = mode;
         let body = self.render_body(
             ObjectRenderData {
                 mode,
@@ -2043,7 +2218,42 @@ impl Render for ObjectPane {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .overflow_hidden()
+            .key_context(OBJECT_LIST_CONTEXT)
             .track_focus(&self.focus)
+            // Keyboard navigation: keymap commands, rebindable from Options → Shortcuts.
+            .on_action(
+                cx.listener(|this, _: &ObjectUp, _window, cx| this.object_step(ObjectStep::Up, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ObjectDown, _window, cx| {
+                this.object_step(ObjectStep::Down, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ObjectLeft, _window, cx| {
+                this.object_step(ObjectStep::Left, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ObjectRight, _window, cx| {
+                this.object_step(ObjectStep::Right, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ObjectPageUp, _window, cx| {
+                this.object_step(ObjectStep::PageUp, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ObjectPageDown, _window, cx| {
+                this.object_step(ObjectStep::PageDown, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ObjectHome, _window, cx| {
+                this.object_step(ObjectStep::Home, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ObjectEnd, _window, cx| {
+                    this.object_step(ObjectStep::End, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ObjectOpen, _window, cx| this.object_open(cx)))
+            .on_action(
+                cx.listener(|this, _: &ObjectRename, window, cx| this.object_rename(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ObjectSelectAll, _window, cx| this.object_select_all(cx)),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.object_key(event, window, cx);
             }))
@@ -2105,5 +2315,95 @@ impl Render for ObjectPane {
             container = container.child(rect);
         }
         container.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod nav_tests {
+    use super::{ObjectStep, object_nav_target};
+
+    const DETAIL: usize = usize::MAX;
+
+    #[test]
+    fn detail_list_moves_by_row_and_page_and_ignores_left_right() {
+        assert_eq!(
+            object_nav_target(None, 10, ObjectStep::Down, DETAIL, 4),
+            Some(0)
+        );
+        assert_eq!(
+            object_nav_target(Some(3), 10, ObjectStep::Down, DETAIL, 4),
+            Some(4)
+        );
+        assert_eq!(
+            object_nav_target(Some(9), 10, ObjectStep::Down, DETAIL, 4),
+            None
+        );
+        assert_eq!(
+            object_nav_target(Some(0), 10, ObjectStep::Up, DETAIL, 4),
+            None
+        );
+        assert_eq!(
+            object_nav_target(Some(3), 10, ObjectStep::PageDown, DETAIL, 4),
+            Some(7)
+        );
+        assert_eq!(
+            object_nav_target(Some(8), 10, ObjectStep::PageDown, DETAIL, 4),
+            Some(9)
+        );
+        assert_eq!(
+            object_nav_target(Some(2), 10, ObjectStep::PageUp, DETAIL, 4),
+            Some(0)
+        );
+        assert_eq!(
+            object_nav_target(Some(5), 10, ObjectStep::Left, DETAIL, 4),
+            None
+        );
+        assert_eq!(
+            object_nav_target(Some(5), 10, ObjectStep::Home, DETAIL, 4),
+            Some(0)
+        );
+        assert_eq!(
+            object_nav_target(Some(5), 10, ObjectStep::End, DETAIL, 4),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn grid_left_right_move_one_column() {
+        // 10 items, 4 per column: columns [0..4) [4..8) [8..10).
+        assert_eq!(
+            object_nav_target(Some(1), 10, ObjectStep::Right, 4, 8),
+            Some(5)
+        );
+        assert_eq!(
+            object_nav_target(Some(5), 10, ObjectStep::Right, 4, 8),
+            Some(9)
+        );
+        assert_eq!(
+            object_nav_target(Some(7), 10, ObjectStep::Right, 4, 8),
+            Some(9)
+        );
+        assert_eq!(
+            object_nav_target(Some(9), 10, ObjectStep::Right, 4, 8),
+            None
+        );
+        assert_eq!(
+            object_nav_target(Some(5), 10, ObjectStep::Left, 4, 8),
+            Some(1)
+        );
+        assert_eq!(object_nav_target(Some(2), 10, ObjectStep::Left, 4, 8), None);
+        // Up / Down run through the columns in order.
+        assert_eq!(
+            object_nav_target(Some(3), 10, ObjectStep::Down, 4, 8),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn an_empty_list_goes_nowhere() {
+        assert_eq!(
+            object_nav_target(None, 0, ObjectStep::Down, DETAIL, 4),
+            None
+        );
     }
 }

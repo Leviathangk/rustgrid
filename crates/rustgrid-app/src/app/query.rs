@@ -147,7 +147,7 @@ impl AppView {
         self.open_query_with(Some(connection_index), database, Some(schema), cx);
     }
 
-    fn open_query_with(
+    pub(super) fn open_query_with(
         &mut self,
         connection_index: Option<usize>,
         database: Option<String>,
@@ -164,7 +164,9 @@ impl AppView {
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
         self.active_design = None;
-        self.clear_object_search(cx);
+        if !self.preserve_object_search {
+            self.clear_object_search(cx);
+        }
         self.query_focus_pending = true;
         self.main_tab = MainTab::Queries;
         cx.notify();
@@ -172,6 +174,15 @@ impl AppView {
 
     pub(super) fn activate_query(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.active_query = Some(index);
+        if let Some(tab) = self.queries.get(index) {
+            self.main_tab = if tab.view.is_some() {
+                MainTab::Views
+            } else if tab.routine.is_some() {
+                MainTab::Functions
+            } else {
+                MainTab::Queries
+            };
+        }
         self.active_design = None;
         self.active_grid = self
             .queries
@@ -252,6 +263,7 @@ impl AppView {
                         .position(|grid| grid.read(cx).state.id == id)
                 })
             });
+        self.settle_after_tab_closed(cx);
         cx.notify();
     }
 
@@ -699,7 +711,10 @@ impl AppView {
         }
     }
 
-    pub(super) fn run_query(&mut self, selected_only: bool, cx: &mut Context<'_, Self>) {
+    /// Run the query tab's SQL (see [`RunScope`] for what): one statement at a time on one pinned
+    /// connection, so each statement reports its own result set, error and time, and session state
+    /// (`USE`, `SET`, a transaction) carries from one to the next.
+    pub(super) fn run_query(&mut self, scope: RunScope, cx: &mut Context<'_, Self>) {
         let Some(index) = self.active_query else {
             return;
         };
@@ -712,36 +727,45 @@ impl AppView {
         }
 
         // The wrapped editor owns the real selection; `QueryTab::caret/anchor` is only a mirror
-        // that may lag behind (gpui does not notify the app of selection changes). Read the live
-        // range for "run selected", falling back to the mirror.
-        let live_selection = if selected_only {
-            self.query_editors
-                .get(index)
-                .and_then(|editor| editor.as_ref())
-                .map(|editor| editor.read(cx).selected_range(cx))
-        } else {
-            None
-        };
+        // that may lag behind (gpui does not notify the app of selection changes).
+        let live_selection = self
+            .query_editors
+            .get(index)
+            .and_then(|editor| editor.as_ref())
+            .map(|editor| editor.read(cx).selected_range(cx));
         let (selection_start, selection_end) = live_selection.unwrap_or_else(|| tab.selection());
-        let source = if selected_only && selection_start < selection_end {
-            &tab.sql[selection_start..selection_end]
-        } else {
-            tab.sql.as_str()
+        // Slice the editor's own text: the selection offsets index into it, and `tab.sql` (a
+        // mirror) can differ from it, e.g. in line endings of text loaded from a file.
+        let text = self
+            .query_editors
+            .get(index)
+            .and_then(|editor| editor.as_ref())
+            .map(|editor| editor.read(cx).live_text(cx))
+            .unwrap_or_else(|| tab.sql.clone());
+        let dialect = tab
+            .connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
+        let mysql = self.query_uses_hash_comments(index);
+        let selected = text
+            .get(selection_start..selection_end)
+            .filter(|_| selection_start < selection_end && scope != RunScope::All);
+        let source: String = match (selected, scope) {
+            (Some(selected), _) => selected.to_string(),
+            (None, RunScope::SelectionOrStatement) => {
+                statement_at(&text, selection_end, mysql, dialect)
+            }
+            (None, _) => text.clone(),
         };
         let original = source.trim().to_string();
         if original.is_empty() {
             return;
         }
-        let executable = original.clone();
         let database = tab.database.clone();
         let tab_schema = tab.schema.clone();
         let supports_schemas = tab
             .connection_index
             .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
-        let dialect = tab
-            .connection_index
-            .map(|index| self.driver_dialect(index))
-            .unwrap_or_default();
         let connection_name = tab
             .connection_index
             .and_then(|connection_index| self.connections.get(connection_index))
@@ -753,12 +777,50 @@ impl AppView {
             return;
         };
 
+        // The statements as sent: only comments the engine accepts (`//`, `--x` on MySQL and an
+        // unclosed `/*` are not), so what the editor shows commented out never runs. MySQL is cut
+        // by RustGrid's own scanner (it knows `DELIMITER` and routine bodies); other engines by
+        // their driver's.
+        let statements: Vec<String> = if mysql {
+            sql_lex::split_script(&original, true)
+                .into_iter()
+                .map(|range| {
+                    sql_lex::prepare_for_server(&original[range], true)
+                        .trim()
+                        .to_string()
+                })
+                .filter(|statement| sql_lex::has_code(statement, true))
+                .collect()
+        } else {
+            connection.split_statements(&sql_lex::prepare_for_server(&original, false))
+        };
+        if statements.is_empty() {
+            return;
+        }
+        // The statement limit runs the first statements and skips the rest, with a notice on the
+        // 信息 tab that links to the setting.
+        let mut statements = statements;
+        let limit = self.max_statements_per_run as usize;
+        let skipped = if limit > 0 && statements.len() > limit {
+            let skipped = statements.len() - limit;
+            statements.truncate(limit);
+            skipped
+        } else {
+            0
+        };
+        let executable = statements.join(";\n");
+        let stop_on_error = self.stop_on_error;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         if let Some(tab) = self.queries.get_mut(index) {
             tab.running = true;
             tab.run_generation = tab.run_generation.wrapping_add(1);
             tab.result_error = None;
             tab.last_sql = executable.clone();
             tab.last_elapsed = None;
+            tab.run_started = Some(std::time::Instant::now());
+            tab.run_cancel = Some(cancel.clone());
+            tab.skipped_statements = skipped;
         }
         let generation = self
             .queries
@@ -769,28 +831,102 @@ impl AppView {
 
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
-            let query_connection = connection.clone();
-            let query_sql = executable.clone();
-            let query_database = database.clone();
             let started = std::time::Instant::now();
-            let result = match runtime
-                .spawn(async move {
-                    query_connection
-                        .execute_query_many(query_database.as_deref(), &query_sql)
-                        .await
-                })
-                .await
-            {
-                Ok(inner) => inner,
-                Err(error) => Err(Error::other(error)),
+            // Pin one connection for the run (see `ScriptSessionGuard` for why it is released on
+            // the runtime). A driver that cannot pin one runs each statement on the pool.
+            let opened = {
+                let connection = connection.clone();
+                let database = database.clone();
+                runtime
+                    .spawn(async move { connection.script_session(database.as_deref()).await })
+                    .await
             };
+            let mut outcomes: Vec<(String, std::time::Duration, Result<Vec<QueryResult>, Error>)> =
+                Vec::with_capacity(statements.len());
+            let mut session = super::runsql::ScriptSessionGuard {
+                runtime: runtime.clone(),
+                session: None,
+            };
+            let mut statements = statements.into_iter();
+            match opened {
+                Ok(Ok(opened)) => session.session = opened,
+                // The connection itself failed (e.g. the pool timed out): report it once, on
+                // the first statement, instead of waiting it out for every one.
+                Ok(Err(error)) => {
+                    if let Some(first) = statements.next() {
+                        outcomes.push((first, started.elapsed(), Err(error)));
+                    }
+                    statements = Vec::new().into_iter();
+                }
+                Err(error) => {
+                    if let Some(first) = statements.next() {
+                        outcomes.push((first, started.elapsed(), Err(Error::other(error))));
+                    }
+                    statements = Vec::new().into_iter();
+                }
+            }
+            for statement in statements {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let begun = std::time::Instant::now();
+                let result = if let Some(active) = session.take() {
+                    let sql = statement.clone();
+                    match runtime
+                        .spawn(async move {
+                            let mut active = active;
+                            let result = active.execute_many(&sql).await;
+                            (result, active)
+                        })
+                        .await
+                    {
+                        Ok((result, returned)) => {
+                            session.restore(returned);
+                            result
+                        }
+                        Err(error) => Err(Error::other(error)),
+                    }
+                } else {
+                    let connection = connection.clone();
+                    let database = database.clone();
+                    let sql = statement.clone();
+                    match runtime
+                        .spawn(async move {
+                            connection
+                                .execute_query_many(database.as_deref(), &sql)
+                                .await
+                        })
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => Err(Error::other(error)),
+                    }
+                };
+                let failed = result.is_err();
+                outcomes.push((statement, begun.elapsed(), result));
+                if failed && stop_on_error {
+                    break;
+                }
+            }
+            drop(session);
             let elapsed = started.elapsed();
 
-            // Resolve each result set's editability from its own statement, so a multi-statement
-            // script still gets an editable grid per single-table `SELECT`.
-            let plans = match result {
-                Ok(results) => {
-                    let mut plans = Vec::with_capacity(results.len());
+            let mut entries: Vec<RunEntry> = Vec::with_capacity(outcomes.len());
+            for (statement, statement_elapsed, result) in outcomes {
+                let results = match result {
+                    Ok(results) => results,
+                    Err(error) => {
+                        entries.push(RunEntry {
+                            statement,
+                            elapsed: statement_elapsed,
+                            outcome: Err(error.to_string()),
+                        });
+                        continue;
+                    }
+                };
+                // Resolve each result set's editability from its own statement, so a multi-statement
+                // script still gets an editable grid per single-table `SELECT`.
+                {
                     for mut result in results {
                         let mut editable = false;
                         let mut grid_database = database.clone().unwrap_or_default();
@@ -848,17 +984,19 @@ impl AppView {
                             grid_database = target_database;
                             grid_table = target_table;
                         }
-                        plans.push(QueryResultPlan {
-                            result,
-                            editable,
-                            database: grid_database,
-                            table: grid_table,
+                        entries.push(RunEntry {
+                            statement: statement.clone(),
+                            elapsed: statement_elapsed,
+                            outcome: Ok(QueryResultPlan {
+                                result,
+                                editable,
+                                database: grid_database,
+                                table: grid_table,
+                            }),
                         });
                     }
-                    Ok(plans)
                 }
-                Err(error) => Err(error),
-            };
+            }
 
             let _ = this.update(cx, |view, cx| {
                 view.apply_query_results(
@@ -867,7 +1005,7 @@ impl AppView {
                     connection_name,
                     executable,
                     elapsed,
-                    plans,
+                    Ok(entries),
                     cx,
                 );
             });
@@ -953,7 +1091,7 @@ impl AppView {
         connection_name: String,
         sql: String,
         elapsed: std::time::Duration,
-        result: Result<Vec<QueryResultPlan>, Error>,
+        result: Result<Vec<RunEntry>, Error>,
         cx: &mut Context<'_, Self>,
     ) {
         // A stopped (or superseded) run's late result must not overwrite the tab.
@@ -990,7 +1128,27 @@ impl AppView {
                 };
                 let mut result_grids: Vec<Option<u64>> = Vec::with_capacity(plans.len());
                 let mut results: Vec<QueryResultSummary> = Vec::with_capacity(plans.len());
-                for plan in plans {
+                for entry in plans {
+                    let RunEntry {
+                        statement,
+                        elapsed,
+                        outcome,
+                    } = entry;
+                    let plan = match outcome {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            results.push(QueryResultSummary {
+                                statement,
+                                elapsed,
+                                error: Some(error),
+                                has_result_set: false,
+                                row_count: 0,
+                                rows_affected: 0,
+                            });
+                            result_grids.push(None);
+                            continue;
+                        }
+                    };
                     let QueryResultPlan {
                         result,
                         editable,
@@ -998,6 +1156,9 @@ impl AppView {
                         table,
                     } = plan;
                     let summary = QueryResultSummary {
+                        statement,
+                        elapsed,
+                        error: None,
                         has_result_set: result.has_result_set,
                         row_count: result.rows.len(),
                         rows_affected: result.rows_affected,
@@ -1058,12 +1219,20 @@ impl AppView {
                     }
                     results.push(summary);
                 }
-                // The 信息 tab is 0; the first result set (if any) is selected by default.
+                // The 信息 tab is 0; the first result set (if any) is selected by default, unless a
+                // statement failed: then 信息 shows which, as in Navicat.
                 let has_grid = result_grids.iter().any(|grid| grid.is_some());
-                let active_result = if has_grid { 1 } else { 0 };
+                let failed = results.iter().any(|summary| summary.error.is_some())
+                    || self
+                        .queries
+                        .get(index)
+                        .is_some_and(|tab| tab.skipped_statements > 0);
+                let active_result = if has_grid && !failed { 1 } else { 0 };
                 let active_grid_id = result_grids.iter().find_map(|grid| *grid);
                 if let Some(tab) = self.queries.get_mut(index) {
                     tab.running = false;
+                    tab.run_started = None;
+                    tab.run_cancel = None;
                     tab.result_error = None;
                     tab.results = results;
                     tab.result_grids = result_grids;
@@ -1089,6 +1258,7 @@ impl AppView {
             Err(error) => {
                 if let Some(tab) = self.queries.get_mut(index) {
                     tab.running = false;
+                    tab.run_started = None;
                     tab.results.clear();
                     tab.result_grids.clear();
                     tab.active_result = 0;
@@ -1120,25 +1290,67 @@ impl AppView {
             // server-side cancel); the 信息 tab reports that the run was stopped.
             tab.run_generation = tab.run_generation.wrapping_add(1);
             tab.running = false;
-            tab.last_elapsed = None;
+            if let Some(cancel) = tab.run_cancel.take() {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            tab.last_elapsed = tab.run_started.take().map(|started| started.elapsed());
             tab.result_error = Some(t!("query.stopped").to_string());
         }
         cx.notify();
     }
 
-    pub(super) fn format_query(&mut self, cx: &mut Context<'_, Self>) {
+    /// 美化SQL: beautify the editor's SQL as one undoable edit (Ctrl+Z reverts it). Clicked again
+    /// with the formatted text untouched, it restores the text as it was before formatting.
+    pub(super) fn format_query(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let Some(index) = self.active_query else {
             return;
         };
-        let Some(tab) = self.queries.get_mut(index) else {
+        let Some(editor) = self.query_editors.get(index).cloned().flatten() else {
+            // No editor yet (e.g. a view tab before its first render): format the text directly.
+            if let Some(tab) = self.queries.get_mut(index) {
+                tab.sql = sql::format(&tab.sql);
+                tab.caret = tab.sql.len();
+                tab.anchor = tab.caret;
+            }
+            self.sync_query_editor_text(index, cx);
+            cx.notify();
             return;
         };
-        tab.sql = sql::format(&tab.sql);
-        tab.caret = tab.sql.len();
-        tab.anchor = tab.caret;
+        let current = editor.read(cx).live_text(cx);
+        let restore = self
+            .queries
+            .get(index)
+            .and_then(|tab| tab.format_undo.clone())
+            .filter(|(_, formatted)| *formatted == current)
+            .map(|(original, _)| original);
+        let (replacement, remember) = match restore {
+            Some(original) => (original, None),
+            None => {
+                let formatted = sql::format(&current);
+                (formatted.clone(), Some((current.clone(), formatted)))
+            }
+        };
+        if replacement == current {
+            return;
+        }
+        if let Some(tab) = self.queries.get_mut(index) {
+            tab.format_undo = remember;
+        }
+        let end = replacement.len();
+        editor.update(cx, |editor, cx| {
+            editor.edit_lines(
+                move |text, _selection| {
+                    Some(line_edit::LineEdit {
+                        range: 0..text.len(),
+                        text: replacement,
+                        selection: end..end,
+                    })
+                },
+                window,
+                cx,
+            )
+        });
         self.caret_visible = true;
-        // Push the formatted text into the wrapped editor.
-        self.sync_query_editor_text(index, cx);
         cx.notify();
     }
 
@@ -2201,4 +2413,143 @@ fn scan_query_dir(
 /// The selection key of a saved-query row: its file path, unique across scopes.
 pub(super) fn query_file_key(file: &QueryFileInfo) -> String {
     format!("q:{}", file.path.display())
+}
+
+impl AppView {
+    /// The open tabs in tab-bar order (queries, table / view grids, designers). Query result
+    /// grids belong to their query tab and are not separate tabs.
+    fn tab_order(&self, cx: &App) -> Vec<TabTarget> {
+        self.ordered_tabs(cx)
+    }
+
+    /// The open tabs (queries, table / view grids, designers) in the order they were opened, as
+    /// the tab bar shows them. Query result grids belong to their query tab and are not tabs.
+    pub(super) fn ordered_tabs(&self, cx: &App) -> Vec<TabTarget> {
+        let mut present: Vec<(TabKey, TabTarget)> = self
+            .queries
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| (TabKey::Query(tab.id), TabTarget::Query(index)))
+            .collect();
+        present.extend(self.grids.iter().enumerate().filter_map(|(index, grid)| {
+            let state = &grid.read(cx).state;
+            state
+                .sql
+                .is_none()
+                .then_some((TabKey::Grid(state.id), TabTarget::Grid(index)))
+        }));
+        present.extend(
+            self.designs.iter().enumerate().map(|(index, design)| {
+                (TabKey::Design(design.read(cx).id), TabTarget::Design(index))
+            }),
+        );
+        let mut sequence = self.tab_sequence.borrow_mut();
+        sequence.retain(|key| present.iter().any(|(present, _)| present == key));
+        for (key, _) in &present {
+            if !sequence.contains(key) {
+                sequence.push(*key);
+            }
+        }
+        sequence
+            .iter()
+            .filter_map(|key| {
+                present
+                    .iter()
+                    .find(|(present, _)| present == key)
+                    .map(|(_, target)| *target)
+            })
+            .collect()
+    }
+
+    /// The tab shown now, or `None` for the Objects pane.
+    pub(super) fn current_tab(&self, cx: &App) -> Option<TabTarget> {
+        if let Some(index) = self.active_query {
+            return Some(TabTarget::Query(index));
+        }
+        if let Some(index) = self.active_design {
+            return Some(TabTarget::Design(index));
+        }
+        self.active_grid
+            .filter(|&index| {
+                self.grids
+                    .get(index)
+                    .is_some_and(|grid| grid.read(cx).state.sql.is_none())
+            })
+            .map(TabTarget::Grid)
+    }
+
+    fn show_tab(&mut self, target: Option<TabTarget>, cx: &mut Context<'_, Self>) {
+        match target {
+            Some(TabTarget::Query(index)) => self.activate_query(index, cx),
+            Some(TabTarget::Grid(index)) => {
+                self.active_query = None;
+                self.active_design = None;
+                self.activate_grid(Some(index), cx);
+            }
+            Some(TabTarget::Design(index)) => {
+                self.active_query = None;
+                self.active_grid = None;
+                self.activate_design(Some(index), cx);
+            }
+            None => {
+                self.active_query = None;
+                self.active_grid = None;
+                self.active_design = None;
+                // The Objects pane lists the items of the current section (tables, views,
+                // queries, backups, ...), so the section is kept.
+                cx.notify();
+            }
+        }
+    }
+
+    /// Ctrl+Tab / Ctrl+Shift+Tab: the next / previous tab, the Objects pane first, wrapping.
+    pub(super) fn cycle_tab(&mut self, step: isize, cx: &mut Context<'_, Self>) {
+        let mut order: Vec<Option<TabTarget>> = vec![None];
+        order.extend(self.tab_order(cx).into_iter().map(Some));
+        let current = self.current_tab(cx);
+        let position = order.iter().position(|tab| *tab == current).unwrap_or(0) as isize;
+        let next = (position + step).rem_euclid(order.len() as isize) as usize;
+        self.show_tab(order[next], cx);
+    }
+
+    /// Ctrl+W: close the tab shown now (the Objects pane cannot be closed).
+    pub(super) fn close_active_tab(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(target) = self.current_tab(cx) {
+            self.close_tab(target, cx);
+        }
+    }
+
+    /// After a tab closed: when nothing sensible is shown any more, show the last remaining tab, or
+    /// (with no tabs left) the current database's tables instead of an empty pane.
+    pub(super) fn settle_after_tab_closed(&mut self, cx: &mut Context<'_, Self>) {
+        if self.current_tab(cx).is_some() {
+            return;
+        }
+        if let Some(last) = self.tab_order(cx).last().copied() {
+            self.show_tab(Some(last), cx);
+        } else {
+            self.show_tab(None, cx);
+        }
+    }
+}
+
+/// The statement at `caret` (Run Selected with nothing selected): the one the caret is in, or the
+/// last one before it (the caret just after its `;`).
+fn statement_at(
+    text: &str,
+    caret: usize,
+    mysql: bool,
+    dialect: rustgrid_core::DriverDialect,
+) -> String {
+    if !mysql {
+        return sql::current_statement(text, caret, dialect);
+    }
+    let ranges = sql_lex::split_script(text, true);
+    ranges
+        .iter()
+        .rev()
+        .find(|range| range.start <= caret)
+        .or(ranges.first())
+        .map(|range| text[range.clone()].to_string())
+        .unwrap_or_default()
 }

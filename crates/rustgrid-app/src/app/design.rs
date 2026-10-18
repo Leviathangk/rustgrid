@@ -3214,6 +3214,9 @@ impl AppView {
         self.active_design = index;
         self.active_query = None;
         self.active_grid = None;
+        if index.is_some() {
+            self.main_tab = MainTab::Tables;
+        }
         // The designer's key context only applies while it (or a cell editor inside it) holds focus,
         // so bringing it to the front takes focus for it.
         if let Some(design) = index.and_then(|index| self.designs.get(index)).cloned() {
@@ -3251,6 +3254,7 @@ impl AppView {
             Some(active) if active > index => self.active_design = Some(active - 1),
             _ => {}
         }
+        self.settle_after_tab_closed(cx);
         cx.notify();
     }
 

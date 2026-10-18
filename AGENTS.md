@@ -322,9 +322,18 @@ touching UI code.
 - **Internationalization.** Route every user-facing string through `t!`. Keys live in
   `crates/rustgrid-app/locales/{en,zh-CN}.yml` and must be added to **all** locale files.
   `t!` returns `Cow<'_, str>`; call `.to_string()` before handing it to a gpui element.
-- **Config storage.** Use `rustgrid_config::ConfigStore`. It owns three files under the OS
+- **Shortcuts are commands.** A user-facing keystroke is a `keymap::Command` (`src/app/keymap.rs`):
+  an id stored in `settings.json`, a label, a group for Options → Shortcuts, a key context and its
+  defaults. Add a command there (and its action and label) instead of a hard-coded `KeyBinding`, so
+  it is listed, searchable and rebindable. See `docs/keyboard-and-query.md`.
+- **SQL text is lexed once.** `src/app/sql_lex.rs` colours the query editor, decides what is a
+  comment (`--`, `//`, `#` on MySQL, `/*` to the end while unclosed), rewrites what the engine
+  would not accept before a run, and splits MySQL scripts (`DELIMITER`, routine bodies). Keep
+  highlighting and execution on that one scanner so they cannot disagree.
+- **Config storage.** Use `rustgrid_config::ConfigStore`. It owns these files under the OS
   config dir: `connections.json` (`CURRENT_VERSION`), `settings.json` (`SETTINGS_VERSION`),
-  and encrypted `secrets.json` + `secret.key`. Bump the matching version and extend `migrate()`
+  and encrypted `secrets.json` + `secret.key`; `session.json` holds the workspace session (open
+  tabs, connections and databases, restored on start — `src/app/workspace.rs`). Bump the matching version and extend `migrate()`
   when a schema changes. **Passwords never live in a profile** — they are keyed by profile
   `id` and stored encrypted (see Gotchas).
 

@@ -30,7 +30,7 @@ pub(super) use views::{
     detail_cell_text, detail_column_width, detail_content_width, detail_header_cell,
     detail_header_cell_plain, detail_header_column, detail_header_row, detail_row, grid_column,
     grid_columns, grid_item_sized, grid_item_width, leading_icon_badge, marquee_rect, rename_field,
-    tag_chip, view_mode_toggle,
+    reveal_vertically, tag_chip, view_mode_toggle,
 };
 
 /// Width macOS reserves at the top-left of a window whose titlebar is drawn by the app: its native

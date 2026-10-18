@@ -91,7 +91,7 @@ impl AppView {
                 theme.text,
                 theme.text,
                 true,
-                cx.listener(|this, _event, _window, cx| this.format_query(cx)),
+                cx.listener(|this, _event, window, cx| this.format_query(window, cx)),
             ));
 
         let mut tabs = div()

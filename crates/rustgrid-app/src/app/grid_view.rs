@@ -26,6 +26,8 @@ impl GridView {
             focus: cx.focus_handle(),
             selecting_cells: false,
             cell_press: None,
+            cell_press_reselect: false,
+            value_editor: None,
             cell_dragged: false,
             cell_editor: None,
             cell_editor_blur_subscription: None,
@@ -667,6 +669,42 @@ impl Render for GridView {
         )
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
             this.grid_key(event, window, cx);
+        }))
+        // Keyboard commands (keymap): F5 refresh and the spreadsheet jumps.
+        .key_context(GRID_CONTEXT)
+        .on_action(cx.listener(|this, _: &GridRefresh, _window, cx| this.refresh(cx)))
+        .on_action(
+            cx.listener(|this, _: &GridEditValue, window, cx| this.open_value_editor(window, cx)),
+        )
+        .on_action(cx.listener(|this, _: &GridPageUp, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::PageUp, false, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridPageDown, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::PageDown, false, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridSelectPageUp, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::PageUp, true, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridSelectPageDown, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::PageDown, true, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridRowStart, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::RowStart, false, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridRowEnd, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::RowEnd, false, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridFirstCell, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::First, false, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridLastCell, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::Last, false, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridNextCell, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::Next, false, cx)
+        }))
+        .on_action(cx.listener(|this, _: &GridPrevCell, _window, cx| {
+            this.grid_jump(super::grid_input::GridJump::Prev, false, cx)
         }));
 
         // With no rows to paint, keep the table visible: draw the empty body (gutter + one bordered
@@ -737,13 +775,17 @@ impl Render for GridView {
                     }))
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|this, _event, window, cx| {
+                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
                             this.selecting_cells = false;
                             let press = this.cell_press.take();
                             let dragged = this.cell_dragged;
                             this.cell_dragged = false;
+                            // A click selects; a second click on the selected cell, a double-click,
+                            // Enter or typing edits it (Navicat). F2 opens the value editor.
+                            let reselect = std::mem::take(&mut this.cell_press_reselect);
                             if let Some((row, col)) = press
                                 && !dragged
+                                && (event.click_count >= 2 || reselect)
                             {
                                 this.begin_edit((row, col), None, window, cx);
                             }
@@ -911,6 +953,11 @@ impl Render for GridView {
 
         if self.state.show_toolbar && self.page_size_menu_open {
             root = root.child(self.render_record_limit_panel(cx));
+        }
+
+        // F2's value editor sits under the rows, above the footer (as in Navicat).
+        if let Some(panel) = self.render_value_editor(window, cx) {
+            root = root.child(panel);
         }
 
         if self.state.show_footer {

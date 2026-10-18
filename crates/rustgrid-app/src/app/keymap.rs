@@ -15,22 +15,37 @@ use gpui::{App, KeyBinding, Keystroke, NoAction};
 use gpui_kit::component::input::ShowCompletions;
 
 use super::{
-    BACKUP_LIST_CONTEXT, CopyBackupFile, CopyQueryFile, CopyStatusSql, DESIGNER_CONTEXT,
-    GRID_STATUS_CONTEXT, PasteBackupFile, PasteQueryFile, QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT,
+    BACKUP_LIST_CONTEXT, CloseActiveTab, CopyBackupFile, CopyQueryFile, CopyStatusSql,
+    DESIGNER_CONTEXT, DuplicateLines, GRID_CONTEXT, GRID_STATUS_CONTEXT, GridEditValue,
+    GridFirstCell, GridLastCell, GridNextCell, GridPageDown, GridPageUp, GridPrevCell, GridRefresh,
+    GridRowEnd, GridRowStart, GridSelectPageDown, GridSelectPageUp, MoveLinesDown, MoveLinesUp,
+    NewQueryTab, NextTab, OBJECT_LIST_CONTEXT, ObjectDown, ObjectEnd, ObjectHome, ObjectLeft,
+    ObjectOpen, ObjectPageDown, ObjectPageUp, ObjectRename, ObjectRight, ObjectSelectAll, ObjectUp,
+    PasteBackupFile, PasteQueryFile, PrevTab, QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT,
     RenameBackupFile, RenameQueryFile, RunQuery, RunSelectedQuery, SaveDesign, SaveQuery,
-    SelectAllBackups, SelectAllOccurrences, SelectAllQueries, SelectAllStatusSql,
+    SelectAllBackups, SelectAllOccurrences, SelectAllQueries, SelectAllStatusSql, SwapLineUp,
+    TREE_CONTEXT, ToggleComment, TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeHome, TreeOpen,
+    TreePageDown, TreePageUp, TreeRename, TreeSelectAll, TreeUp, WORKSPACE_CONTEXT,
 };
 
 /// Where a command lives, for grouping the 快捷键 page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CommandGroup {
+    General,
+    ConnectionTree,
+    ObjectList,
+    TableGrid,
     QueryEditor,
     Designer,
     Lists,
 }
 
 impl CommandGroup {
-    pub(super) const ALL: [CommandGroup; 3] = [
+    pub(super) const ALL: [CommandGroup; 7] = [
+        CommandGroup::General,
+        CommandGroup::ConnectionTree,
+        CommandGroup::ObjectList,
+        CommandGroup::TableGrid,
         CommandGroup::QueryEditor,
         CommandGroup::Designer,
         CommandGroup::Lists,
@@ -39,6 +54,10 @@ impl CommandGroup {
     /// The i18n key of the group's heading.
     pub(super) fn label_key(self) -> &'static str {
         match self {
+            CommandGroup::General => "keymap.group.general",
+            CommandGroup::TableGrid => "keymap.group.grid",
+            CommandGroup::ConnectionTree => "keymap.group.tree",
+            CommandGroup::ObjectList => "keymap.group.objects",
             CommandGroup::QueryEditor => "keymap.group.query_editor",
             CommandGroup::Designer => "keymap.group.designer",
             CommandGroup::Lists => "keymap.group.lists",
@@ -60,7 +79,7 @@ pub(super) struct Command {
     /// Built-in keystrokes on macOS, where they differ from `defaults`.
     pub mac_defaults: Option<&'static [&'static str]>,
     /// Builds the binding of `keystroke` in `context`.
-    pub bind: fn(&str, &'static str) -> KeyBinding,
+    pub bind: fn(&str, Option<&'static str>) -> KeyBinding,
 }
 
 impl Command {
@@ -75,12 +94,281 @@ impl Command {
 
 macro_rules! bind {
     ($action:expr) => {
-        |keystroke, context| KeyBinding::new(keystroke, $action, Some(context))
+        |keystroke, context| KeyBinding::new(keystroke, $action, context)
+    };
+}
+
+/// A navigation command of `group` (key `context`) bound to `keys` on every platform.
+macro_rules! nav_command {
+    ($group:expr, $context:expr, $id:literal, $label:literal, $keys:expr, $action:expr) => {
+        Command {
+            id: $id,
+            label_key: $label,
+            group: $group,
+            context: $context,
+            defaults: $keys,
+            mac_defaults: None,
+            bind: bind!($action),
+        }
+    };
+}
+
+/// A connection-tree navigation command.
+macro_rules! tree_command {
+    ($id:literal, $label:literal, $keys:expr, $action:expr) => {
+        nav_command!(
+            CommandGroup::ConnectionTree,
+            TREE_CONTEXT,
+            $id,
+            $label,
+            $keys,
+            $action
+        )
+    };
+}
+
+/// An object-list navigation command.
+macro_rules! object_command {
+    ($id:literal, $label:literal, $keys:expr, $action:expr) => {
+        nav_command!(
+            CommandGroup::ObjectList,
+            OBJECT_LIST_CONTEXT,
+            $id,
+            $label,
+            $keys,
+            $action
+        )
+    };
+}
+
+/// A table-grid command.
+macro_rules! grid_command {
+    ($id:literal, $label:literal, $keys:expr, $action:expr) => {
+        nav_command!(
+            CommandGroup::TableGrid,
+            GRID_CONTEXT,
+            $id,
+            $label,
+            $keys,
+            $action
+        )
+    };
+}
+
+/// A query-editor command.
+macro_rules! editor_command {
+    ($id:literal, $label:literal, $keys:expr, $action:expr) => {
+        nav_command!(
+            CommandGroup::QueryEditor,
+            QUERY_EDITOR_CONTEXT,
+            $id,
+            $label,
+            $keys,
+            $action
+        )
     };
 }
 
 /// Every rebindable command, in 快捷键-page order within each group.
 pub(super) const COMMANDS: &[Command] = &[
+    tree_command!("tree.up", "keymap.tree.up", &["up"], TreeUp),
+    tree_command!("tree.down", "keymap.tree.down", &["down"], TreeDown),
+    tree_command!(
+        "tree.page_up",
+        "keymap.tree.page_up",
+        &["pageup"],
+        TreePageUp
+    ),
+    tree_command!(
+        "tree.page_down",
+        "keymap.tree.page_down",
+        &["pagedown"],
+        TreePageDown
+    ),
+    tree_command!("tree.home", "keymap.tree.home", &["home"], TreeHome),
+    tree_command!("tree.end", "keymap.tree.end", &["end"], TreeEnd),
+    tree_command!("tree.expand", "keymap.tree.expand", &["right"], TreeExpand),
+    tree_command!(
+        "tree.collapse",
+        "keymap.tree.collapse",
+        &["left"],
+        TreeCollapse
+    ),
+    tree_command!("tree.open", "keymap.tree.open", &["enter"], TreeOpen),
+    tree_command!("tree.rename", "keymap.tree.rename", &["f2"], TreeRename),
+    tree_command!(
+        "tree.select_all",
+        "keymap.tree.select_all",
+        &["secondary-a"],
+        TreeSelectAll
+    ),
+    object_command!("objects.up", "keymap.objects.up", &["up"], ObjectUp),
+    object_command!("objects.down", "keymap.objects.down", &["down"], ObjectDown),
+    object_command!("objects.left", "keymap.objects.left", &["left"], ObjectLeft),
+    object_command!(
+        "objects.right",
+        "keymap.objects.right",
+        &["right"],
+        ObjectRight
+    ),
+    object_command!(
+        "objects.page_up",
+        "keymap.objects.page_up",
+        &["pageup"],
+        ObjectPageUp
+    ),
+    object_command!(
+        "objects.page_down",
+        "keymap.objects.page_down",
+        &["pagedown"],
+        ObjectPageDown
+    ),
+    object_command!("objects.home", "keymap.objects.home", &["home"], ObjectHome),
+    object_command!("objects.end", "keymap.objects.end", &["end"], ObjectEnd),
+    object_command!(
+        "objects.open",
+        "keymap.objects.open",
+        &["enter"],
+        ObjectOpen
+    ),
+    object_command!(
+        "objects.rename",
+        "keymap.objects.rename",
+        &["f2"],
+        ObjectRename
+    ),
+    object_command!(
+        "objects.select_all",
+        "keymap.objects.select_all",
+        &["secondary-a"],
+        ObjectSelectAll
+    ),
+    Command {
+        id: "general.new_query",
+        label_key: "keymap.general.new_query",
+        group: CommandGroup::General,
+        context: WORKSPACE_CONTEXT,
+        defaults: &["ctrl-q"],
+        // ⌘Q quits on macOS.
+        mac_defaults: Some(&["cmd-shift-n"]),
+        bind: bind!(NewQueryTab),
+    },
+    nav_command!(
+        CommandGroup::General,
+        WORKSPACE_CONTEXT,
+        "general.close_tab",
+        "keymap.general.close_tab",
+        &["secondary-w"],
+        CloseActiveTab
+    ),
+    nav_command!(
+        CommandGroup::General,
+        WORKSPACE_CONTEXT,
+        "general.next_tab",
+        "keymap.general.next_tab",
+        &["ctrl-tab", "ctrl-pagedown"],
+        NextTab
+    ),
+    nav_command!(
+        CommandGroup::General,
+        WORKSPACE_CONTEXT,
+        "general.prev_tab",
+        "keymap.general.prev_tab",
+        &["ctrl-shift-tab", "ctrl-pageup"],
+        PrevTab
+    ),
+    grid_command!(
+        "grid.edit_value",
+        "keymap.grid.edit_value",
+        &["f2"],
+        GridEditValue
+    ),
+    grid_command!("grid.refresh", "keymap.grid.refresh", &["f5"], GridRefresh),
+    grid_command!(
+        "grid.page_up",
+        "keymap.grid.page_up",
+        &["pageup"],
+        GridPageUp
+    ),
+    grid_command!(
+        "grid.page_down",
+        "keymap.grid.page_down",
+        &["pagedown"],
+        GridPageDown
+    ),
+    grid_command!(
+        "grid.select_page_up",
+        "keymap.grid.select_page_up",
+        &["shift-pageup"],
+        GridSelectPageUp
+    ),
+    grid_command!(
+        "grid.select_page_down",
+        "keymap.grid.select_page_down",
+        &["shift-pagedown"],
+        GridSelectPageDown
+    ),
+    grid_command!(
+        "grid.row_start",
+        "keymap.grid.row_start",
+        &["home"],
+        GridRowStart
+    ),
+    grid_command!("grid.row_end", "keymap.grid.row_end", &["end"], GridRowEnd),
+    grid_command!(
+        "grid.first_cell",
+        "keymap.grid.first_cell",
+        &["secondary-home"],
+        GridFirstCell
+    ),
+    grid_command!(
+        "grid.last_cell",
+        "keymap.grid.last_cell",
+        &["secondary-end"],
+        GridLastCell
+    ),
+    grid_command!(
+        "grid.next_cell",
+        "keymap.grid.next_cell",
+        &["tab"],
+        GridNextCell
+    ),
+    grid_command!(
+        "grid.prev_cell",
+        "keymap.grid.prev_cell",
+        &["shift-tab"],
+        GridPrevCell
+    ),
+    editor_command!(
+        "query.toggle_comment",
+        "keymap.query.toggle_comment",
+        &["secondary-k", "secondary-/"],
+        ToggleComment
+    ),
+    editor_command!(
+        "query.duplicate",
+        "keymap.query.duplicate",
+        &["secondary-d"],
+        DuplicateLines
+    ),
+    editor_command!(
+        "query.swap_line_up",
+        "keymap.query.swap_line_up",
+        &["secondary-t"],
+        SwapLineUp
+    ),
+    editor_command!(
+        "query.move_lines_up",
+        "keymap.query.move_lines_up",
+        &["alt-up"],
+        MoveLinesUp
+    ),
+    editor_command!(
+        "query.move_lines_down",
+        "keymap.query.move_lines_down",
+        &["alt-down"],
+        MoveLinesDown
+    ),
     Command {
         id: "query.run",
         label_key: "query.run",
@@ -317,6 +605,12 @@ pub(super) fn conflicts(
         .collect()
 }
 
+/// The gpui key context a command binds in: none for workspace-wide commands, so they fire
+/// whatever has focus.
+fn binding_context(context: &'static str) -> Option<&'static str> {
+    (context != WORKSPACE_CONTEXT).then_some(context)
+}
+
 /// The keystrokes [`bind_keymap`] registered, each with its key context, so the next call can
 /// shadow them.
 pub(super) type BoundKeys = Vec<(String, &'static str)>;
@@ -332,14 +626,18 @@ pub(super) fn bind_keymap(
     let mut bindings = Vec::new();
     for (keystroke, context) in previous {
         if Keystroke::parse(keystroke).is_ok() {
-            bindings.push(KeyBinding::new(keystroke, NoAction {}, Some(context)));
+            bindings.push(KeyBinding::new(
+                keystroke,
+                NoAction {},
+                binding_context(context),
+            ));
         }
     }
     let mut bound = Vec::new();
     for command in COMMANDS {
         for keystroke in keys_for(command, overrides) {
             if Keystroke::parse(&keystroke).is_ok() {
-                bindings.push((command.bind)(&keystroke, command.context));
+                bindings.push((command.bind)(&keystroke, binding_context(command.context)));
                 bound.push((keystroke, command.context));
             }
         }

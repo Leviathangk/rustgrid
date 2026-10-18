@@ -370,6 +370,8 @@ impl AppView {
                             node.expanded = true;
                         }
                         view.load_databases(index, cx);
+                        // Reopen the last session's tables on this connection.
+                        view.restore_session_tables(index, cx);
                     }
                     Err(error) => {
                         let authentication = matches!(&error, Error::Authentication(_));
@@ -671,6 +673,8 @@ impl AppView {
                 }
                 view.completion_generation = view.completion_generation.wrapping_add(1);
                 view.remember_databases(index);
+                // Reopen the last session's databases on this connection.
+                view.restore_session_databases(index, cx);
                 view.notify_object_pane(cx);
                 cx.notify();
                 for (database_index, database_name, tables, routines) in reload {
@@ -938,7 +942,7 @@ impl AppView {
     }
 
     /// Create (or replace) the object pane for a database and return the entity handle.
-    fn open_object_pane(
+    pub(super) fn open_object_pane(
         &mut self,
         connection_index: usize,
         database_index: usize,
@@ -1485,6 +1489,19 @@ impl AppView {
         self.active_grid = index;
         self.active_query = None;
         self.active_design = None;
+        // The grid takes the keyboard focus, so arrows / Tab work right after a tab switch.
+        self.grid_focus_pending = index.is_some();
+        // The toolbar section follows the tab: Tables for a table, Views for a view.
+        if let Some(grid) = index.and_then(|index| self.grids.get(index)) {
+            let state = &grid.read(cx).state;
+            if state.sql.is_none() {
+                self.main_tab = if state.is_view {
+                    MainTab::Views
+                } else {
+                    MainTab::Tables
+                };
+            }
+        }
         cx.notify();
     }
 

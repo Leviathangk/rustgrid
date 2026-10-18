@@ -921,7 +921,61 @@ pub(crate) struct ColumnGrid {
     grab: Option<f32>,
 }
 
+/// Scroll `scroll` vertically just enough that `item` (window bounds from the last frame) is fully
+/// visible. gpui's offset is negative as the content scrolls down and stays in `-max..0`.
+pub(crate) fn reveal_vertically(scroll: &ScrollHandle, item: Bounds<Pixels>) {
+    let view = scroll.bounds();
+    let mut offset = scroll.offset();
+    if item.top() < view.top() {
+        offset.y += view.top() - item.top();
+    } else if item.bottom() > view.bottom() {
+        offset.y -= item.bottom() - view.bottom();
+    } else {
+        return;
+    }
+    offset.y = offset.y.min(px(0.0)).max(-scroll.max_offset().y);
+    scroll.set_offset(offset);
+}
+
+/// Scroll `scroll` horizontally just enough that `item` is fully visible (see
+/// [`reveal_vertically`]).
+pub(crate) fn reveal_horizontally(scroll: &ScrollHandle, item: Bounds<Pixels>) {
+    let view = scroll.bounds();
+    let mut offset = scroll.offset();
+    if item.left() < view.left() {
+        offset.x += view.left() - item.left();
+    } else if item.right() > view.right() {
+        offset.x -= item.right() - view.right();
+    } else {
+        return;
+    }
+    offset.x = offset.x.min(px(0.0)).max(-scroll.max_offset().x);
+    scroll.set_offset(offset);
+}
+
+impl DetailScroll {
+    /// Scroll the rows so `row` is visible after a keyboard move.
+    pub(crate) fn reveal(&self, row: Bounds<Pixels>) {
+        reveal_vertically(&self.vscroll, row);
+    }
+
+    /// The rows viewport's height, for paging by a screenful.
+    pub(crate) fn viewport_height(&self) -> f32 {
+        f32::from(self.vscroll.bounds().size.height)
+    }
+}
+
 impl ColumnGrid {
+    /// Scroll the columns so `item` is visible after a keyboard move.
+    pub(crate) fn reveal(&self, item: Bounds<Pixels>) {
+        reveal_horizontally(&self.scroll, item);
+    }
+
+    /// The grid viewport's width, for paging by a screenful of columns.
+    pub(crate) fn viewport_width(&self) -> f32 {
+        f32::from(self.scroll.bounds().size.width)
+    }
+
     /// How many item rows fit in one column at the current viewport height.
     pub(crate) fn rows_per_column(&self) -> usize {
         self.rows_per_column_with(GRID_ROW_HEIGHT)

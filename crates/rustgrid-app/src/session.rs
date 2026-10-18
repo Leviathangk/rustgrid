@@ -485,8 +485,17 @@ pub struct QueryTab {
     pub result_error: Option<String>,
     /// The script that was run, shown on the 信息 tab.
     pub last_sql: String,
-    /// How long the last run took, shown on the 信息 tab.
+    /// How long the last run took, shown on the 信息 tab and the toolbar.
     pub last_elapsed: Option<std::time::Duration>,
+    /// When the running query started, for the toolbar's live timer.
+    pub run_started: Option<std::time::Instant>,
+    /// The text before and after the last 美化SQL, so formatting again with the formatted text
+    /// untouched restores the original.
+    pub format_undo: Option<(String, String)>,
+    /// Statements the last run skipped because of the statement limit (the 信息 tab says so).
+    pub skipped_statements: usize,
+    /// Set by Stop: the running script runs no further statement.
+    pub run_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The id of the grid in `AppView::grids` that shows this tab's active result set, if any.
     pub grid_id: Option<u64>,
     /// `Some` when this tab edits a stored routine instead of a free-form query.
@@ -517,6 +526,10 @@ impl QueryTab {
             result_error: None,
             last_sql: String::new(),
             last_elapsed: None,
+            run_started: None,
+            run_cancel: None,
+            skipped_statements: 0,
+            format_undo: None,
             grid_id: None,
             routine: None,
             view: None,
@@ -548,11 +561,36 @@ pub struct QueryResultPlan {
 
 /// A cheap snapshot of one executed statement, enough for the 信息 tab. Kept separate from
 /// [`QueryResult`] so the rows are not held twice (the grid owns them).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct QueryResultSummary {
+    /// The statement this entry reports on, as sent.
+    pub statement: String,
+    /// How long that statement took.
+    pub elapsed: std::time::Duration,
+    /// The statement's error, when it failed (then there is no result set).
+    pub error: Option<String>,
     pub has_result_set: bool,
     pub row_count: usize,
     pub rows_affected: u64,
+}
+
+/// One entry of a query run, built on the async side: a statement's result set (or its
+/// outcome), or its error. A statement that returned several result sets yields several entries.
+pub struct RunEntry {
+    pub statement: String,
+    pub elapsed: std::time::Duration,
+    pub outcome: Result<QueryResultPlan, String>,
+}
+
+/// What a run executes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RunScope {
+    /// The whole editor.
+    All,
+    /// The selection when there is one, else the whole editor (Navicat's Run, Ctrl+R).
+    SelectionOrAll,
+    /// The selection when there is one, else the statement at the caret (Run Selected).
+    SelectionOrStatement,
 }
 
 /// One undo step: the touched cells and their previous pending edit value

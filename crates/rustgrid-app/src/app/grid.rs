@@ -83,6 +83,7 @@ impl AppView {
             Some(active) if active > index => self.active_grid = Some(active - 1),
             _ => {}
         }
+        self.settle_after_tab_closed(cx);
         cx.notify();
     }
 
@@ -235,7 +236,10 @@ impl GridView {
 
         self.state.loading = true;
         self.state.error = None;
-        self.state.selection = None;
+        // A reload in place (Refresh / F5, after a write) keeps the selected cells.
+        if reset_scroll {
+            self.state.selection = None;
+        }
         self.state.edits.clear();
         self.inserts.clear();
         self.state.undo.clear();
@@ -293,6 +297,13 @@ impl GridView {
                         );
                         grid.state.install_page(page.columns, page.rows, widths);
                         grid.state.total_rows = page.total_rows;
+                        // Drop a kept selection that no longer fits the reloaded page.
+                        let (rows, cols) = (grid.display_row_count(), grid.state.visible_columns);
+                        if grid.state.selection.as_ref().is_some_and(|selection| {
+                            selection.rows().1 >= rows || selection.cols().1 >= cols
+                        }) {
+                            grid.state.selection = None;
+                        }
                         if grid.field_filter_open {
                             // Keep the in-progress draft, but fold in any field the table has
                             // gained since the popup opened so it is still listable.

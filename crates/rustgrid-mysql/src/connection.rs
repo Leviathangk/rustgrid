@@ -136,6 +136,10 @@ impl ScriptSession for MySqlScriptSession {
     async fn execute(&mut self, sql: &str) -> Result<QueryResult> {
         execute_one(&mut self.connection, sql).await
     }
+
+    async fn execute_many(&mut self, sql: &str) -> Result<Vec<QueryResult>> {
+        fetch_results(&mut self.connection, sql).await
+    }
 }
 
 #[async_trait]
@@ -452,66 +456,7 @@ impl Connection for MysqlConnection {
             use_database(&mut connection, database).await?;
         }
 
-        // MySQL's protocol reports `SERVER_MORE_RESULTS_EXISTS` after each statement, which sqlx
-        // surfaces through `fetch_many` as an `Either::Left` boundary between result sets. That is
-        // what lets one script return several result sets without us having to split it (the server
-        // still parses compound statements like `CREATE PROCEDURE ... BEGIN ...; ... END` itself).
-        let mut stream =
-            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).fetch_many(&mut *connection);
-        let mut results: Vec<QueryResult> = Vec::new();
-        let mut columns: Vec<ColumnInfo> = Vec::new();
-        let mut rows: Vec<Vec<CellValue>> = Vec::new();
-        while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
-            match item {
-                Either::Left(done) => {
-                    let has_result_set = !columns.is_empty() || !rows.is_empty();
-                    results.push(QueryResult {
-                        statement: String::new(),
-                        columns: std::mem::take(&mut columns),
-                        rows: std::mem::take(&mut rows),
-                        rows_affected: done.rows_affected(),
-                        has_result_set,
-                        last_insert_id: Some(done.last_insert_id()).filter(|id| *id != 0),
-                    });
-                }
-                Either::Right(row) => {
-                    if columns.is_empty() && rows.is_empty() {
-                        columns = columns_from_row(&row);
-                    }
-                    let mut values = Vec::with_capacity(columns.len());
-                    for index in 0..columns.len() {
-                        values.push(decode_cell(&row, index));
-                    }
-                    rows.push(values);
-                }
-            }
-        }
-        drop(stream);
-
-        // Pair each result set with its originating statement when the counts line up, so a grid
-        // can reload just its own statement. A zero-row `SELECT` yields no rows for sqlx to expose
-        // its columns, so describe it (the `returns_result_set` keyword decides which sets need it).
-        let statements = split_statements(sql);
-        if results.len() == statements.len() {
-            for (result, statement) in results.iter_mut().zip(statements.iter()) {
-                result.statement = statement.clone();
-                if !result.has_result_set
-                    && returns_result_set(statement)
-                    && let Ok(described) = describe_columns(&mut connection, statement).await
-                {
-                    result.columns = described;
-                    result.has_result_set = true;
-                }
-            }
-        } else {
-            // A `CALL` (one statement, several result sets) cannot be split per set; keep the whole
-            // script as the source so a refresh re-runs the procedure.
-            for result in results.iter_mut() {
-                result.statement = sql.to_string();
-            }
-        }
-
-        Ok(results)
+        fetch_results(&mut connection, sql).await
     }
 
     async fn create_database(&self, name: &str, options: &DatabaseOptions) -> Result<()> {
@@ -2247,6 +2192,71 @@ async fn use_database(connection: &mut MySqlConnection, database: &str) -> Resul
         .await
         .map_err(map_query_error)?;
     Ok(())
+}
+
+/// Run `sql` (one statement or a script) and decode every result set it returns, pairing each with
+/// its statement when the counts line up.
+async fn fetch_results(connection: &mut MySqlConnection, sql: &str) -> Result<Vec<QueryResult>> {
+    // MySQL's protocol reports `SERVER_MORE_RESULTS_EXISTS` after each statement, which sqlx
+    // surfaces through `fetch_many` as an `Either::Left` boundary between result sets. That is
+    // what lets one script return several result sets without us having to split it (the server
+    // still parses compound statements like `CREATE PROCEDURE ... BEGIN ...; ... END` itself).
+    let mut stream =
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).fetch_many(&mut *connection);
+    let mut results: Vec<QueryResult> = Vec::new();
+    let mut columns: Vec<ColumnInfo> = Vec::new();
+    let mut rows: Vec<Vec<CellValue>> = Vec::new();
+    while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
+        match item {
+            Either::Left(done) => {
+                let has_result_set = !columns.is_empty() || !rows.is_empty();
+                results.push(QueryResult {
+                    statement: String::new(),
+                    columns: std::mem::take(&mut columns),
+                    rows: std::mem::take(&mut rows),
+                    rows_affected: done.rows_affected(),
+                    has_result_set,
+                    last_insert_id: Some(done.last_insert_id()).filter(|id| *id != 0),
+                });
+            }
+            Either::Right(row) => {
+                if columns.is_empty() && rows.is_empty() {
+                    columns = columns_from_row(&row);
+                }
+                let mut values = Vec::with_capacity(columns.len());
+                for index in 0..columns.len() {
+                    values.push(decode_cell(&row, index));
+                }
+                rows.push(values);
+            }
+        }
+    }
+    drop(stream);
+
+    // Pair each result set with its originating statement when the counts line up, so a grid
+    // can reload just its own statement. A zero-row `SELECT` yields no rows for sqlx to expose
+    // its columns, so describe it (the `returns_result_set` keyword decides which sets need it).
+    let statements = split_statements(sql);
+    if results.len() == statements.len() {
+        for (result, statement) in results.iter_mut().zip(statements.iter()) {
+            result.statement = statement.clone();
+            if !result.has_result_set
+                && returns_result_set(statement)
+                && let Ok(described) = describe_columns(connection, statement).await
+            {
+                result.columns = described;
+                result.has_result_set = true;
+            }
+        }
+    } else {
+        // A `CALL` (one statement, several result sets) cannot be split per set; keep the whole
+        // script as the source so a refresh re-runs the procedure.
+        for result in results.iter_mut() {
+            result.statement = sql.to_string();
+        }
+    }
+
+    Ok(results)
 }
 
 /// Run one statement (the caller has already selected the database) and decode its single result.

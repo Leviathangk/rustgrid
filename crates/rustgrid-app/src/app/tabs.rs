@@ -718,43 +718,69 @@ impl Render for TabBar {
             .overflow_x_scroll()
             .track_scroll(&self.scroll);
 
+        // Draw the tabs in their opening order (the same order Ctrl+Tab walks).
+        let order = self
+            .app
+            .upgrade()
+            .map(|app| app.read(cx).ordered_tabs(cx))
+            .unwrap_or_default();
+        let mut tabs: Vec<(TabTarget, AnyElement)> = Vec::new();
         for (index, id, title, is_view, color) in grid_tabs {
-            strip = strip.child(self.table_tab(
-                theme,
-                index,
-                id,
-                title,
-                is_view,
-                color,
-                active_grid == Some(index),
-                cx,
+            tabs.push((
+                TabTarget::Grid(index),
+                self.table_tab(
+                    theme,
+                    index,
+                    id,
+                    title,
+                    is_view,
+                    color,
+                    active_grid == Some(index),
+                    cx,
+                )
+                .into_any_element(),
             ));
         }
         for (index, id, title, is_view, color) in design_tabs {
-            strip = strip.child(self.design_tab(
-                theme,
-                index,
-                id,
-                title,
-                is_view,
-                color,
-                active_design == Some(index),
-                cx,
+            tabs.push((
+                TabTarget::Design(index),
+                self.design_tab(
+                    theme,
+                    index,
+                    id,
+                    title,
+                    is_view,
+                    color,
+                    active_design == Some(index),
+                    cx,
+                )
+                .into_any_element(),
             ));
         }
         for (index, id, title, icon, icon_color, color) in query_tabs {
-            strip = strip.child(self.query_tab(
-                theme,
-                index,
-                id,
-                title,
-                icon,
-                icon_color,
-                active_query == Some(index),
-                color,
-                cx,
+            tabs.push((
+                TabTarget::Query(index),
+                self.query_tab(
+                    theme,
+                    index,
+                    id,
+                    title,
+                    icon,
+                    icon_color,
+                    active_query == Some(index),
+                    color,
+                    cx,
+                )
+                .into_any_element(),
             ));
         }
+        tabs.sort_by_key(|(target, _)| {
+            order
+                .iter()
+                .position(|ordered| ordered == target)
+                .unwrap_or(usize::MAX)
+        });
+        strip = strip.children(tabs.into_iter().map(|(_, tab)| tab));
 
         // The object tab is pinned; the arrows only appear (and wrap the scrollable tab strip)
         // when the open tabs no longer fit.

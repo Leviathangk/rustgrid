@@ -49,7 +49,7 @@ impl AppView {
                 theme.text,
                 theme.text,
                 true,
-                cx.listener(|this, _event, _window, cx| this.format_query(cx)),
+                cx.listener(|this, _event, window, cx| this.format_query(window, cx)),
             ));
 
         // Copy the few scalars needed from the tab, so the `queries` borrow ends before the editor
@@ -127,7 +127,9 @@ impl AppView {
                     run_enabled,
                     // The wrapped editor owns the real selection, so `run_query` re-reads it live
                     // and runs the selection when there is one, otherwise the whole editor.
-                    cx.listener(move |this, _event, _window, cx| this.run_query(true, cx)),
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.run_query(RunScope::SelectionOrAll, cx)
+                    }),
                 )
                 .tooltip(ui::text_tooltip(run_tooltip)),
             )
@@ -135,11 +137,21 @@ impl AppView {
                 "query-stop",
                 "icons/stop.svg",
                 t!("query.stop").to_string(),
-                theme.text_muted,
-                theme.danger,
+                if running {
+                    theme.text
+                } else {
+                    theme.text_muted
+                },
+                // Red only while a query runs; grey (and dimmed) otherwise.
+                if running {
+                    theme.danger
+                } else {
+                    theme.text_muted
+                },
                 running,
                 cx.listener(|this, _event, _window, cx| this.stop_query(cx)),
-            ));
+            ))
+            .child(self.query_timer(query_index, cx));
 
         let editor = self.render_query_editor(query_index, cx);
         let result_grid = grid_id.and_then(|id| {
@@ -167,7 +179,7 @@ impl AppView {
                     .child(t!("query.running").to_string())
                     .into_any_element()
             } else if active_result == 0 || has_error {
-                self.render_query_info(query_index)
+                self.render_query_info(query_index, cx)
             } else if let Some(grid) = result_grid {
                 grid.into_any_element()
             } else {
@@ -348,6 +360,8 @@ impl AppView {
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
             })
             .when(enabled, |this| this.on_click(on_click))
+            // A disabled button (Stop while nothing runs, Run while running) looks disabled.
+            .when(!enabled, |this| this.opacity(0.4))
             .child(
                 svg()
                     .path(icon)
