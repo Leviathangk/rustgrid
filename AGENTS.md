@@ -333,9 +333,9 @@ touching UI code.
 - **Config storage.** Use `rustgrid_config::ConfigStore`. It owns these files under the OS
   config dir: `connections.json` (`CURRENT_VERSION`), `settings.json` (`SETTINGS_VERSION`),
   and encrypted `secrets.json` + `secret.key`; `session.json` holds the workspace session (open
-  tabs, connections and databases, restored on start — `src/app/workspace.rs`). Bump the matching version and extend `migrate()`
-  when a schema changes. **Passwords never live in a profile** — they are keyed by profile
-  `id` and stored encrypted (see Gotchas).
+  tabs, connections and databases, restored on start — `src/app/workspace.rs`). Bump the matching
+  version and extend `migrate()` when a schema changes. **Passwords never live in a profile** —
+  they are keyed by profile `id` and stored encrypted (see Gotchas).
 
 ## UI conventions
 
