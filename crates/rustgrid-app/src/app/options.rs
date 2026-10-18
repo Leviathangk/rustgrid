@@ -201,9 +201,9 @@ impl AppView {
         self.options_editor_word_wrap = self.editor_word_wrap;
         self.options_grid_show_comments = self.grid_show_comments;
         self.options_grid_show_types = self.grid_show_types;
-        self.options_run_shortcut = self.run_shortcut.clone();
-        self.options_run_selected_shortcut = self.run_selected_shortcut.clone();
+        self.options_shortcuts = self.shortcuts.clone();
         self.recording_shortcut = None;
+        self.ensure_shortcut_search(cx);
         self.ensure_language_combo(cx);
         self.ensure_editor_combos(cx);
         let weak = cx.weak_entity();
@@ -289,6 +289,38 @@ impl AppView {
         self.language_combo = Some(combo);
     }
 
+    /// Build the 快捷键 page's search box on the first open; its text filters the command list by
+    /// label, command id or bound keystroke.
+    fn ensure_shortcut_search(&mut self, cx: &mut Context<'_, Self>) {
+        self.options_shortcut_filter.clear();
+        if let Some(search) = self.options_shortcut_search.clone() {
+            search.update(cx, |input, cx| input.set_text("", cx));
+            return;
+        }
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let search = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                "",
+                TextInputOptions {
+                    placeholder: t!("keymap.search").to_string().into(),
+                    icon: Some("icons/search.svg"),
+                    clearable: true,
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |app, cx| {
+                    app.options_shortcut_filter = text.to_string();
+                    cx.notify();
+                });
+            }))
+        });
+        self.options_shortcut_search = Some(search);
+    }
+
     /// Build the editor page's three dropdowns on the first open, mirroring `ensure_language_combo`.
     fn ensure_editor_combos(&mut self, cx: &mut Context<'_, Self>) {
         let theme = self.theme;
@@ -361,17 +393,11 @@ impl AppView {
         self.editor_word_wrap = self.options_editor_word_wrap;
         self.grid_show_comments = self.options_grid_show_comments;
         self.grid_show_types = self.options_grid_show_types;
-        self.run_shortcut = self.options_run_shortcut.clone();
-        self.run_selected_shortcut = self.options_run_selected_shortcut.clone();
+        self.shortcuts = self.options_shortcuts.clone();
         self.recording_shortcut = None;
-        // Re-bind the editor's 运行 / 运行已选 keystrokes: the old ones (if the user changed them)
-        // are shadowed by a `NoAction` so they stop firing.
-        self.bound_run_shortcuts = bind_run_shortcuts(
-            cx,
-            &self.run_shortcut,
-            &self.run_selected_shortcut,
-            &self.bound_run_shortcuts,
-        );
+        // Re-bind every command: the previously bound keystrokes are shadowed by a `NoAction`
+        // so a changed or cleared shortcut stops firing.
+        self.bound_keys = keymap::bind_keymap(cx, &self.shortcuts, &self.bound_keys);
         let language = self.options_language;
         self.set_language(language, cx);
         self.persist_settings();
@@ -579,11 +605,61 @@ impl AppView {
         }
     }
 
-    /// The 快捷键 page: the query editor's 运行 / 运行已选 keystrokes (Navicat's Ctrl+R /
-    /// Ctrl+Shift+R by default). Clicking a field starts recording, and the next keystroke becomes
-    /// the shortcut; 默认 restores the built-in pair.
+    /// The 快捷键 page: every keymap command, grouped and filtered by the search box. Clicking a
+    /// command's field starts recording and the next keystroke replaces its shortcuts; the row's
+    /// reset button restores the built-in ones, its clear button unbinds it, and 默认 resets all.
     fn options_shortcuts_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
+        let filter = self.options_shortcut_filter.trim().to_lowercase();
+        let matches = |command: &keymap::Command| {
+            filter.is_empty()
+                || t!(command.label_key).to_lowercase().contains(&filter)
+                || command.id.contains(&filter)
+                || keymap::keys_for(command, &self.options_shortcuts)
+                    .iter()
+                    .any(|key| shortcut_label(key).to_lowercase().contains(&filter))
+        };
+
+        let mut list = div()
+            .id("options-shortcut-list")
+            .flex()
+            .flex_col()
+            .w_full()
+            .max_h(px(380.0))
+            .overflow_y_scroll();
+        let mut any = false;
+        for group in keymap::CommandGroup::ALL {
+            let rows: Vec<AnyElement> = keymap::COMMANDS
+                .iter()
+                .enumerate()
+                .filter(|(_, command)| command.group == group && matches(command))
+                .map(|(index, command)| self.shortcut_row(index, command, theme, cx))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            any = true;
+            list = list
+                .child(
+                    div()
+                        .pt_2()
+                        .pb_1()
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!(group.label_key()).to_string()),
+                )
+                .children(rows);
+        }
+        if !any {
+            list = list.child(
+                div()
+                    .py_2()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("keymap.no_match").to_string()),
+            );
+        }
+
         div()
             .flex()
             .flex_col()
@@ -600,78 +676,127 @@ impl AppView {
                     .text_color(rgb(theme.text_muted))
                     .child(t!("options.shortcuts.hint").to_string()),
             )
-            .child(self.shortcut_row(OptionsShortcut::Run, t!("query.run").to_string(), theme, cx))
-            .child(self.shortcut_row(
-                OptionsShortcut::RunSelected,
-                t!("query.run_selected").to_string(),
-                theme,
-                cx,
-            ))
+            .children(
+                self.options_shortcut_search
+                    .clone()
+                    .map(|search| div().w(px(260.0)).child(search)),
+            )
+            .child(list)
     }
 
-    /// One 快捷键 row: the action's label and the field that captures its keystroke.
+    /// One 快捷键 row: the command's label (and any conflict), the field that captures its
+    /// keystroke, and its reset / clear buttons.
     fn shortcut_row(
         &self,
-        kind: OptionsShortcut,
-        label: String,
+        index: usize,
+        command: &'static keymap::Command,
         theme: Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let recording = self.recording_shortcut == Some(kind);
-        let focus = match kind {
-            OptionsShortcut::Run => self.options_run_focus.clone(),
-            OptionsShortcut::RunSelected => self.options_run_selected_focus.clone(),
-        };
-        let value = match kind {
-            OptionsShortcut::Run => self.options_run_shortcut.clone(),
-            OptionsShortcut::RunSelected => self.options_run_selected_shortcut.clone(),
-        };
+        let id = command.id;
+        let recording = self.recording_shortcut == Some(id);
+        let focus = self.options_shortcut_focus[index].clone();
         let capture_focus = focus.clone();
+        let keys = keymap::keys_for(command, &self.options_shortcuts);
+        let overridden = self.options_shortcuts.contains_key(id);
+        let conflicts = keymap::conflicts(command, &self.options_shortcuts);
+
+        let field_text = if recording {
+            t!("options.shortcuts.press").to_string()
+        } else if keys.is_empty() {
+            t!("keymap.unbound").to_string()
+        } else {
+            keys.iter()
+                .map(|key| shortcut_label(key))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let mut label = div().flex().flex_col().flex_1().min_w(px(0.0)).child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text))
+                .truncate()
+                .child(t!(command.label_key).to_string()),
+        );
+        if !conflicts.is_empty() {
+            let names = conflicts
+                .iter()
+                .map(|other| t!(other.label_key).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            label = label.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.danger))
+                    .truncate()
+                    .child(t!("keymap.conflict", names = names).to_string()),
+            );
+        }
+
+        let icon_button = |element_id: String, glyph: &'static str, visible: bool| {
+            div()
+                .id(SharedString::from(element_id))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(22.0))
+                .h(px(22.0))
+                .flex_none()
+                .rounded(px(4.0))
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .when(visible, |button| {
+                    button
+                        .cursor_pointer()
+                        .hover(move |style| {
+                            style
+                                .bg(rgb(theme.button_hover_bg))
+                                .text_color(rgb(theme.text))
+                        })
+                        .child(glyph)
+                })
+        };
+
         div()
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
+            .gap_2()
             .w_full()
-            .h(px(28.0))
+            .min_h(px(30.0))
+            .child(label)
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(match kind {
-                        OptionsShortcut::Run => "options-run-shortcut",
-                        OptionsShortcut::RunSelected => "options-run-selected-shortcut",
-                    }))
+                    .id(SharedString::from(format!("options-shortcut-{id}")))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .w(px(160.0))
+                    .w(px(180.0))
                     .h(px(24.0))
+                    .px_1()
                     .flex_none()
                     .rounded(px(4.0))
                     .border_1()
                     .border_color(rgb(if recording { theme.brand } else { theme.border }))
                     .bg(rgb(theme.input_bg))
                     .text_size(px(12.0))
-                    .text_color(rgb(if recording {
+                    .text_color(rgb(if recording || keys.is_empty() {
                         theme.text_muted
                     } else {
                         theme.text
                     }))
+                    .truncate()
                     .cursor_pointer()
                     .hover(move |style| style.border_color(rgb(theme.brand)))
                     .track_focus(&focus)
                     .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.recording_shortcut = Some(kind);
+                        this.recording_shortcut = Some(id);
                         window.focus(&capture_focus, cx);
                         cx.notify();
                     }))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                        if this.recording_shortcut != Some(kind) {
+                        if this.recording_shortcut != Some(id) {
                             return;
                         }
                         // Escape cancels the capture, and must not reach the window's own
@@ -679,7 +804,7 @@ impl AppView {
                         if event.keystroke.key == "escape" {
                             this.recording_shortcut = None;
                         } else if let Some(shortcut) = shortcut_from_keystroke(&event.keystroke) {
-                            this.set_shortcut(kind, shortcut);
+                            keymap::set_keys(command, vec![shortcut], &mut this.options_shortcuts);
                             this.recording_shortcut = None;
                         }
                         // A bare modifier (or an unusable key) keeps the capture open; either way
@@ -687,21 +812,30 @@ impl AppView {
                         cx.stop_propagation();
                         cx.notify();
                     }))
-                    .child(if recording {
-                        t!("options.shortcuts.press").to_string()
-                    } else {
-                        shortcut_label(&value)
+                    .child(field_text),
+            )
+            .child(
+                icon_button(format!("options-shortcut-reset-{id}"), "↺", overridden).on_click(
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.options_shortcuts.remove(id);
+                        this.recording_shortcut = None;
+                        cx.notify();
                     }),
+                ),
+            )
+            .child(
+                icon_button(
+                    format!("options-shortcut-clear-{id}"),
+                    "✕",
+                    !keys.is_empty(),
+                )
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    keymap::set_keys(command, Vec::new(), &mut this.options_shortcuts);
+                    this.recording_shortcut = None;
+                    cx.notify();
+                })),
             )
             .into_any_element()
-    }
-
-    /// Stage a recorded keystroke on the 快捷键 page (it is applied on OK).
-    fn set_shortcut(&mut self, kind: OptionsShortcut, shortcut: String) {
-        match kind {
-            OptionsShortcut::Run => self.options_run_shortcut = shortcut,
-            OptionsShortcut::RunSelected => self.options_run_selected_shortcut = shortcut,
-        }
     }
 
     /// The 数据 page: how the grid presents a table's data.
@@ -888,8 +1022,8 @@ impl AppView {
                     this.options_editor_word_wrap = true;
                     this.options_grid_show_comments = false;
                     this.options_grid_show_types = false;
-                    this.options_run_shortcut = DEFAULT_RUN_SHORTCUT.to_string();
-                    this.options_run_selected_shortcut = DEFAULT_RUN_SELECTED_SHORTCUT.to_string();
+                    this.options_shortcuts.clear();
+                    this.recording_shortcut = None;
                     cx.notify();
                 }),
             ))
@@ -917,14 +1051,20 @@ impl AppView {
 }
 
 /// The keystroke string for a captured key, or `None` when it cannot stand as a shortcut on its
-/// own: a bare modifier, or a plain character that the user would only ever type into the editor
-/// (a function key is accepted without modifiers; everything else needs Ctrl/Alt/⌘).
+/// own: a bare modifier, or a character the user would only ever type (with or without Shift).
+/// Function and navigation keys are accepted alone; everything else needs Ctrl/Alt/⌘.
 fn shortcut_from_keystroke(keystroke: &Keystroke) -> Option<String> {
     let key = keystroke.key.as_str();
     if matches!(key, "control" | "shift" | "alt" | "platform" | "function") {
         return None;
     }
     let modifiers = keystroke.modifiers;
+    if !(modifiers.control || modifiers.alt || modifiers.platform)
+        && !is_function_key(key)
+        && !is_navigation_key(key)
+    {
+        return None;
+    }
     let mut parts: Vec<&str> = Vec::new();
     if modifiers.control {
         parts.push("ctrl");
@@ -938,11 +1078,26 @@ fn shortcut_from_keystroke(keystroke: &Keystroke) -> Option<String> {
     if modifiers.platform {
         parts.push("cmd");
     }
-    if parts.is_empty() && !is_function_key(key) {
-        return None;
-    }
     parts.push(key);
     Some(parts.join("-"))
+}
+
+/// Whether `key` moves rather than types, so it may be a shortcut without Ctrl/Alt/⌘ (F5-style
+/// navigation: Page Down, Home, Tab, ...). Enter, Backspace and Space stay typing keys.
+fn is_navigation_key(key: &str) -> bool {
+    matches!(
+        key,
+        "up" | "down"
+            | "left"
+            | "right"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
+            | "tab"
+            | "insert"
+            | "delete"
+    )
 }
 
 /// Whether `key` is one of the F1..F24 function keys.
@@ -950,4 +1105,29 @@ fn is_function_key(key: &str) -> bool {
     key.strip_prefix('f')
         .and_then(|number| number.parse::<u8>().ok())
         .is_some_and(|number| (1..=24).contains(&number))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(keystroke: &str) -> Option<String> {
+        shortcut_from_keystroke(&Keystroke::parse(keystroke).expect("keystroke"))
+    }
+
+    #[test]
+    fn recording_accepts_navigation_and_function_keys_alone() {
+        assert_eq!(record("pagedown").as_deref(), Some("pagedown"));
+        assert_eq!(record("shift-home").as_deref(), Some("shift-home"));
+        assert_eq!(record("f5").as_deref(), Some("f5"));
+        assert_eq!(record("ctrl-q").as_deref(), Some("ctrl-q"));
+    }
+
+    #[test]
+    fn recording_rejects_plain_typing() {
+        assert_eq!(record("a"), None);
+        assert_eq!(record("shift-a"), None);
+        assert_eq!(record("enter"), None);
+        assert_eq!(record("space"), None);
+    }
 }

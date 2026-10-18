@@ -91,12 +91,11 @@ impl AppView {
             t!("query.run").to_string()
         };
         // The shortcut it fires is shown on hover — the configured one, since the Options window's
-        // 快捷键 page can change it.
-        let run_tooltip = format!(
-            "{} ({})",
-            t!("query.run"),
-            shortcut_label(&self.run_shortcut)
-        );
+        // 快捷键 page can change (or clear) it.
+        let run_tooltip = match self.command_shortcut_label("query.run") {
+            Some(shortcut) => format!("{} ({shortcut})", t!("query.run")),
+            None => t!("query.run").to_string(),
+        };
 
         let controls = div()
             .flex()

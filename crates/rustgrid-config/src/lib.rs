@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 11;
+const SETTINGS_VERSION: u32 = 12;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -171,23 +171,31 @@ struct SettingsFile {
     /// Whether the grid header shows each column's data type between its name and comment.
     #[serde(default)]
     grid_show_types: bool,
-    /// The keystroke that runs the whole query editor (Navicat's 运行), as a gpui keystroke string.
-    #[serde(default = "default_run_shortcut")]
-    run_shortcut: String,
-    /// The keystroke that runs only the selected SQL (Navicat's 运行已选).
-    #[serde(default = "default_run_selected_shortcut")]
-    run_selected_shortcut: String,
+    /// The user's keymap overrides: command id -> keystrokes (gpui keystroke strings). Only
+    /// commands the user changed are stored; an empty list unbinds the command.
+    #[serde(default)]
+    shortcuts: BTreeMap<String, Vec<String>>,
+    /// Version 11's 运行 keystroke. Read so an upgrade keeps it (folded into `shortcuts`), never
+    /// written.
+    #[serde(default, skip_serializing)]
+    run_shortcut: Option<String>,
+    /// Version 11's 运行已选 keystroke; see `run_shortcut`.
+    #[serde(default, skip_serializing)]
+    run_selected_shortcut: Option<String>,
 }
 
 /// The default SQL editor font size, in px (VS Code's default `editor.fontSize`).
 pub const DEFAULT_EDITOR_FONT_SIZE: u32 = 14;
 
-/// The default keystroke for 运行 (run the whole editor): Navicat's Ctrl+R. gpui's `secondary`
-/// modifier is Ctrl off macOS and ⌘ on it, so the same default reads correctly on both.
-pub const DEFAULT_RUN_SHORTCUT: &str = "secondary-r";
-
-/// The default keystroke for 运行已选 (run the selection): Navicat's Ctrl+Shift+R.
-pub const DEFAULT_RUN_SELECTED_SHORTCUT: &str = "secondary-shift-r";
+/// The keymap command ids the version-11 `run_shortcut` / `run_selected_shortcut` settings map
+/// onto, and their built-in keystrokes then (Navicat's Ctrl+R / Ctrl+Shift+R).
+const LEGACY_RUN_COMMAND: &str = "query.run";
+const LEGACY_RUN_DEFAULT: &str = "secondary-r";
+const LEGACY_RUN_SELECTED_COMMAND: &str = "query.run_selected";
+const LEGACY_RUN_SELECTED_DEFAULT: &str = "secondary-shift-r";
+/// Version 11 also bound Ctrl/⌘+Enter to 运行已选, unconditionally. It is now one of that
+/// command's keystrokes, so a migrated custom keystroke keeps it alongside.
+const LEGACY_RUN_SELECTED_ENTER: &str = "secondary-enter";
 
 fn default_editor_font_size() -> u32 {
     DEFAULT_EDITOR_FONT_SIZE
@@ -197,12 +205,32 @@ fn default_true() -> bool {
     true
 }
 
-fn default_run_shortcut() -> String {
-    DEFAULT_RUN_SHORTCUT.to_string()
-}
-
-fn default_run_selected_shortcut() -> String {
-    DEFAULT_RUN_SELECTED_SHORTCUT.to_string()
+/// Fold version 11's two run keystrokes into the keymap overrides. A keystroke still at its old
+/// default is not an override, and an existing override for the command wins.
+fn fold_legacy_shortcuts(
+    mut shortcuts: BTreeMap<String, Vec<String>>,
+    run: Option<String>,
+    run_selected: Option<String>,
+) -> BTreeMap<String, Vec<String>> {
+    for (command, value, default, also) in [
+        (LEGACY_RUN_COMMAND, run, LEGACY_RUN_DEFAULT, None),
+        (
+            LEGACY_RUN_SELECTED_COMMAND,
+            run_selected,
+            LEGACY_RUN_SELECTED_DEFAULT,
+            Some(LEGACY_RUN_SELECTED_ENTER),
+        ),
+    ] {
+        if let Some(value) = value.filter(|value| value != default) {
+            shortcuts.entry(command.to_string()).or_insert_with(|| {
+                let also = also.filter(|also| *also != value).map(str::to_string);
+                let mut keys = vec![value];
+                keys.extend(also);
+                keys
+            });
+        }
+    }
+    shortcuts
 }
 
 #[derive(Debug, Clone)]
@@ -232,11 +260,10 @@ pub struct AppSettings {
     pub grid_show_comments: bool,
     /// Whether the grid header shows each column's data type between its name and comment.
     pub grid_show_types: bool,
-    /// The keystroke that runs the whole query editor (Navicat's 运行). A gpui keystroke string
-    /// (`"secondary-r"`), so it is editable from the Options window's 快捷键 page.
-    pub run_shortcut: String,
-    /// The keystroke that runs only the selected SQL (Navicat's 运行已选).
-    pub run_selected_shortcut: String,
+    /// The keymap overrides edited on the Options window's 快捷键 page: command id -> gpui
+    /// keystroke strings (`"secondary-r"`). Commands not listed keep their built-in keystrokes;
+    /// an empty list unbinds the command.
+    pub shortcuts: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AppSettings {
@@ -257,8 +284,7 @@ impl Default for AppSettings {
             grid_field_layouts: BTreeMap::new(),
             grid_show_comments: false,
             grid_show_types: false,
-            run_shortcut: default_run_shortcut(),
-            run_selected_shortcut: default_run_selected_shortcut(),
+            shortcuts: BTreeMap::new(),
         }
     }
 }
@@ -458,8 +484,11 @@ impl ConfigStore {
             grid_field_layouts: file.grid_field_layouts,
             grid_show_comments: file.grid_show_comments,
             grid_show_types: file.grid_show_types,
-            run_shortcut: file.run_shortcut,
-            run_selected_shortcut: file.run_selected_shortcut,
+            shortcuts: fold_legacy_shortcuts(
+                file.shortcuts,
+                file.run_shortcut,
+                file.run_selected_shortcut,
+            ),
         })
     }
 
@@ -482,8 +511,9 @@ impl ConfigStore {
             grid_field_layouts: settings.grid_field_layouts.clone(),
             grid_show_comments: settings.grid_show_comments,
             grid_show_types: settings.grid_show_types,
-            run_shortcut: settings.run_shortcut.clone(),
-            run_selected_shortcut: settings.run_selected_shortcut.clone(),
+            shortcuts: settings.shortcuts.clone(),
+            run_shortcut: None,
+            run_selected_shortcut: None,
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.settings_path(), contents)?;
@@ -574,4 +604,80 @@ fn migrate(mut file: ProfilesFile) -> ProfilesFile {
         file.version = CURRENT_VERSION;
     }
     file
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn legacy_run_shortcuts_at_their_defaults_add_no_override() {
+        let folded = fold_legacy_shortcuts(
+            BTreeMap::new(),
+            Some(LEGACY_RUN_DEFAULT.to_string()),
+            Some(LEGACY_RUN_SELECTED_DEFAULT.to_string()),
+        );
+        assert!(folded.is_empty());
+    }
+
+    #[test]
+    fn changed_legacy_run_shortcuts_become_overrides() {
+        let folded = fold_legacy_shortcuts(
+            BTreeMap::new(),
+            Some("f9".to_string()),
+            Some("f8".to_string()),
+        );
+        assert_eq!(folded.get(LEGACY_RUN_COMMAND), Some(&keys(&["f9"])));
+        // Version 11 always bound Ctrl/⌘+Enter to 运行已选 as well; the override keeps it.
+        assert_eq!(
+            folded.get(LEGACY_RUN_SELECTED_COMMAND),
+            Some(&keys(&["f8", "secondary-enter"]))
+        );
+    }
+
+    #[test]
+    fn a_legacy_run_selected_of_ctrl_enter_is_not_listed_twice() {
+        let folded =
+            fold_legacy_shortcuts(BTreeMap::new(), None, Some("secondary-enter".to_string()));
+        assert_eq!(
+            folded.get(LEGACY_RUN_SELECTED_COMMAND),
+            Some(&keys(&["secondary-enter"]))
+        );
+    }
+
+    #[test]
+    fn an_existing_override_wins_over_a_legacy_value() {
+        let mut shortcuts = BTreeMap::new();
+        shortcuts.insert(LEGACY_RUN_COMMAND.to_string(), Vec::new());
+        let folded = fold_legacy_shortcuts(shortcuts, Some("f9".to_string()), None);
+        assert_eq!(folded.get(LEGACY_RUN_COMMAND), Some(&Vec::new()));
+    }
+
+    #[test]
+    fn version_11_settings_load_and_save_without_the_legacy_fields() {
+        let v11 = r#"{ "version": 11, "run_shortcut": "f9", "run_selected_shortcut": "secondary-shift-r" }"#;
+        let file: SettingsFile = serde_json::from_str(v11).expect("parse v11");
+        let shortcuts = fold_legacy_shortcuts(
+            file.shortcuts,
+            file.run_shortcut,
+            file.run_selected_shortcut,
+        );
+        assert_eq!(shortcuts.len(), 1);
+        assert_eq!(shortcuts.get(LEGACY_RUN_COMMAND), Some(&keys(&["f9"])));
+
+        let saved = SettingsFile {
+            version: SETTINGS_VERSION,
+            shortcuts,
+            run_shortcut: Some("ignored".to_string()),
+            run_selected_shortcut: None,
+            ..serde_json::from_str(r#"{ "version": 12 }"#).expect("parse v12")
+        };
+        let json = serde_json::to_string(&saved).expect("serialize");
+        assert!(!json.contains("run_shortcut"));
+        assert!(json.contains(r#""query.run":["f9"]"#));
+    }
 }
