@@ -121,7 +121,17 @@ gpui::actions!(
 
 // Workspace-wide commands, handled on the main window's root (`WORKSPACE_CONTEXT`), so they work
 // from any pane.
-gpui::actions!(workspace, [NewQueryTab, CloseActiveTab, NextTab, PrevTab]);
+gpui::actions!(
+    workspace,
+    [
+        NewQueryTab,
+        CloseActiveTab,
+        CloseOtherTabs,
+        CloseAllTabs,
+        NextTab,
+        PrevTab
+    ]
+);
 
 /// The keymap's marker for a workspace-wide command: bound with no key context, so it fires
 /// whatever has focus (or nothing), and handled at app level (`AppView::new`).
@@ -2687,6 +2697,20 @@ impl AppView {
             let weak = cx.weak_entity();
             (**cx).on_action(move |_: &CloseActiveTab, cx: &mut App| {
                 let _ = weak.update(cx, |view, cx| view.close_active_tab(cx));
+            });
+            // The keyboard's 关闭其他选项卡 / 全部关闭 act on the tab that is active, like their
+            // menu rows act on the tab that was right-clicked.
+            let weak = cx.weak_entity();
+            (**cx).on_action(move |_: &CloseOtherTabs, cx: &mut App| {
+                let _ = weak.update(cx, |view, cx| {
+                    if let Some(target) = view.current_tab(cx) {
+                        view.close_other_tabs(target, cx);
+                    }
+                });
+            });
+            let weak = cx.weak_entity();
+            (**cx).on_action(move |_: &CloseAllTabs, cx: &mut App| {
+                let _ = weak.update(cx, |view, cx| view.close_all_tabs(cx));
             });
             let weak = cx.weak_entity();
             (**cx).on_action(move |_: &NextTab, cx: &mut App| {

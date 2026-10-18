@@ -15,17 +15,18 @@ use gpui::{App, KeyBinding, Keystroke, NoAction};
 use gpui_kit::component::input::ShowCompletions;
 
 use super::{
-    BACKUP_LIST_CONTEXT, CloseActiveTab, CopyBackupFile, CopyQueryFile, CopyStatusSql,
-    DESIGNER_CONTEXT, DuplicateLines, GRID_CONTEXT, GRID_STATUS_CONTEXT, GridEditValue,
-    GridFirstCell, GridLastCell, GridNextCell, GridPageDown, GridPageUp, GridPrevCell, GridRefresh,
-    GridRowEnd, GridRowStart, GridSelectPageDown, GridSelectPageUp, MoveLinesDown, MoveLinesUp,
-    NewQueryTab, NextTab, OBJECT_LIST_CONTEXT, ObjectDown, ObjectEnd, ObjectHome, ObjectLeft,
-    ObjectOpen, ObjectPageDown, ObjectPageUp, ObjectRename, ObjectRight, ObjectSelectAll, ObjectUp,
-    PasteBackupFile, PasteQueryFile, PrevTab, QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT,
-    RenameBackupFile, RenameQueryFile, RunQuery, RunSelectedQuery, SaveDesign, SaveQuery,
-    SelectAllBackups, SelectAllOccurrences, SelectAllQueries, SelectAllStatusSql, SwapLineUp,
-    TREE_CONTEXT, ToggleComment, TreeCollapse, TreeDown, TreeEnd, TreeExpand, TreeHome, TreeOpen,
-    TreePageDown, TreePageUp, TreeRename, TreeSelectAll, TreeUp, WORKSPACE_CONTEXT,
+    BACKUP_LIST_CONTEXT, CloseActiveTab, CloseAllTabs, CloseOtherTabs, CopyBackupFile,
+    CopyQueryFile, CopyStatusSql, DESIGNER_CONTEXT, DuplicateLines, GRID_CONTEXT,
+    GRID_STATUS_CONTEXT, GridEditValue, GridFirstCell, GridLastCell, GridNextCell, GridPageDown,
+    GridPageUp, GridPrevCell, GridRefresh, GridRowEnd, GridRowStart, GridSelectPageDown,
+    GridSelectPageUp, MoveLinesDown, MoveLinesUp, NewQueryTab, NextTab, OBJECT_LIST_CONTEXT,
+    ObjectDown, ObjectEnd, ObjectHome, ObjectLeft, ObjectOpen, ObjectPageDown, ObjectPageUp,
+    ObjectRename, ObjectRight, ObjectSelectAll, ObjectUp, PasteBackupFile, PasteQueryFile, PrevTab,
+    QUERY_EDITOR_CONTEXT, QUERY_LIST_CONTEXT, RenameBackupFile, RenameQueryFile, RunQuery,
+    RunSelectedQuery, SaveDesign, SaveQuery, SelectAllBackups, SelectAllOccurrences,
+    SelectAllQueries, SelectAllStatusSql, SwapLineUp, TREE_CONTEXT, ToggleComment, TreeCollapse,
+    TreeDown, TreeEnd, TreeExpand, TreeHome, TreeOpen, TreePageDown, TreePageUp, TreeRename,
+    TreeSelectAll, TreeUp, WORKSPACE_CONTEXT,
 };
 
 /// Where a command lives, for grouping the 快捷键 page.
@@ -260,6 +261,23 @@ pub(super) const COMMANDS: &[Command] = &[
         "keymap.general.close_tab",
         &["secondary-w"],
         CloseActiveTab
+    ),
+    // The tab menu's 关闭其他选项卡 / 全部关闭, on the active tab.
+    nav_command!(
+        CommandGroup::General,
+        WORKSPACE_CONTEXT,
+        "general.close_other_tabs",
+        "tab.close_other",
+        &["secondary-alt-w"],
+        CloseOtherTabs
+    ),
+    nav_command!(
+        CommandGroup::General,
+        WORKSPACE_CONTEXT,
+        "general.close_all_tabs",
+        "tab.close_all",
+        &["secondary-shift-w"],
+        CloseAllTabs
     ),
     nav_command!(
         CommandGroup::General,

@@ -16,7 +16,7 @@ restart, no rebuild.
 
 | Area | Keys |
 |---|---|
-| Anywhere | `Ctrl+Q` new query (`⌘⇧N` on macOS) · `Ctrl+W` close tab · `Ctrl+Tab` / `Ctrl+Shift+Tab` (or `Ctrl+PageDown` / `Ctrl+PageUp`) next / previous tab, in the tab bar's order |
+| Anywhere | `Ctrl+Q` new query (`⌘⇧N` on macOS) · `Ctrl+W` close tab · `Ctrl+Alt+W` close other tabs · `Ctrl+Shift+W` close all tabs · `Ctrl+Tab` / `Ctrl+Shift+Tab` (or `Ctrl+PageDown` / `Ctrl+PageUp`) next / previous tab, in the tab bar's order |
 | Connection tree | `↑` `↓` · `PageUp` `PageDown` · `Home` `End` · `→` expand / enter · `←` collapse / go to parent · `Enter` open · `F2` rename · `Ctrl+A` · type a name to jump to it |
 | Object list | `↑` `↓` (`←` `→` by column in the tile view) · `PageUp` `PageDown` · `Home` `End` · `Enter` open · `F2` rename · `Ctrl+A` · type a name to jump to it · `Esc` in the search box clears it |
 | Table grid | `F5` refresh in place · arrows (`Shift` extends) · `PageUp` `PageDown` · `Home` `End` row start / end · `Ctrl+Home` `Ctrl+End` first / last cell · `Tab` `Shift+Tab` next / previous cell · `F2` value editor |

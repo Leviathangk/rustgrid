@@ -1311,21 +1311,24 @@ impl AppView {
         let items = div()
             .flex()
             .flex_col()
-            .w(px(170.0))
+            .w(px(200.0))
             .p_0p5()
-            .child(self.context_item(
+            .child(self.context_item_shortcut(
                 "tab-close",
                 t!("tab.close").to_string(),
+                self.command_shortcut_label("general.close_tab"),
                 cx.listener(move |this, _event, _window, cx| this.close_tab(target, cx)),
             ))
-            .child(self.context_item(
+            .child(self.context_item_shortcut(
                 "tab-close-others",
                 t!("tab.close_other").to_string(),
+                self.command_shortcut_label("general.close_other_tabs"),
                 cx.listener(move |this, _event, _window, cx| this.close_other_tabs(target, cx)),
             ))
-            .child(self.context_item(
+            .child(self.context_item_shortcut(
                 "tab-close-all",
                 t!("tab.close_all").to_string(),
+                self.command_shortcut_label("general.close_all_tabs"),
                 cx.listener(|this, _event, _window, cx| this.close_all_tabs(cx)),
             ));
 
@@ -1364,11 +1367,25 @@ impl AppView {
         label: String,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
+        self.context_item_shortcut(id, label, None, on_click)
+    }
+
+    /// [`AppView::context_item`] with the command's configured shortcut on the right, as the tab
+    /// menu shows it; `None` (an unbound command) leaves the row as a plain item.
+    pub(super) fn context_item_shortcut(
+        &self,
+        id: impl Into<ElementId>,
+        label: String,
+        shortcut: Option<String>,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
         let theme = self.theme;
         div()
             .id(id)
             .flex()
             .items_center()
+            .justify_between()
+            .gap_3()
             .w_full()
             .h(px(26.0))
             .px_3()
@@ -1380,7 +1397,14 @@ impl AppView {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .on_click(on_click)
-            .child(label)
+            .child(div().flex_1().min_w(px(0.0)).truncate().child(label))
+            .children(shortcut.map(|shortcut| {
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(shortcut)
+            }))
     }
 
     /// A context-menu row that stays visible but is greyed out and non-interactive, used for
