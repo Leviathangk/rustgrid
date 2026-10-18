@@ -1153,6 +1153,10 @@ impl Connection for MysqlConnection {
         crate::user::list_users(&self.pool).await
     }
 
+    async fn roles_supported(&self) -> bool {
+        crate::user::roles_supported(&self.pool).await
+    }
+
     async fn user_details(&self, user: &str, host: &str) -> Result<UserDetails> {
         crate::user::user_details(&self.pool, user, host).await
     }

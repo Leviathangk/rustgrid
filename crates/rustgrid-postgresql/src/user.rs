@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
-    DefaultObjectType, DefaultPrivilege, DefaultPrivilegeInfo, Error, ObjectGrant,
+    AccountKind, DefaultObjectType, DefaultPrivilege, DefaultPrivilegeInfo, Error, ObjectGrant,
     ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId, PrivilegeInfo,
     PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit, UserEditSection,
 };
@@ -218,6 +218,13 @@ fn account_from_row(row: &sqlx::postgres::PgRow) -> UserAccount {
     UserAccount {
         user: row.try_get("rolname").unwrap_or_default(),
         host: String::new(),
+        // PostgreSQL has no separate user and role: a role that may log in *is* a user, and one
+        // that may not is what every other engine calls a role.
+        kind: if can_login {
+            AccountKind::User
+        } else {
+            AccountKind::Role
+        },
         plugin: String::new(),
         password_set: row.try_get("has_password").unwrap_or(false),
         password_expired: false,
@@ -520,8 +527,10 @@ pub(crate) fn edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)
 fn role_attributes(edit: &UserEdit) -> String {
     let account = &edit.account;
     let mut parts = Vec::new();
+    // The account's 类型 is authoritative: a role must not be able to log in even if the loaded
+    // row (or a never-touched checkbox) says otherwise, so it is forced to NOLOGIN here.
     parts.push(
-        if account.account_locked {
+        if account.account_locked || account.kind == AccountKind::Role {
             "NOLOGIN"
         } else {
             "LOGIN"

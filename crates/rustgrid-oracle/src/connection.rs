@@ -897,12 +897,16 @@ impl Connection for OracleConnection {
 
     async fn rename_user(
         &self,
-        _user: &str,
+        user: &str,
         _host: &str,
-        _new_user: &str,
+        new_user: &str,
         _new_host: &str,
     ) -> Result<()> {
-        // Oracle has no `RENAME USER`; renaming needs creating a user and migrating its objects.
+        // A role can be renamed. Oracle cannot rename a user: its objects belong to the schema, so
+        // that would need creating a user and migrating everything.
+        if crate::user::account_is_role(self, user).await {
+            return crate::user::rename_role(self, user, new_user).await;
+        }
         Err(Error::Query(
             "Oracle does not support renaming a user".to_string(),
         ))

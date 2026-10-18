@@ -3,40 +3,225 @@
 //!
 //! Accounts and their attributes live in `mysql.user`; the granted privileges are read from
 //! `information_schema.*_PRIVILEGES` views (which report the effective grants as keywords) and
-//! role memberships from `mysql.role_edges`. Writes are replayed as a script of `CREATE USER` /
-//! `ALTER USER` / `GRANT` / `REVOKE` statements through the text protocol.
+//! role memberships from `mysql.role_edges` (MySQL 8) or `mysql.roles_mapping` (MariaDB). The
+//! account projection adapts to the columns the server actually has - the same idea as Navicat's
+//! version-dependent account query, without the version arithmetic - so one reader serves every
+//! MySQL and MariaDB release. Writes are replayed as a script of `CREATE USER` / `ALTER USER` /
+//! `GRANT` / `REVOKE` statements through the text protocol.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
-    ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId, PrivilegeInfo,
-    PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit, UserEditSection,
+    AccountKind, ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId,
+    PrivilegeInfo, PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit,
+    UserEditSection,
 };
 use sqlx::mysql::MySqlRow;
 use sqlx::{AssertSqlSafe, MySqlPool, Row};
 
 use crate::connection::map_query_error;
 
-/// The `mysql.user` columns the account editor reads. `plugin`, `password_expired`, the resource
-/// limits and the TLS columns are the ones the 常规/高级 tabs edit.
-const ACCOUNT_QUERY: &str = "SELECT User, Host, plugin, authentication_string, password_expired, \
-     password_lifetime, account_locked, max_questions, max_updates, max_connections, \
-     max_user_connections, ssl_type, ssl_cipher, x509_issuer, x509_subject, super_priv \
-     FROM mysql.user";
+/// The `mysql.user` columns the account editor reads, in projection order. `plugin`,
+/// `password_expired`, the resource limits and the TLS columns are the ones the 常规/高级 tabs edit.
+/// Every one of them is optional: MySQL and MariaDB disagree about which exist, so a missing
+/// column is projected as `NULL` rather than failing the whole Users tab.
+const ACCOUNT_COLUMNS: [&str; 16] = [
+    "User",
+    "Host",
+    "plugin",
+    "authentication_string",
+    "password_expired",
+    "password_lifetime",
+    "account_locked",
+    "max_questions",
+    "max_updates",
+    "max_connections",
+    "max_user_connections",
+    "ssl_type",
+    "ssl_cipher",
+    "x509_issuer",
+    "x509_subject",
+    "super_priv",
+];
+
+/// Which `mysql.*` objects this server actually has: the columns of `mysql.user` and which of the
+/// two role tables it keeps. Navicat builds its account query from the server version; reading the
+/// catalog answers the same question directly and also copes with the columns MariaDB adds.
+#[derive(Debug, Clone)]
+struct CatalogShape {
+    /// The columns present in `mysql.user`.
+    user_columns: BTreeSet<String>,
+    /// Whether `mysql.user` has MariaDB's `is_role` column, the only direct role marker. MySQL 8
+    /// has no such column, so its roles are recognised from `mysql.role_edges` instead.
+    is_role_column: bool,
+    /// Whether `mysql.role_edges` exists (MySQL 8's role graph).
+    role_edges: bool,
+    /// Whether `mysql.roles_mapping` exists (MariaDB's role grants).
+    roles_mapping: bool,
+}
+
+impl CatalogShape {
+    /// Assume every optional column and the MySQL role table, so a server that refuses the catalog
+    /// probe keeps exactly the behaviour it had before the probe existed.
+    fn assumed_complete() -> Self {
+        Self {
+            user_columns: ACCOUNT_COLUMNS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+            is_role_column: false,
+            role_edges: true,
+            roles_mapping: false,
+        }
+    }
+
+    /// The `SELECT` list for `mysql.user`: each column the editor reads projects as itself when the
+    /// server has it, and as `NULL` when it does not. `User`/`Host` identify every account, so a
+    /// server that reports neither is treated as unreadable rather than as a host-less account.
+    ///
+    /// `is_role` is appended last because it is not one of the editor's own columns: MariaDB has
+    /// it, MySQL 8 does not, and there a role is recognised from the role graph instead.
+    fn account_projection(&self) -> String {
+        let mut projection = ACCOUNT_COLUMNS
+            .iter()
+            .map(|name| {
+                if self.user_columns.contains(*name) {
+                    (*name).to_string()
+                } else {
+                    format!("NULL AS {name}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        projection.push_str(if self.is_role_column {
+            ", is_role"
+        } else {
+            ", NULL AS is_role"
+        });
+        projection
+    }
+}
+
+/// Probe the `mysql` catalog for the account columns and role table this server has.
+async fn catalog_shape(pool: &MySqlPool) -> CatalogShape {
+    let rows = match sqlx::query(
+        "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = 'mysql' AND TABLE_NAME IN ('user', 'role_edges', 'roles_mapping')",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        // A server that will not report its own catalog still gets a working account query.
+        Err(_) => return CatalogShape::assumed_complete(),
+    };
+
+    let mut shape = CatalogShape {
+        user_columns: BTreeSet::new(),
+        is_role_column: false,
+        role_edges: false,
+        roles_mapping: false,
+    };
+    for row in &rows {
+        match text(row, "TABLE_NAME").as_str() {
+            "user" => {
+                let column = text(row, "COLUMN_NAME");
+                if column.eq_ignore_ascii_case("is_role") {
+                    shape.is_role_column = true;
+                }
+                shape.user_columns.insert(column);
+            }
+            "role_edges" => shape.role_edges = true,
+            "roles_mapping" => shape.roles_mapping = true,
+            _ => {}
+        }
+    }
+    // The account's identity columns are the one thing every version has; seeing none of them means
+    // the catalog is hidden from this account, not that the table is column-less.
+    if !shape.user_columns.contains("User") || !shape.user_columns.contains("Host") {
+        return CatalogShape::assumed_complete();
+    }
+    shape
+}
+
+/// Whether roles exist on this server. MySQL 8 keeps them in `mysql.role_edges` and MariaDB marks
+/// them with `mysql.user.is_role` / `mysql.roles_mapping`; MySQL 5.7 and earlier have none of the
+/// three, which is what hides the 用户 / 角色 switch there.
+pub(crate) async fn roles_supported(pool: &MySqlPool) -> bool {
+    let shape = catalog_shape(pool).await;
+    shape.is_role_column || shape.role_edges || shape.roles_mapping
+}
 
 /// Every account on the server, ordered by user then host.
 pub(crate) async fn list_users(pool: &MySqlPool) -> Result<Vec<UserAccount>> {
-    let sql = format!("{ACCOUNT_QUERY} ORDER BY User, Host");
+    let shape = catalog_shape(pool).await;
+    let sql = format!(
+        "SELECT {} FROM mysql.user ORDER BY User, Host",
+        shape.account_projection()
+    );
     let rows = sqlx::query(AssertSqlSafe(sql))
         .fetch_all(pool)
         .await
         .map_err(map_query_error)?;
-    Ok(rows.iter().map(read_account).collect())
+    let mut accounts: Vec<UserAccount> = rows.iter().map(read_account).collect();
+    // MySQL 8 keeps no role flag on the account row, so its roles are recognised from the role
+    // graph: an account that is granted to another account is a role.
+    let roles = inferred_roles(pool, &shape).await;
+    if !roles.is_empty() {
+        for account in &mut accounts {
+            if roles.contains(&(account.user.clone(), account.host.clone())) {
+                account.kind = AccountKind::Role;
+            }
+        }
+    }
+    Ok(accounts)
+}
+
+/// The roles a server without an `is_role` column still knows about, taken from its role graph. An
+/// account that is granted to nobody cannot be told apart from a user and is reported as one.
+async fn inferred_roles(pool: &MySqlPool, shape: &CatalogShape) -> BTreeSet<(String, String)> {
+    if shape.is_role_column {
+        return BTreeSet::new();
+    }
+    let pairs: Vec<(String, String)> = if shape.role_edges {
+        match sqlx::query("SELECT FROM_USER, FROM_HOST FROM mysql.role_edges")
+            .fetch_all(pool)
+            .await
+        {
+            Ok(rows) => rows
+                .iter()
+                .map(|row| (text(row, "FROM_USER"), text(row, "FROM_HOST")))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    } else if shape.roles_mapping {
+        // MariaDB records no role host; an unqualified role resolves to `%`.
+        match sqlx::query("SELECT Role FROM mysql.roles_mapping")
+            .fetch_all(pool)
+            .await
+        {
+            Ok(rows) => rows
+                .iter()
+                .map(|row| (text(row, "Role"), "%".to_string()))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    pairs
+        .into_iter()
+        .filter(|(user, _)| !user.is_empty())
+        .collect()
 }
 
 /// One account's attributes plus its granted server privileges, role edges and object grants.
 pub(crate) async fn user_details(pool: &MySqlPool, user: &str, host: &str) -> Result<UserDetails> {
-    let sql = format!("{ACCOUNT_QUERY} WHERE User = ? AND Host = ?");
+    let shape = catalog_shape(pool).await;
+    let sql = format!(
+        "SELECT {} FROM mysql.user WHERE User = ? AND Host = ?",
+        shape.account_projection()
+    );
     let row = sqlx::query(AssertSqlSafe(sql))
         .bind(user)
         .bind(host)
@@ -55,7 +240,7 @@ pub(crate) async fn user_details(pool: &MySqlPool, user: &str, host: &str) -> Re
     let grantee = quote_grantee(user, host);
     let server_privileges = fetch_server_privileges(pool, &grantee).await?;
     let grants = fetch_object_grants(pool, &grantee).await?;
-    let (roles, members) = fetch_role_edges(pool, user, host).await?;
+    let (roles, members) = fetch_role_edges(pool, user, host, &shape).await?;
 
     Ok(UserDetails {
         account,
@@ -69,14 +254,40 @@ pub(crate) async fn user_details(pool: &MySqlPool, user: &str, host: &str) -> Re
     })
 }
 
-/// Drop one account.
+/// Drop one account. A role is dropped with `DROP ROLE` so its role-ness is preserved in the
+/// server's own bookkeeping; everything else is a plain `DROP USER`.
 pub(crate) async fn drop_user(pool: &MySqlPool, user: &str, host: &str) -> Result<()> {
-    let sql = format!("DROP USER {}", quote_account(user, host));
+    let verb = if account_is_role(pool, user, host).await {
+        "DROP ROLE"
+    } else {
+        "DROP USER"
+    };
+    let sql = format!("{verb} {}", quote_account(user, host));
     sqlx::raw_sql(AssertSqlSafe(sql))
         .execute(pool)
         .await
         .map_err(map_query_error)?;
     Ok(())
+}
+
+/// Whether `user@host` is a role rather than a user. The list carries the kind, but drop only
+/// receives a name, so the answer is looked up once here.
+async fn account_is_role(pool: &MySqlPool, user: &str, host: &str) -> bool {
+    let shape = catalog_shape(pool).await;
+    if shape.is_role_column
+        && let Ok(rows) = sqlx::query("SELECT is_role FROM mysql.user WHERE User = ? AND Host = ?")
+            .bind(user)
+            .bind(host)
+            .fetch_all(pool)
+            .await
+    {
+        return rows
+            .first()
+            .is_some_and(|row| text(row, "is_role").eq_ignore_ascii_case("Y"));
+    }
+    inferred_roles(pool, &shape)
+        .await
+        .contains(&(user.to_string(), host.to_string()))
 }
 
 /// Rename one account, keeping its grants (`RENAME USER` rewrites the ACL rows in place).
@@ -381,6 +592,13 @@ fn read_account(row: &MySqlRow) -> UserAccount {
     UserAccount {
         user: text(row, "User"),
         host: text(row, "Host"),
+        // MariaDB marks a role directly; MySQL 8 has no such column, so `list_users` fills the
+        // kind in from the role graph afterwards.
+        kind: if text(row, "is_role").eq_ignore_ascii_case("Y") {
+            AccountKind::Role
+        } else {
+            AccountKind::User
+        },
         plugin: text(row, "plugin"),
         password_set: !text(row, "authentication_string").is_empty(),
         password_expired: flag(row, "password_expired"),
@@ -468,32 +686,21 @@ async fn fetch_object_grants(pool: &MySqlPool, grantee: &str) -> Result<Vec<Obje
 }
 
 /// The role edges touching one account: the roles it is a member of, and the members of it (when
-/// it is a role). MySQL 5.7 has no `mysql.role_edges`, so a missing table yields no edges.
+/// it is a role). MySQL 8 keeps them in `mysql.role_edges`; MariaDB keeps the same edges in
+/// `mysql.roles_mapping`; MySQL 5.7 has neither, which yields no edges at all.
 async fn fetch_role_edges(
     pool: &MySqlPool,
     user: &str,
     host: &str,
+    shape: &CatalogShape,
 ) -> Result<(Vec<RoleMembership>, Vec<RoleMembership>)> {
-    let rows = match sqlx::query(
-        "SELECT FROM_USER, FROM_HOST, TO_USER, TO_HOST, WITH_ADMIN_OPTION FROM mysql.role_edges",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(_) => return Ok((Vec::new(), Vec::new())),
+    let edges = if shape.role_edges {
+        role_edges_from_mysql(pool).await
+    } else if shape.roles_mapping {
+        role_edges_from_mariadb(pool).await
+    } else {
+        Vec::new()
     };
-
-    let edges: Vec<RoleMembership> = rows
-        .iter()
-        .map(|row| RoleMembership {
-            role_user: text(row, "FROM_USER"),
-            role_host: text(row, "FROM_HOST"),
-            member_user: text(row, "TO_USER"),
-            member_host: text(row, "TO_HOST"),
-            admin_option: flag(row, "WITH_ADMIN_OPTION"),
-        })
-        .collect();
 
     let roles = edges
         .iter()
@@ -506,6 +713,58 @@ async fn fetch_role_edges(
         .cloned()
         .collect();
     Ok((roles, members))
+}
+
+/// `mysql.role_edges` (MySQL 8): `FROM_*` is the role, `TO_*` the member it is granted to.
+async fn role_edges_from_mysql(pool: &MySqlPool) -> Vec<RoleMembership> {
+    let rows = match sqlx::query(
+        "SELECT FROM_USER, FROM_HOST, TO_USER, TO_HOST, WITH_ADMIN_OPTION FROM mysql.role_edges",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
+    };
+
+    rows.iter()
+        .map(|row| RoleMembership {
+            role_user: text(row, "FROM_USER"),
+            role_host: text(row, "FROM_HOST"),
+            member_user: text(row, "TO_USER"),
+            member_host: text(row, "TO_HOST"),
+            admin_option: flag(row, "WITH_ADMIN_OPTION"),
+        })
+        .collect()
+}
+
+/// `mysql.roles_mapping` (MariaDB): `User`/`Host` is the member and `Role` the role it holds.
+/// MariaDB records neither an admin option nor the role's own host, so the edge carries `%` - the
+/// host an unqualified role resolves to in `GRANT <role> TO <member>`.
+async fn role_edges_from_mariadb(pool: &MySqlPool) -> Vec<RoleMembership> {
+    let rows = match sqlx::query("SELECT Host, User, Role FROM mysql.roles_mapping")
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
+    };
+
+    rows.iter()
+        .filter_map(|row| {
+            let role = text(row, "Role");
+            if role.is_empty() {
+                return None;
+            }
+            Some(RoleMembership {
+                role_user: role,
+                role_host: "%".to_string(),
+                member_user: text(row, "User"),
+                member_host: text(row, "Host"),
+                admin_option: false,
+            })
+        })
+        .collect()
 }
 
 // ----- Writing -------------------------------------------------------------------------------
@@ -567,6 +826,15 @@ fn edit_statements(edit: &UserEdit) -> Vec<String> {
 
 fn account_statements_inner(edit: &UserEdit, target: &str, is_new: bool) -> Vec<String> {
     let account = &edit.account;
+    // A role has neither a password nor account options: creating it is the whole account group,
+    // and every privilege/role change is written by the groups below.
+    if account.kind == AccountKind::Role {
+        return if is_new {
+            vec![format!("CREATE ROLE {target}")]
+        } else {
+            Vec::new()
+        };
+    }
     // The account as loaded; `None` while creating, in which case every option is written.
     let original = edit.original.as_ref().map(|details| &details.account);
     // Only emit an option when it differs from the loaded account, so an untouched editor produces
@@ -1565,5 +1833,121 @@ mod tests {
             statements.last().map(String::as_str),
             Some("FLUSH PRIVILEGES")
         );
+    }
+
+    #[test]
+    fn assumes_every_account_column_when_the_catalog_is_unreadable() {
+        let shape = CatalogShape::assumed_complete();
+        let projection = shape.account_projection();
+        assert!(projection.starts_with("User, Host, plugin"));
+        assert!(projection.contains("x509_subject"));
+        // Every column is projected as itself, except `is_role`, which MySQL 8 simply lacks.
+        assert_eq!(projection.matches("NULL AS").count(), 1);
+        assert!(projection.ends_with(", NULL AS is_role"));
+        assert!(shape.role_edges && !shape.roles_mapping);
+    }
+
+    #[test]
+    fn projects_the_account_columns_a_server_lacks_as_null() {
+        // MySQL 5.6 has neither `password_lifetime` nor `account_locked`; the read must still run
+        // and report those attributes as absent instead of failing the whole Users tab.
+        let shape = CatalogShape {
+            user_columns: ["User", "Host", "plugin", "authentication_string"]
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+            is_role_column: false,
+            role_edges: false,
+            roles_mapping: true,
+        };
+        let projection = shape.account_projection();
+        assert!(projection.starts_with("User, Host, plugin, authentication_string, "));
+        assert!(projection.contains("NULL AS password_lifetime"));
+        assert!(projection.contains("NULL AS super_priv"));
+        // Every column the editor reads is projected once, either as itself or as NULL, plus the
+        // `is_role` marker the reader uses to recognise a role.
+        assert_eq!(
+            projection.matches("NULL AS").count(),
+            ACCOUNT_COLUMNS.len() - 4 + 1
+        );
+    }
+
+    #[test]
+    fn a_server_with_is_role_reads_it_directly() {
+        // MariaDB tells roles apart itself, so the projection selects the real column.
+        let shape = CatalogShape {
+            user_columns: ACCOUNT_COLUMNS
+                .iter()
+                .map(|name| name.to_string())
+                .chain(std::iter::once("is_role".to_string()))
+                .collect(),
+            is_role_column: true,
+            role_edges: false,
+            roles_mapping: true,
+        };
+        assert!(shape.account_projection().ends_with(", is_role"));
+        assert_eq!(shape.account_projection().matches("NULL AS").count(), 0);
+    }
+
+    /// A `UserEdit` for one account with nothing else set, so a test only states what it exercises.
+    fn edit_for(original: Option<UserDetails>, account: UserAccount) -> UserEdit {
+        UserEdit {
+            original,
+            account,
+            password: None,
+            server_privileges: BTreeSet::new(),
+            denied_server_privileges: BTreeSet::new(),
+            grant_option_server_privileges: BTreeSet::new(),
+            grants: Vec::new(),
+            default_privileges: Vec::new(),
+            roles: Vec::new(),
+            members: Vec::new(),
+            mappings: Vec::new(),
+            original_mappings: Vec::new(),
+            old_password: None,
+            securables: Vec::new(),
+            original_securables: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_new_role_is_created_with_create_role() {
+        // A role carries no password and no account options, so `CREATE ROLE` is the whole account
+        // group rather than the `CREATE USER … IDENTIFIED WITH …` a user gets.
+        let edit = edit_for(
+            None,
+            UserAccount {
+                user: "reporting".to_string(),
+                host: "%".to_string(),
+                kind: AccountKind::Role,
+                ..Default::default()
+            },
+        );
+        let statements = edit_statements(&edit);
+        assert_eq!(
+            statements.first().map(String::as_str),
+            Some("CREATE ROLE 'reporting'@'%'")
+        );
+        assert_eq!(
+            statements.last().map(String::as_str),
+            Some("FLUSH PRIVILEGES")
+        );
+    }
+
+    #[test]
+    fn an_existing_role_keeps_its_account_statements_empty() {
+        // Editing a role must not fall back to `ALTER USER`, which would rewrite it as an account.
+        let account = UserAccount {
+            user: "reporting".to_string(),
+            host: "%".to_string(),
+            kind: AccountKind::Role,
+            ..Default::default()
+        };
+        let original = UserDetails {
+            account: account.clone(),
+            ..Default::default()
+        };
+        let edit = edit_for(Some(original), account);
+        assert!(edit_groups(&edit).is_empty(), "{:?}", edit_groups(&edit));
     }
 }

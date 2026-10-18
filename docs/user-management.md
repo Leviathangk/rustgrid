@@ -6,6 +6,9 @@
 
 对应 AGENTS.md 的 "User management"（scope 第 10 条）。
 
+> 引擎行为的外部对照依据（Navicat 18 同类模块的静态解析，覆盖 MySQL / SQL Server /
+> Oracle / PostgreSQL）见 [`docs/navicat-user-role-module.md`](navicat-user-role-module.md)。
+
 ## 分层
 
 ```
@@ -38,6 +41,13 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
   `default_tablespace`/`profile`/`tablespace_quota`、SQL Server 的
   `login_type`/`default_database`/`default_language`/`check_policy`/`check_expiration`/
   `must_change`/`certificate`/`asymmetric_key`/`credential`）。
+- `AccountKind { User, Group, Role }`：账户**类型**，是四引擎差异的统一表达维度 ——
+  MySQL/MariaDB 的账号可以是用户或角色（MariaDB 直接读 `mysql.user.is_role`，MySQL 8 没有该列，
+  由 `mysql.role_edges` 推断）；SQL Server 由 `sys.server_principals.type_desc` 区分
+  登录名 / Windows 组 / 服务器角色；Oracle 用户取自 `DBA_USERS`、角色取自 `DBA_ROLES`；
+  PostgreSQL 只有一个概念（`rolcanlogin` 为真记为用户，否则记为角色）。
+  `UserEditorSpec.kinds` 列出该引擎支持的类型，**单元素即不显示任何类型控件**
+  （SQLite / ODBC 走默认，界面完全不变）。
 - `UserDetails`：账户 + 服务器级 `server_privileges` / `denied_server_privileges` /
   `grant_option_server_privileges`（SQL Server 的 `state = 'W'`，可转授）+ 对象级
   `grants: Vec<ObjectGrant>` + 角色边 `roles`/`members`。
@@ -118,18 +128,41 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
 
 ### Users 主标签页（`user.rs`）
 
-账户列表（详细列表/平铺网格两种布局，来自共享的 `ui` 列表模板），工具栏：编辑 / 新建 /
-删除 / 权限管理器（仅当 `object_privilege_manager` 为真）。列表列由 `UserEditorSpec` 决定
-（例如 Oracle 无 `super_user` 列）。
+账户列表（详细列表/平铺网格两种布局，来自共享的 `ui` 列表模板），工具栏：**作用域开关** /
+新建 / 编辑 / 删除 / 权限管理器（仅当 `object_privilege_manager` 为真）。列表列由
+`UserEditorSpec` 决定（例如 Oracle 无 `super_user` 列）。
+
+**用户 / 角色 作用域开关**（`UserScope`，对应 Navicat 把「用户」做成下拉的做法）：当**驱动声明
+该引擎有角色**（`UserEditorSpec::kinds` 含 `Role`）**且服务端确实支持角色**
+（`Connection::roles_supported()`；MySQL 8 / MariaDB 为真，MySQL ≤ 5.7 为假）时，工具栏最左边
+出现 用户 / 角色 两段开关，切换时**整个标签页跟着换**：
+
+- 列表只列该作用域的账户（用户侧含 SQL Server 的 Windows 组，角色侧只列角色）；
+- 工具栏文案变成 新建用户/编辑用户/删除用户 ↔ 新建角色/编辑角色/删除角色，删除确认问
+  「删除角色 …」；
+- **新建按钮打开的就是角色窗口**（标题 新建角色），类型已预选、密码/SSL/资源限制等行不显示；
+- 底部状态栏的计数与名称也跟着作用域走（`138 用户` / `112 角色`）。
+
+两种布局都用**图标区分类型**（用户=单人、组=双人、角色=盾牌，角色取品牌色），因此
+平铺网格（默认布局）下也能一眼看出哪个是角色。详细列表另有「类型」列。
+
+**服务端不支持角色时整个开关消失**：`UserScope::*` 之外还有 `Connection::roles_supported()`
+（默认 `true`；MySQL/MariaDB 驱动复用已有的 `CatalogShape` 探测——`mysql.role_edges`、
+`mysql.user.is_role`、`mysql.roles_mapping` 三者皆无即视为不支持）。开关、图标差异、新建窗口的
+「类型」下拉都由这个结论统一控制，所以连到 MySQL 5.7 时界面自动退回单类型形态，不会出现
+「点了必然 1064」的死开关。
 
 ### 新建/编辑用户窗口（`user_create.rs`，独立 OS 窗口）
 
 左导航分区（按 `UserEditorSpec` 显示）：常规 / 高级 / 服务器权限 / 权限 / 默认权限 / 角色 /
 用户映射 / 终端节点权限 / 登录权限 / SQL 预览。
-- 常规：身份（`user`、`host` + 快捷芯片、认证插件、SQL Server 验证类型）、密码（含“指定旧
-  密码”）、账号状态（过期策略 / 密码有效期至 / 锁定或已启用）、资源限制、存储与配置（Oracle 的
+- 常规：**类型**（仅新建时、且 `spec.kinds.len() > 1`）、身份（`user`、`host` + 快捷芯片、
+  认证插件、SQL Server 验证类型）、密码（含"指定旧
+  密码"）、账号状态（过期策略 / 密码有效期至 / 锁定或已启用）、资源限制、存储与配置（Oracle 的
   默认表空间 / 配额 / PROFILE）、登录选项（SQL Server 的密码策略 / 过期 / 下次登录改密、默认
-  数据库 / 语言、证书 / 非对称密钥 / 凭据）。**切换认证插件时**（MySQL/MariaDB）密码区强制展开：
+  数据库 / 语言、证书 / 非对称密钥 / 凭据）。选「角色」时隐藏密码 / SSL / 资源限制 / 状态 /
+  存储 / 登录选项这些对角色不适用的行，只留身份、服务器权限、权限、角色与 SQL 预览。
+  **切换认证插件时**（MySQL/MariaDB）密码区强制展开：
   服务器在插件变更时会清空原凭据，因此编辑器把「修改登录密码」锁定为勾选并提示必须填写新密码，
   否则保存按钮会报“请输入新密码”而不是静默丢弃这次改动。
 - 高级（MySQL）：SSL 类型（无 / `ANY` / `X509` / `SPECIFIED`）；选 `SPECIFIED` 时显示密码套件 /
@@ -166,7 +199,8 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
 | | MySQL/MariaDB | SQL Server | PostgreSQL | Oracle |
 |---|---|---|---|---|
 | 身份 | `user@host` | 登录名 | 角色名 | 用户名 |
-| 服务器级 | `mysql.user` 的 28 项 | `sys.server_permissions`（目录 13 项） | 角色属性（SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS） | 系统权限（目录 14 项） |
+| 类型 | 用户 / 角色 | 登录名 / 组 / 服务器角色 | 用户（可登录）/ 角色（NOLOGIN） | 用户 / 角色 |
+| 服务器级 | `mysql.user` 的 28 项 | `sys.server_permissions`（目录 13 项） | 角色属性（SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS） | 系统权限（目录 14 项）+ **SYSDBA/SYSOPER**（`v$pwfile_users`） |
 | 数据库级 | （复用对象级 `db.*`） | `ON DATABASE::db`（class 0） | `ON DATABASE db`（CONNECT/CREATE/TEMPORARY） | — |
 | schema 级 | — | — | `ON SCHEMA`（CREATE/USAGE） | — |
 | 对象级 | 表/库/例程 | 表/视图（class 1） | 表/视图 | 表/视图 |
@@ -184,6 +218,9 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
   写入回放 `CREATE/ALTER USER`、`GRANT/REVOKE`、`RENAME USER` 脚本（文本协议），结尾
   `FLUSH PRIVILEGES`。高级/SSL 读 `mysql.user.ssl_type`/`ssl_cipher`/`x509_issuer`/
   `x509_subject`，按类型生成 `REQUIRE NONE|SSL|X509|CIPHER … AND ISSUER … AND SUBJECT …`。
+  账户**类型**（MariaDB 读 `mysql.user.is_role`，MySQL 8 由 `mysql.role_edges` 推断；
+  推断不到"没有任何被授予者"的角色，此时按用户处理）：角色创建生成 `CREATE ROLE`，属性编辑
+  不再生成 `ALTER USER`，删除生成 `DROP ROLE`。
 - **SQL Server**（`rustgrid-sqlserver/src/user.rs`）：账户是**登录**（无 host）；完整属性
   （默认库/语言、密码策略/过期、验证类型、凭据）取自 `sys.server_principals` 连接
   `sys.sql_logins`；服务器权限取 `sys.server_permissions`（`class = 100`，`G`→授予，
@@ -195,15 +232,23 @@ UI 层**不**出现任何引擎判断或原始 SQL：所有差异通过 `UserEdi
   终端节点权限 / 登录权限读 `sys.server_permissions` 的 class 105（端点）/101（登录），差量生成
   `GRANT/DENY/REVOKE … ON <CLASS>::[name]`。登录创建按验证类型生成
   `CREATE LOGIN … WITH PASSWORD … [MUST_CHANGE]` / `FROM WINDOWS` / `FROM CERTIFICATE` / `FROM ASYMMETRIC KEY`。
+  **服务器角色也在同一账户列表里**（`type_desc = 'SERVER_ROLE'`）：创建、重命名、删除分别生成
+  `CREATE ROLE` / `ALTER ROLE … WITH NAME` / `DROP ROLE`；删除与重命名只拿到名字，所以按名字
+  回查一次 `type_desc` 再决定动词。
 - **PostgreSQL**（`rustgrid-postgresql/src/user.rs`）：角色属性以 `ALTER ROLE …` 写入；
+  账户类型即 `LOGIN`/`NOLOGIN`（类型选「角色」时强制 `NOLOGIN`，即使锁定勾选框没动）；
   `rolvaliduntil` 经 `VALID UNTIL` 读写；对象/数据库/schema 授权分别读
   `pg_class.relacl` / `pg_database.datacl` / `pg_namespace.nspacl`（`aclexplode`）。默认权限读
   `pg_default_acl`（`aclexplode`，跳过 `PUBLIC`/`grantee = 0`），按 `(schema, 对象类型, 角色)`
   差量生成 `ALTER DEFAULT PRIVILEGES FOR ROLE … [IN SCHEMA …] GRANT/REVOKE … ON … TO/FROM …`；
   schema 列表取自该驱动读写默认权限所在的默认库。
-- **Oracle**（`rustgrid-oracle/src/user.rs`）：账户在 `dba_users`/`all_users`；系统权限取
-  `dba_sys_privs`，对象授权取 `dba_tab_privs`；`PROFILE` / `DEFAULT TABLESPACE` /
-  `QUOTA … ON …` 随 `CREATE/ALTER USER` 写入；配额读 `dba_ts_quotas`。
+- **Oracle**（`rustgrid-oracle/src/user.rs`）：账户在 `dba_users`/`all_users`，**角色在
+  `dba_roles`/`all_roles`**，两者合成同一个账户列表并用类型列区分；系统权限取
+  `dba_sys_privs`，**另合并口令文件里的 `SYSDBA`/`SYSOPER`**（`v$pwfile_users`，它们不在数据
+  字典里，不合并的话特权账号看起来"什么都没有"）；对象授权取 `dba_tab_privs`；
+  `PROFILE` / `DEFAULT TABLESPACE` / `QUOTA … ON …` 随 `CREATE/ALTER USER` 写入；配额读
+  `dba_ts_quotas`。用户与角色的动词分开：`CREATE/ALTER/DROP USER` 对用户，
+  `CREATE ROLE` / `ALTER ROLE … RENAME TO` / `DROP ROLE` 对角色（Oracle 仍不支持重命名用户）。
 
 ## 仍未实现（后续工作）
 

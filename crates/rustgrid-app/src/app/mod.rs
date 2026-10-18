@@ -23,7 +23,7 @@ use rustgrid_config::{
     ThemeSetting,
 };
 use rustgrid_core::{
-    BackupObjectKind, CellValue, Connection, ConnectionConfig, ConnectionFieldChoice,
+    AccountKind, BackupObjectKind, CellValue, Connection, ConnectionConfig, ConnectionFieldChoice,
     ConnectionFieldKind, ConnectionFieldSpec, ConnectionHomePage, ConnectionPage,
     ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab, DatabaseOptions,
     DefaultObjectType, DefaultPrivilege, DriverCapability, DriverIconStyle, DriverId,
@@ -36,6 +36,7 @@ use rustgrid_core::{
 };
 use rustgrid_export::ExportFormat;
 
+use self::user::UserScope;
 use crate::form::{ConnectionForm, FORM_FIELDS, FormField};
 use crate::list_select::{ListSelection, MarqueeDrag, SelectMode, rects_intersect, selection_mode};
 use crate::runtime::Runtime;
@@ -1626,6 +1627,8 @@ enum DeleteConfirm {
         user: String,
         host: String,
         label: String,
+        /// Whether the account is a role, so the confirmation asks about a 角色 rather than a 用户.
+        role: bool,
     },
     /// Drop a stored routine from the Functions tab or the connection tree.
     Routine {
@@ -2249,6 +2252,11 @@ pub struct AppView {
     user_search_input: Entity<TextInput>,
     /// The Users list's multi-selection (Explorer-style).
     users_selection: ListSelection,
+    /// Which principals the Users tab lists: the engine's users/logins or its roles.
+    users_scope: UserScope,
+    /// Whether the **server** supports roles, as reported when the account list loaded. A server
+    /// without them (MySQL ≤ 5.7) hides the 用户 / 角色 switch instead of offering an empty list.
+    users_roles_supported: bool,
     /// The Users list's row rectangles in window space, keyed by selection key, for the marquee.
     users_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
     /// The Users list's focus target.
@@ -2285,6 +2293,8 @@ pub struct AppView {
     create_user_confirm: Option<Entity<TextInput>>,
     /// The dialog's plugin and password-expiry dropdowns.
     create_user_plugin_combo: Option<Entity<ComboBox>>,
+    /// The dialog's 类型 dropdown (用户 / 组 / 角色), for engines that separate them.
+    create_user_kind_combo: Option<Entity<ComboBox>>,
     create_user_expiry_combo: Option<Entity<ComboBox>>,
     /// The dialog's password-expiry interval (days) field, shown for the INTERVAL policy.
     create_user_expiry_days: Option<Entity<TextInput>>,
@@ -2906,6 +2916,8 @@ impl AppView {
             users_detail_scroll: DetailScroll::default(),
             users_columns: Rc::new(RefCell::new(DetailColumns::default())),
             users_selection: ListSelection::default(),
+            users_scope: UserScope::Users,
+            users_roles_supported: false,
             users_row_rects: std::collections::HashMap::new(),
             users_focus: cx.focus_handle(),
             users_grid: ColumnGrid::default(),
@@ -2921,6 +2933,7 @@ impl AppView {
             create_user_password: None,
             create_user_confirm: None,
             create_user_plugin_combo: None,
+            create_user_kind_combo: None,
             create_user_expiry_combo: None,
             create_user_expiry_days: None,
             create_user_password_valid_until: None,

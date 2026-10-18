@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    AutoIncrementRule, Connection, ConnectionConfig, DatabaseEditorSpec, DesignerColumnOption,
-    DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerOptionField, Driver,
-    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
+    AccountKind, AutoIncrementRule, Connection, ConnectionConfig, DatabaseEditorSpec,
+    DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind,
+    DesignerOptionField, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
+    DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec, TlsMode,
+    UserEditorSpec,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
@@ -47,6 +48,9 @@ impl Driver for PostgresDriver {
 
     fn user_editor(&self) -> UserEditorSpec {
         UserEditorSpec {
+            // PostgreSQL has one concept (`ROLE`): a login-capable role reads as a user and the
+            // rest as roles, so the 类型 choice picks `LOGIN`/`NOLOGIN`.
+            kinds: vec![AccountKind::User, AccountKind::Role],
             // PostgreSQL roles have no host, plugin, password expiry or MySQL resource limits;
             // only `rolconnlimit` (最大连接数) is honoured.
             host: false,

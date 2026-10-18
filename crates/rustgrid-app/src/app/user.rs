@@ -14,6 +14,8 @@ fn user_key(account: &UserAccount) -> String {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UsersColumn {
     Name,
+    /// 用户 / 登录名 / 组 / 角色, for engines that separate them.
+    Kind,
     MaxQuestions,
     MaxUpdates,
     MaxConnections,
@@ -26,6 +28,7 @@ impl UsersColumn {
     fn header(self) -> String {
         match self {
             UsersColumn::Name => t!("common.name").to_string(),
+            UsersColumn::Kind => t!("user.col.kind").to_string(),
             UsersColumn::MaxQuestions => t!("user.col.max_questions").to_string(),
             UsersColumn::MaxUpdates => t!("user.col.max_updates").to_string(),
             UsersColumn::MaxConnections => t!("user.col.max_connections").to_string(),
@@ -48,6 +51,7 @@ impl UsersColumn {
     fn value(self, account: &UserAccount) -> String {
         match self {
             UsersColumn::Name => account.label(),
+            UsersColumn::Kind => t!(account.kind.label_key()).to_string(),
             UsersColumn::MaxQuestions => account.max_questions.to_string(),
             UsersColumn::MaxUpdates => account.max_updates.to_string(),
             UsersColumn::MaxConnections => account.max_connections.to_string(),
@@ -62,7 +66,155 @@ impl UsersColumn {
     }
 }
 
+/// Which principals the Users tab lists. Engines that separate roles from users get a 用户 / 角色
+/// switch (Navicat's 用户 dropdown), so a role is never mistaken for an account that can log in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum UserScope {
+    Users,
+    Roles,
+}
+
+impl UserScope {
+    /// The segment's i18n label.
+    fn label_key(self) -> &'static str {
+        match self {
+            UserScope::Users => "user.scope.users",
+            UserScope::Roles => "user.scope.roles",
+        }
+    }
+
+    /// The account kind the scope lists; the 用户 scope also keeps groups (SQL Server's Windows
+    /// groups are logins, not roles).
+    fn matches(self, kind: AccountKind) -> bool {
+        match self {
+            UserScope::Users => kind != AccountKind::Role,
+            UserScope::Roles => kind == AccountKind::Role,
+        }
+    }
+}
+
 impl AppView {
+    /// Whether the Users tab offers the 用户 / 角色 switch: the driver's editor must declare roles
+    /// **and** the server must report that it has them (MySQL ≤ 5.7 has none, and offering an empty
+    /// 角色 list whose every write would fail with a syntax error is worse than not offering it).
+    fn users_scope_switch(&self) -> bool {
+        self.users_roles_supported
+            && self.users_connection.is_some_and(|index| {
+                self.user_editor_spec(index)
+                    .kinds
+                    .contains(&AccountKind::Role)
+            })
+    }
+
+    /// The scope the Users tab is actually showing: the chosen one, unless the server has no roles,
+    /// in which case there is nothing to switch to.
+    fn effective_users_scope(&self) -> UserScope {
+        if self.users_scope_switch() {
+            self.users_scope
+        } else {
+            UserScope::Users
+        }
+    }
+
+    /// The account kind a **new** account gets from the scope the list is showing, so opening the
+    /// create dialog from the 角色 list produces a role rather than a user.
+    pub(super) fn scope_account_kind(&self) -> AccountKind {
+        match self.effective_users_scope() {
+            UserScope::Users => AccountKind::User,
+            UserScope::Roles => AccountKind::Role,
+        }
+    }
+
+    /// The badge icon for one account kind: a person for a user/login, a pair for a group, a shield
+    /// for a role — so the three never look alike in either layout.
+    fn user_kind_icon(kind: AccountKind) -> &'static str {
+        match kind {
+            AccountKind::User => "icons/user.svg",
+            AccountKind::Group => "icons/users.svg",
+            AccountKind::Role => "icons/role.svg",
+        }
+    }
+
+    /// The badge tint for one account kind: roles take the accent so they stand out from the
+    /// accounts that can log in.
+    fn user_kind_color(theme: Theme, kind: AccountKind) -> u32 {
+        match kind {
+            AccountKind::Role => theme.brand,
+            _ => theme.icon_users,
+        }
+    }
+
+    /// Switch the Users tab between users and roles.
+    pub(super) fn set_users_scope(&mut self, scope: UserScope, cx: &mut Context<'_, Self>) {
+        if self.users_scope == scope {
+            return;
+        }
+        self.users_scope = scope;
+        // The selection belongs to the list that was on screen; dropping it keeps 编辑/删除 from
+        // firing at a row the new scope no longer shows.
+        self.users_selection.clear();
+        self.selected_user = None;
+        cx.notify();
+    }
+
+    /// The 用户 / 角色 switch, styled like the 详细列表/平铺网格 toggle so the toolbar reads as
+    /// one set of controls.
+    fn render_users_scope_switch(&self, cx: &mut Context<'_, Self>) -> Div {
+        let theme = self.theme;
+        let scope = self.effective_users_scope();
+        let weak = cx.weak_entity();
+        let mut group = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_0p5()
+            .p_0p5()
+            .flex_none()
+            .rounded(px(7.0))
+            .bg(rgb(theme.button_bg))
+            .border_1()
+            .border_color(rgb(theme.border));
+        for option in [UserScope::Users, UserScope::Roles] {
+            let active = option == scope;
+            let weak = weak.clone();
+            group = group.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "user-scope-{}",
+                        option.label_key()
+                    )))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .h(px(22.0))
+                    .px_2()
+                    .flex_none()
+                    .rounded(px(5.0))
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .when(active, move |style| {
+                        style
+                            .bg(rgb(theme.dialog_bg))
+                            .text_color(rgb(theme.text))
+                            .font_weight(FontWeight::MEDIUM)
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                    })
+                    .when(!active, move |style| {
+                        style
+                            .text_color(rgb(theme.text_muted))
+                            .hover(move |style| style.text_color(rgb(theme.text)))
+                    })
+                    .on_click(move |_event, _window, cx| {
+                        let _ = weak.update(cx, |app, cx| app.set_users_scope(option, cx));
+                    })
+                    .child(t!(option.label_key()).to_string()),
+            );
+        }
+        group
+    }
+
     /// The connection whose accounts the Users tab shows: the connection tree's current selection
     /// (walking a database/category/table row up to its connection), or the first open connection.
     pub(super) fn users_connection_index(&self, cx: &App) -> Option<usize> {
@@ -119,17 +271,32 @@ impl AppView {
             return;
         };
         self.users = Loadable::Loading;
+        self.users_roles_supported = false;
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
+            // Ask for the role capability in the same round trip as the list, so the 用户 / 角色
+            // switch only appears once we know the server can actually fill the 角色 side.
             let result = runtime
-                .spawn(async move { connection.list_users().await })
+                .spawn(async move {
+                    let users = connection.list_users().await;
+                    let roles = users.is_ok() && connection.roles_supported().await;
+                    (users, roles)
+                })
                 .await;
             let _ = this.update(cx, |app, cx| {
-                app.users = match result {
-                    Ok(Ok(users)) => Loadable::Loaded(users),
-                    Ok(Err(error)) => Loadable::Failed(error.to_string()),
-                    Err(error) => Loadable::Failed(error.to_string()),
-                };
+                match result {
+                    Ok((users, roles)) => {
+                        app.users_roles_supported = roles;
+                        app.users = match users {
+                            Ok(users) => Loadable::Loaded(users),
+                            Err(error) => Loadable::Failed(error.to_string()),
+                        };
+                    }
+                    Err(error) => {
+                        app.users_roles_supported = false;
+                        app.users = Loadable::Failed(error.to_string());
+                    }
+                }
                 if let Loadable::Loaded(users) = &app.users
                     && app.selected_user.is_some_and(|index| index >= users.len())
                 {
@@ -148,11 +315,15 @@ impl AppView {
             return Vec::new();
         };
         let needle = self.user_search.trim().to_ascii_lowercase();
+        let scope = self.effective_users_scope();
         users
             .iter()
             .enumerate()
             .filter(|(_, account)| {
-                needle.is_empty() || account.label().to_ascii_lowercase().contains(&needle)
+                // The scope decides which principals this list is about: a 角色 list must not mix
+                // in the accounts that can log in, and vice versa.
+                scope.matches(account.kind)
+                    && (needle.is_empty() || account.label().to_ascii_lowercase().contains(&needle))
             })
             .map(|(index, _)| index)
             .collect()
@@ -193,6 +364,13 @@ impl AppView {
         let has_selection = self.selected_user.is_some();
         let has_connection =
             matches!(&self.users, Loadable::Loaded(_)) && self.users_connection.is_some();
+        // The 用户 / 角色 switch decides what the whole tab — list, toolbar labels, new dialog —
+        // is about, exactly like Navicat's 用户 dropdown.
+        let scope = self.effective_users_scope();
+        let (new_label, edit_label, delete_label) = match scope {
+            UserScope::Users => ("user.new", "user.edit", "user.delete"),
+            UserScope::Roles => ("user.new_role", "user.edit_role", "user.delete_role"),
+        };
         let weak = cx.weak_entity();
         let on_select = Rc::new(
             move |mode: ViewMode, _event: &ClickEvent, _window: &mut Window, cx: &mut App| {
@@ -216,10 +394,14 @@ impl AppView {
                     .flex()
                     .flex_row()
                     .items_center()
+                    .when(self.users_scope_switch(), |row| {
+                        row.child(self.render_users_scope_switch(cx))
+                            .child(toolbar_separator(theme))
+                    })
                     .child(self.toolbar_item(
                         "user-new",
                         "icons/add_field.svg",
-                        t!("user.new").to_string(),
+                        t!(new_label).to_string(),
                         has_connection,
                         cx.listener(|this, _event, _window, cx| this.open_create_user(cx)),
                     ))
@@ -227,7 +409,7 @@ impl AppView {
                     .child(self.toolbar_item(
                         "user-edit",
                         "icons/insert_field.svg",
-                        t!("user.edit").to_string(),
+                        t!(edit_label).to_string(),
                         has_selection,
                         cx.listener(|this, _event, _window, cx| this.open_selected_user(cx)),
                     ))
@@ -235,7 +417,7 @@ impl AppView {
                     .child(self.toolbar_item(
                         "user-delete",
                         "icons/delete_field.svg",
-                        t!("user.delete").to_string(),
+                        t!(delete_label).to_string(),
                         has_selection,
                         cx.listener(|this, _event, _window, cx| {
                             if let Some(index) = this.selected_user {
@@ -344,6 +526,11 @@ impl AppView {
             .map(|index| self.user_editor_spec(index))
             .unwrap_or_else(UserEditorSpec::mysql);
         let mut columns = vec![UsersColumn::Name];
+        // Only engines that separate users from roles (or groups) have anything to put in a 类型
+        // column; everywhere else it would repeat the same word down the list.
+        if spec.kinds.len() > 1 {
+            columns.push(UsersColumn::Kind);
+        }
         if spec.max_questions {
             columns.push(UsersColumn::MaxQuestions);
         }
@@ -469,8 +656,8 @@ impl AppView {
                         .overflow_hidden()
                         .text_color(rgb(theme.text))
                         .child(ui::leading_icon_badge(
-                            "icons/user.svg",
-                            theme.icon_users,
+                            Self::user_kind_icon(account.kind),
+                            Self::user_kind_color(theme, account.kind),
                             22.0,
                         ))
                         .child(ui::detail_cell_text(
@@ -547,8 +734,8 @@ impl AppView {
                 }),
             )
             .child(ui::leading_icon_badge(
-                "icons/user.svg",
-                theme.icon_users,
+                Self::user_kind_icon(account.kind),
+                Self::user_kind_color(theme, account.kind),
                 16.0,
             ))
             .child(
@@ -678,6 +865,7 @@ impl AppView {
         let label = account.label();
         self.delete_confirm = Some(DeleteConfirm::User {
             connection_index,
+            role: account.kind == AccountKind::Role,
             user: account.user,
             host: account.host,
             label,
@@ -844,8 +1032,13 @@ impl AppView {
     /// The Users status shown in the window's bottom bar.
     pub(super) fn render_users_status(&self) -> AnyElement {
         let theme = self.theme;
+        let scope = self.effective_users_scope();
+        // The count follows the scope, so the bar always describes the list on screen.
         let count = match &self.users {
-            Loadable::Loaded(users) => users.len(),
+            Loadable::Loaded(users) => users
+                .iter()
+                .filter(|account| scope.matches(account.kind))
+                .count(),
             _ => 0,
         };
         let connection_name = self
@@ -864,7 +1057,7 @@ impl AppView {
             .child(
                 div()
                     .text_color(rgb(theme.text))
-                    .child(format!("{count} {}", t!("common.user"))),
+                    .child(format!("{count} {}", t!(scope.label_key()))),
             )
             .child(
                 div()

@@ -5,9 +5,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
-    CellValue, Connection, Error, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup,
-    PrivilegeId, PrivilegeInfo, PrivilegePreset, Result, RoleMembership, SecurableClass,
-    ServerSecurableGrant, UserAccount, UserDetails, UserEdit, UserEditSection, UserMapping,
+    AccountKind, CellValue, Connection, Error, ObjectPrivilegeRow, PrivilegeCatalog,
+    PrivilegeGroup, PrivilegeId, PrivilegeInfo, PrivilegePreset, Result, RoleMembership,
+    SecurableClass, ServerSecurableGrant, UserAccount, UserDetails, UserEdit, UserEditSection,
+    UserMapping,
 };
 
 use crate::SqlServerConnection;
@@ -194,6 +195,7 @@ fn account_from_row(row: &[rustgrid_core::CellValue]) -> UserAccount {
     UserAccount {
         user,
         host: String::new(),
+        kind: account_kind(&text_at(row, 3)),
         plugin: "SQL Server".to_string(),
         password_set: true,
         password_expired: false,
@@ -240,7 +242,18 @@ fn verification_type(type_desc: &str) -> &'static str {
         "WINDOWS_LOGIN" | "WINDOWS_GROUP" => "Windows",
         "CERTIFICATE_MAPPED_LOGIN" => "Certificate",
         "ASYMMETRIC_KEY_MAPPED_LOGIN" => "Asymmetric Key",
+        // A server role is not a login at all, so it has no verification type.
+        "SERVER_ROLE" => "",
         _ => "SQL Server",
+    }
+}
+
+/// What a `sys.server_principals` row is: a SQL/Windows login, a Windows group, or a server role.
+fn account_kind(type_desc: &str) -> AccountKind {
+    match type_desc {
+        "WINDOWS_GROUP" | "EXTERNAL_GROUP" => AccountKind::Group,
+        "SERVER_ROLE" => AccountKind::Role,
+        _ => AccountKind::User,
     }
 }
 
@@ -258,7 +271,7 @@ async fn load_account_detail(
                FROM sys.server_principals p \
                LEFT JOIN sys.sql_logins s ON s.principal_id = p.principal_id \
                LEFT JOIN sys.credentials c ON c.credential_id = p.credential_id \
-               WHERE p.name = @P1 AND p.type IN ('S', 'U', 'G')";
+               WHERE p.name = @P1 AND p.type IN ('S', 'U', 'G', 'R')";
     let result = connection.run(None, sql, &[Some(user.to_string())]).await?;
     Ok(result.rows.first().map(|row| {
         let type_desc = text_at(row, 6);
@@ -267,6 +280,7 @@ async fn load_account_detail(
         UserAccount {
             user: text_at(row, 0),
             host: String::new(),
+            kind: account_kind(&type_desc),
             plugin: "SQL Server".to_string(),
             password_set,
             account_locked: row.get(1).map(is_truthy).unwrap_or(false),
@@ -294,9 +308,10 @@ async fn load_accounts(
     };
     let sql = format!(
         "SELECT p.name, p.is_disabled, \
-                CASE WHEN IS_SRVROLEMEMBER('sysadmin', p.name) = 1 THEN 1 ELSE 0 END \
+                CASE WHEN IS_SRVROLEMEMBER('sysadmin', p.name) = 1 THEN 1 ELSE 0 END, \
+                p.type_desc \
          FROM sys.server_principals p \
-         WHERE p.type IN ('S', 'U', 'G') AND p.name NOT LIKE '##%'{predicate} \
+         WHERE p.type IN ('S', 'U', 'G', 'R') AND p.name NOT LIKE '##%'{predicate} \
          ORDER BY p.name"
     );
     let params: Vec<Option<String>> = filter
@@ -604,6 +619,22 @@ fn create_login_options(account: &UserAccount, password: Option<&str>) -> Vec<St
 fn account_statements(edit: &UserEdit) -> Vec<String> {
     let account = &edit.account;
     let name = quote_identifier(&account.user);
+
+    // A server role has no authentication and no attributes: creating it, or renaming it, is all
+    // this group contributes. Its server permissions and members are written by the other groups.
+    if account.kind == AccountKind::Role {
+        let mut statements = Vec::new();
+        match &edit.original {
+            Some(original) if original.account.user != account.user => statements.push(format!(
+                "ALTER ROLE {} WITH NAME = {name}",
+                quote_identifier(&original.account.user)
+            )),
+            Some(_) => {}
+            None => statements.push(format!("CREATE ROLE {name}")),
+        }
+        return statements;
+    }
+
     let mut statements = Vec::new();
 
     match &edit.original {
@@ -1087,7 +1118,13 @@ pub(crate) async fn drop_user(
     user: &str,
     _host: &str,
 ) -> Result<()> {
-    let sql = format!("DROP LOGIN {}", quote_identifier(user));
+    // A server role is dropped with `DROP ROLE`; every other principal is a login.
+    let verb = if account_is_role(connection, user).await {
+        "DROP ROLE"
+    } else {
+        "DROP LOGIN"
+    };
+    let sql = format!("{verb} {}", quote_identifier(user));
     connection.execute_batch(None, &sql).await
 }
 
@@ -1098,12 +1135,30 @@ pub(crate) async fn rename_user(
     new_user: &str,
     _new_host: &str,
 ) -> Result<()> {
+    let verb = if account_is_role(connection, user).await {
+        "ALTER ROLE"
+    } else {
+        "ALTER LOGIN"
+    };
     let sql = format!(
-        "ALTER LOGIN {} WITH NAME = {}",
+        "{verb} {} WITH NAME = {}",
         quote_identifier(user),
         quote_identifier(new_user)
     );
     connection.execute_batch(None, &sql).await
+}
+
+/// Whether a principal is a server role. The list carries the kind, but drop/rename only receive a
+/// name, so the kind is looked up once here.
+async fn account_is_role(connection: &SqlServerConnection, user: &str) -> bool {
+    let sql = "SELECT p.type_desc FROM sys.server_principals p WHERE p.name = @P1";
+    let Ok(result) = connection.run(None, sql, &[Some(user.to_string())]).await else {
+        return false;
+    };
+    result
+        .rows
+        .first()
+        .is_some_and(|row| text_at(row, 0).eq_ignore_ascii_case("SERVER_ROLE"))
 }
 
 // ----- Object privileges (the 对象权限管理器) ---------------------------------------------------
@@ -1839,6 +1894,41 @@ mod tests {
                 "ALTER LOGIN [app] DROP CREDENTIAL [old]",
                 "ALTER LOGIN [app] ADD CREDENTIAL [cred]",
             ]
+        );
+    }
+
+    #[test]
+    fn a_server_role_uses_the_role_verbs() {
+        // A role has no password, policy or credential: creating and renaming it are the only
+        // statements the account group may contribute.
+        let create = base_edit(
+            UserAccount {
+                user: "reporting".to_string(),
+                kind: AccountKind::Role,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(account_statements(&create), vec!["CREATE ROLE [reporting]"]);
+
+        let rename = base_edit(
+            UserAccount {
+                user: "reporting".to_string(),
+                kind: AccountKind::Role,
+                ..Default::default()
+            },
+            Some(UserDetails {
+                account: UserAccount {
+                    user: "old_role".to_string(),
+                    kind: AccountKind::Role,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            account_statements(&rename),
+            vec!["ALTER ROLE [old_role] WITH NAME = [reporting]"]
         );
     }
 }

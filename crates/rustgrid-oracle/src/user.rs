@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustgrid_core::{
-    Error, ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId,
-    PrivilegeInfo, PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails, UserEdit,
-    UserEditSection,
+    AccountKind, Error, ObjectGrant, ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup,
+    PrivilegeId, PrivilegeInfo, PrivilegePreset, Result, RoleMembership, UserAccount, UserDetails,
+    UserEdit, UserEditSection,
 };
 
 use crate::connection::{OracleConnection, map_query_error};
@@ -41,6 +41,14 @@ const SYSTEM_PRIVILEGES: &[(&str, &str)] = &[
     ("CREATE USER", "user.priv.oracle.create_user"),
 ];
 
+/// The two privileged-administrator flags Oracle keeps in the password file instead of
+/// `DBA_SYS_PRIVS`: an account holding them has no row in the data dictionary, so the editor reads
+/// them from `v$pwfile_users` and grants them like system privileges (`GRANT SYSDBA TO scott`).
+const PWFILE_PRIVILEGES: &[(&str, &str)] = &[
+    ("SYSDBA", "user.priv.oracle.sysdba"),
+    ("SYSOPER", "user.priv.oracle.sysoper"),
+];
+
 /// The Oracle object privileges surfaced by the 权限 grid, as `(privilege, i18n key, group)`.
 const OBJECT_PRIVILEGES: &[(&str, &str, &str)] = &[
     ("SELECT", "user.priv.select", "dml"),
@@ -58,6 +66,7 @@ const OBJECT_PRIVILEGES: &[(&str, &str, &str)] = &[
 pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
     let groups = [
         ("system", "user.tab.server_privileges"),
+        ("privileged", "user.priv_group.privileged"),
         ("dml", "user.create.priv_group.dml"),
         ("ddl", "user.create.priv_group.ddl"),
         ("routines", "user.create.priv_group.routines"),
@@ -74,6 +83,11 @@ pub(crate) fn privilege_catalog() -> PrivilegeCatalog {
         .iter()
         .map(|(name, label_key)| PrivilegeInfo::server(*name, "system", Some(*label_key), name))
         .collect();
+    // SYSDBA/SYSOPER stay out of the 系统权限 preset on purpose: the preset is built from
+    // `SYSTEM_PRIVILEGES`, and "grant every system privilege" must not hand out DBA access.
+    privileges.extend(PWFILE_PRIVILEGES.iter().map(|(name, label_key)| {
+        PrivilegeInfo::server(*name, "privileged", Some(*label_key), name)
+    }));
     privileges.extend(OBJECT_PRIVILEGES.iter().map(|(name, label_key, group)| {
         PrivilegeInfo::object(*name, group, Some(*label_key), name)
     }));
@@ -251,9 +265,19 @@ fn account_row(
 
 pub(crate) async fn list_users(connection: &OracleConnection) -> Result<Vec<UserAccount>> {
     connection
-        .with_conn(|raw| match account_row(raw, None, true) {
-            Ok(accounts) => Ok(accounts),
-            Err(_) => account_row(raw, None, false),
+        .with_conn(|raw| {
+            let mut accounts = match account_row(raw, None, true) {
+                Ok(accounts) => accounts,
+                Err(_) => account_row(raw, None, false)?,
+            };
+            // Roles live in their own dictionary; the account list shows both, as Navicat does.
+            accounts.extend(role_accounts(raw));
+            accounts.sort_by(|left, right| {
+                left.user
+                    .to_ascii_uppercase()
+                    .cmp(&right.user.to_ascii_uppercase())
+            });
+            Ok(accounts)
         })
         .await
 }
@@ -264,10 +288,20 @@ pub(crate) async fn user_details(connection: &OracleConnection, user: &str) -> R
         .with_conn(move |raw| {
             let mut account = match account_row(raw, Some(&user), true) {
                 Ok(accounts) if !accounts.is_empty() => accounts.into_iter().next().unwrap(),
-                _ => account_row(raw, Some(&user), false)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| Error::Query(format!("user {user} not found")))?,
+                _ => match account_row(raw, Some(&user), false)?.into_iter().next() {
+                    Some(account) => account,
+                    // A name that is not a user may still be a role; the editor handles both.
+                    None => {
+                        let role = find_role(raw, &user).ok_or_else(|| {
+                            Error::Query(format!("user or role {user} not found"))
+                        })?;
+                        UserAccount {
+                            user: role,
+                            kind: AccountKind::Role,
+                            ..UserAccount::default()
+                        }
+                    }
+                },
             };
             if !account.default_tablespace.is_empty() {
                 account.tablespace_quota =
@@ -283,6 +317,9 @@ pub(crate) async fn user_details(connection: &OracleConnection, user: &str) -> R
             )? {
                 server_privileges.insert(PrivilegeId::new(name.trim().to_ascii_uppercase()));
             }
+            // SYSDBA/SYSOPER are absent from the data dictionary, so a privileged account would
+            // otherwise look like it holds nothing at all; merge the password-file flags in.
+            server_privileges.extend(query_pwfile_privileges(raw, &user));
 
             let roles = query_role_edges(raw, "grantee", &user)?
                 .into_iter()
@@ -342,6 +379,36 @@ fn query_strings(
         }
     }
     Ok(values)
+}
+
+/// The password-file flags (`SYSDBA`, `SYSOPER`) an account holds. Unlike every other system
+/// privilege these live in `v$pwfile_users`, so they are read separately; a server that refuses the
+/// view (or has no password file) simply reports none.
+fn query_pwfile_privileges(raw: &oracledb::Connection, user: &str) -> BTreeSet<PrivilegeId> {
+    let mut granted = BTreeSet::new();
+    let binds: Vec<String> = vec![user.to_string()];
+    let refs = crate::connection::bind_refs(&binds);
+    let cursor = match raw.query(
+        "SELECT sysdba, sysoper FROM v$pwfile_users WHERE username = :1",
+        &refs,
+    ) {
+        Ok(cursor) => cursor,
+        Err(_) => return granted,
+    };
+    for row in cursor {
+        let Ok(row) = row else { continue };
+        for (index, (name, _)) in PWFILE_PRIVILEGES.iter().enumerate() {
+            let held = row
+                .get::<Option<String>>(index)
+                .ok()
+                .flatten()
+                .is_some_and(|value| value.eq_ignore_ascii_case("TRUE"));
+            if held {
+                granted.insert(PrivilegeId::new(*name));
+            }
+        }
+    }
+    granted
 }
 
 /// `(granted_role, grantee, admin_option)` rows from `dba_role_privs`, filtered on `column`.
@@ -499,7 +566,20 @@ pub(crate) fn edit_groups(edit: &UserEdit) -> Vec<(UserEditSection, Vec<String>)
     let mut groups: Vec<(UserEditSection, Vec<String>)> = Vec::new();
 
     let mut account_statements = Vec::new();
-    if edit.original.is_none() {
+    if account.kind == AccountKind::Role {
+        // An Oracle role has no password, tablespace or profile: naming it is the whole identity
+        // group, while its system privileges and members are written by the groups below.
+        match &edit.original {
+            Some(original) if !original.account.user.eq_ignore_ascii_case(&account.user) => {
+                account_statements.push(format!(
+                    "ALTER ROLE {} RENAME TO {user}",
+                    quote_identifier(&original.account.user)
+                ));
+            }
+            Some(_) => {}
+            None => account_statements.push(format!("CREATE ROLE {user}")),
+        }
+    } else if edit.original.is_none() {
         let password = edit
             .password
             .clone()
@@ -715,8 +795,90 @@ pub(crate) async fn save_user(connection: &OracleConnection, edit: &UserEdit) ->
 }
 
 pub(crate) async fn drop_user(connection: &OracleConnection, user: &str) -> Result<()> {
-    // `CASCADE` drops the schema's objects too; the UI asks for confirmation before calling this.
-    let sql = format!("DROP USER {} CASCADE", quote_identifier(user));
+    let name = quote_identifier(user);
+    // A role is dropped as a role. A user takes its whole schema with it (`CASCADE`); the UI asks
+    // for confirmation before calling this.
+    let sql = if account_is_role(connection, user).await {
+        format!("DROP ROLE {name}")
+    } else {
+        format!("DROP USER {name} CASCADE")
+    };
+    connection
+        .with_conn(move |raw| crate::connection::run_text_public(raw, &sql))
+        .await
+}
+
+/// The role named `user`, read from `dba_roles` (falling back to `all_roles`). `None` when the name
+/// is not a role.
+fn find_role(raw: &oracledb::Connection, user: &str) -> Option<String> {
+    let binds: Vec<String> = vec![user.to_string()];
+    let refs = crate::connection::bind_refs(&binds);
+    let cursor = match raw.query("SELECT role FROM dba_roles WHERE role = :1", &refs) {
+        Ok(cursor) => cursor,
+        Err(_) => raw
+            .query("SELECT role FROM all_roles WHERE role = :1", &refs)
+            .ok()?,
+    };
+    for row in cursor {
+        let Ok(row) = row else { continue };
+        if let Ok(Some(value)) = row.get::<Option<String>>(0)
+            && !value.is_empty()
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Every role as an account row, so the Users list shows users and roles side by side the way
+/// Oracle's own dictionary does.
+fn role_accounts(raw: &oracledb::Connection) -> Vec<UserAccount> {
+    let cursor = match raw.query("SELECT role FROM dba_roles ORDER BY role", &[]) {
+        Ok(cursor) => cursor,
+        Err(_) => match raw.query("SELECT role FROM all_roles ORDER BY role", &[]) {
+            Ok(cursor) => cursor,
+            Err(_) => return Vec::new(),
+        },
+    };
+    let mut accounts = Vec::new();
+    for row in cursor {
+        let Ok(row) = row else { continue };
+        let Ok(Some(name)) = row.get::<Option<String>>(0) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        accounts.push(UserAccount {
+            user: name,
+            kind: AccountKind::Role,
+            ..UserAccount::default()
+        });
+    }
+    accounts
+}
+
+/// Whether `user` names a role rather than a user. The list carries the kind, but drop (and the
+/// list's in-place rename) only receive a name, so the dictionary is consulted once here.
+pub(crate) async fn account_is_role(connection: &OracleConnection, user: &str) -> bool {
+    let name = user.to_string();
+    connection
+        .with_conn(move |raw| Ok(find_role(raw, &name).is_some()))
+        .await
+        .unwrap_or(false)
+}
+
+/// Rename a role (`ALTER ROLE … RENAME TO …`), the one rename Oracle does support.
+pub(crate) async fn rename_role(
+    connection: &OracleConnection,
+    user: &str,
+    new_user: &str,
+) -> Result<()> {
+    let sql = format!(
+        "ALTER ROLE {} RENAME TO {}",
+        quote_identifier(user),
+        quote_identifier(new_user)
+    );
     connection
         .with_conn(move |raw| crate::connection::run_text_public(raw, &sql))
         .await

@@ -36,9 +36,9 @@ pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind
 pub use registry::{BuiltinDriverSource, DriverRegistry, DriverSource};
 pub use routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 pub use user::{
-    DefaultObjectType, DefaultPrivilege, DefaultPrivilegeInfo, ObjectGrant, ObjectPrivilegeRow,
-    PrivilegeCatalog, PrivilegeGroup, PrivilegeId, PrivilegeInfo, PrivilegePreset, PrivilegeScope,
-    RoleMembership, SecurableClass, ServerSecurableGrant, UserAccount, UserDetails, UserEdit,
-    UserEditSection, UserMapping,
+    AccountKind, DefaultObjectType, DefaultPrivilege, DefaultPrivilegeInfo, ObjectGrant,
+    ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId, PrivilegeInfo,
+    PrivilegePreset, PrivilegeScope, RoleMembership, SecurableClass, ServerSecurableGrant,
+    UserAccount, UserDetails, UserEdit, UserEditSection, UserMapping,
 };
 pub use view::{ViewDetails, ViewEdit, ViewInfo};

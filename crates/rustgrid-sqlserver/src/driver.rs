@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldChoice,
-    ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec,
-    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
-    DatabaseEditorTab, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
-    DesignerIndexKind, DesignerTab, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
-    DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec, TlsMode,
-    UserEditorSpec,
+    AccountKind, AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig,
+    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
+    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
+    DatabaseEditorSpec, DatabaseEditorTab, DesignerColumnOption, DesignerFieldColumn,
+    DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TableDesignerSpec, TlsMode, UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -77,6 +77,9 @@ impl Driver for SqlServerDriver {
 
     fn user_editor(&self) -> UserEditorSpec {
         UserEditorSpec {
+            // Logins (SQL Server / Windows), Windows groups and server roles are all server-level
+            // principals, so the 常规 page offers all three kinds.
+            kinds: vec![AccountKind::User, AccountKind::Group, AccountKind::Role],
             // SQL Server logins have no user@host split, authentication plugin, password expiry or
             // resource limits, and object-level privilege management is not implemented yet.
             host: false,

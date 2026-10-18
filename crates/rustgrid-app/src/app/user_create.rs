@@ -911,6 +911,7 @@ pub(super) enum CreateField {
 #[derive(Clone, Copy)]
 enum CreateCombo {
     Plugin,
+    Kind,
     Expiry,
     Verification,
     DefaultDatabase,
@@ -1233,6 +1234,12 @@ impl AppView {
             return;
         };
         let spec = self.user_editor_spec(connection_index);
+        // A server without roles (MySQL ≤ 5.7) gets no 类型 control at all, so the dialog cannot
+        // offer a 角色 the server would reject; the Users tab hides its switch for the same reason.
+        let mut spec = spec;
+        if !self.users_roles_supported {
+            spec.kinds.retain(|kind| *kind != AccountKind::Role);
+        }
         let plugins = connection.authentication_plugins();
         let plugin = plugins
             .first()
@@ -1499,6 +1506,29 @@ impl AppView {
             &weak,
             cx,
         ));
+        // Engines that separate users from roles (or groups) get a 类型 dropdown; engines with one
+        // kind show no control at all.
+        self.create_user_kind_combo = if spec.kinds.len() > 1 {
+            let options = spec
+                .kinds
+                .iter()
+                .map(|kind| {
+                    ComboOption::new(account_kind_value(*kind), t!(kind.label_key()).to_string())
+                })
+                .collect();
+            // The window is the create flow, so it opens on the first offered kind (用户).
+            let initial = spec.kinds.first().copied().unwrap_or_default();
+            Some(make_create_combo(
+                theme,
+                options,
+                account_kind_value(initial).to_string(),
+                CreateCombo::Kind,
+                &weak,
+                cx,
+            ))
+        } else {
+            None
+        };
         self.create_user_expiry_combo = Some(make_create_combo(
             theme,
             vec![
@@ -1516,6 +1546,11 @@ impl AppView {
         let schemas = self.driver_supports(connection_index, DriverCapability::Schemas);
         let mut dialog =
             UserCreateDialog::new(connection_index, plugin, spec, catalog, schemas, account);
+        // The 用户 / 角色 switch already decided what is being created, so opening the dialog from
+        // the 角色 list must produce a role rather than a user.
+        if !editing {
+            dialog.editor.account.kind = self.scope_account_kind();
+        }
         // Default a new SQL Server login to the first verification type, so its password fields
         // show before the user touches the dropdown.
         if dialog.editor.account.login_type.trim().is_empty()
@@ -1772,6 +1807,11 @@ impl AppView {
             .as_ref()
             .map(|dialog| dialog.spec.clone())
             .unwrap_or_else(UserEditorSpec::mysql);
+        // The title follows the kind, so a role's window reads 新建角色 / 编辑角色.
+        let role = self
+            .create_user_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.editor.account.kind == AccountKind::Role);
         let title = match self
             .create_user_dialog
             .as_ref()
@@ -1780,8 +1820,13 @@ impl AppView {
             Some((user, host)) => format!(
                 "{} - {}",
                 user_host_label(user, host, &spec),
-                t!("user.create.edit_title")
+                if role {
+                    t!("user.create.edit_role_title")
+                } else {
+                    t!("user.create.edit_title")
+                }
             ),
+            None if role => t!("user.create.new_role_title").to_string(),
             None => t!("user.create.title").to_string(),
         };
         cx.defer(move |cx: &mut App| {
@@ -1877,6 +1922,7 @@ impl AppView {
         self.create_user_password = None;
         self.create_user_confirm = None;
         self.create_user_plugin_combo = None;
+        self.create_user_kind_combo = None;
         self.create_user_expiry_combo = None;
         self.create_user_expiry_days = None;
         self.create_user_password_valid_until = None;
@@ -2012,6 +2058,9 @@ impl AppView {
                     if dialog.is_edit() && dialog.plugin_changed() {
                         dialog.change_password = true;
                     }
+                }
+                CreateCombo::Kind => {
+                    dialog.editor.account.kind = account_kind_from_value(value);
                 }
                 CreateCombo::Expiry => dialog.expiry = CreateExpiry::from_value(value),
                 CreateCombo::Verification => dialog.editor.account.login_type = value.to_string(),
@@ -2811,6 +2860,10 @@ impl AppView {
                 combo.set_selected(account.plugin.clone(), cx)
             });
         }
+        if let Some(combo) = self.create_user_kind_combo.clone() {
+            let kind = account_kind_value(account.kind).to_string();
+            combo.update(cx, |combo, cx| combo.set_selected(kind, cx));
+        }
         if let Some(combo) = self.create_user_expiry_combo.clone() {
             combo.update(cx, |combo, cx| {
                 combo.set_selected(expiry_value(expiry).to_string(), cx)
@@ -3303,6 +3356,24 @@ fn parse_limit(text: &str) -> u64 {
     text.trim().parse::<u64>().unwrap_or(0)
 }
 
+/// The stable combo value of one account kind. Only the display label is translated.
+fn account_kind_value(kind: AccountKind) -> &'static str {
+    match kind {
+        AccountKind::User => "user",
+        AccountKind::Group => "group",
+        AccountKind::Role => "role",
+    }
+}
+
+/// Read back [`account_kind_value`].
+fn account_kind_from_value(value: &str) -> AccountKind {
+    match value {
+        "group" => AccountKind::Group,
+        "role" => AccountKind::Role,
+        _ => AccountKind::User,
+    }
+}
+
 /// The i18n key naming one group of the account-change diff.
 fn user_edit_section_key(section: UserEditSection) -> &'static str {
     match section {
@@ -3402,18 +3473,22 @@ impl AppView {
     /// The window's contents: the child titlebar, the section navigation + content, and the footer.
     pub(super) fn create_user_window_contents(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let Some(title) =
-            self.create_user_dialog
-                .as_ref()
-                .map(|dialog| match dialog.original_account() {
-                    Some((user, host)) => format!(
-                        "{} - {}",
-                        user_host_label(user, host, &dialog.spec),
+        let Some(title) = self.create_user_dialog.as_ref().map(|dialog| {
+            let role = dialog.editor.account.kind == AccountKind::Role;
+            match dialog.original_account() {
+                Some((user, host)) => format!(
+                    "{} - {}",
+                    user_host_label(user, host, &dialog.spec),
+                    if role {
+                        t!("user.create.edit_role_title")
+                    } else {
                         t!("user.create.edit_title")
-                    ),
-                    None => t!("user.create.title").to_string(),
-                })
-        else {
+                    }
+                ),
+                None if role => t!("user.create.new_role_title").to_string(),
+                None => t!("user.create.title").to_string(),
+            }
+        }) else {
             return div().into_any_element();
         };
 
@@ -3787,8 +3862,19 @@ impl AppView {
         // A login with Windows / certificate / key verification has no password of its own.
         let sql_auth =
             !dialog.spec.verification_type || account.login_type.eq_ignore_ascii_case("SQL Server");
+        // A role is a container for privileges, not something anyone logs in as, so the 常规 page
+        // shows only the parts that apply to it.
+        let is_role = account.kind == AccountKind::Role;
 
         let mut identity = div().flex().flex_col().gap_2().w_full();
+        // 类型 is a create-time decision: an existing principal cannot become a role.
+        if dialog.spec.kinds.len() > 1 && !dialog.is_edit() {
+            identity = identity.child(create_row(
+                t!("user.field.kind").to_string(),
+                sized_combo(self.create_user_kind_combo.as_ref(), theme),
+                theme,
+            ));
+        }
         identity = identity.child(create_row(
             t!("user.field.username").to_string(),
             sized_text(self.create_user_user.as_ref(), theme),
@@ -3841,7 +3927,7 @@ impl AppView {
             identity = identity.child(host_choices);
         }
 
-        if dialog.spec.authentication_plugin {
+        if dialog.spec.authentication_plugin && !is_role {
             identity = identity.child(create_row(
                 t!("user.field.plugin").to_string(),
                 sized_combo(self.create_user_plugin_combo.as_ref(), theme),
@@ -3857,7 +3943,7 @@ impl AppView {
             }
         }
 
-        if dialog.spec.verification_type {
+        if dialog.spec.verification_type && !is_role {
             identity = identity.child(create_row(
                 t!("user.field.verification_type").to_string(),
                 sized_combo(self.create_user_verification_combo.as_ref(), theme),
@@ -3865,7 +3951,7 @@ impl AppView {
             ));
         }
 
-        if sql_auth {
+        if sql_auth && !is_role {
             if dialog.is_edit() {
                 let label = t!("user.create.change_password").to_string();
                 identity = identity.child(create_row(
@@ -3915,7 +4001,7 @@ impl AppView {
         }
 
         // SQL Server's 指定旧密码: verify the current password when setting a new one.
-        if dialog.spec.verification_type && sql_auth && dialog.is_edit() {
+        if dialog.spec.verification_type && sql_auth && !is_role && dialog.is_edit() {
             identity = identity.child(create_row(
                 String::new(),
                 check_row(
@@ -3937,9 +4023,10 @@ impl AppView {
             }
         }
 
-        let show_status = dialog.spec.password_expiry
-            || dialog.spec.password_valid_until
-            || dialog.spec.account_lock;
+        let show_status = !is_role
+            && (dialog.spec.password_expiry
+                || dialog.spec.password_valid_until
+                || dialog.spec.account_lock);
         let mut status = div().flex().flex_col().gap_2().w_full();
         if show_status {
             // 锁定该账号 sits beside the expiry dropdown, like the prototype.
@@ -3991,8 +4078,10 @@ impl AppView {
         }
 
         // Oracle's storage/profile settings.
-        let show_storage =
-            dialog.spec.default_tablespace || dialog.spec.profile || dialog.spec.tablespace_quota;
+        let show_storage = !is_role
+            && (dialog.spec.default_tablespace
+                || dialog.spec.profile
+                || dialog.spec.tablespace_quota);
         let mut storage = div().flex().flex_col().gap_2().w_full();
         if dialog.spec.default_tablespace {
             storage = storage.child(create_row(
@@ -4018,7 +4107,7 @@ impl AppView {
 
         // SQL Server's login options: password policy, defaults and a credential.
         let mut login_options = div().flex().flex_col().gap_2().w_full();
-        if dialog.spec.verification_type {
+        if dialog.spec.verification_type && !is_role {
             if sql_auth {
                 login_options = login_options.child(create_row(
                     String::new(),
@@ -4129,10 +4218,11 @@ impl AppView {
                 theme,
             ));
         }
-        let show_limits = dialog.spec.max_questions
-            || dialog.spec.max_updates
-            || dialog.spec.max_connections
-            || dialog.spec.max_user_connections;
+        let show_limits = !is_role
+            && (dialog.spec.max_questions
+                || dialog.spec.max_updates
+                || dialog.spec.max_connections
+                || dialog.spec.max_user_connections);
 
         let mut general = div()
             .id("user-create-general")

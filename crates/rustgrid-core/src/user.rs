@@ -408,11 +408,42 @@ impl PrivilegeCatalog {
     }
 }
 
+/// What an account *is* on its engine.
+///
+/// Engines that do not separate users from roles report [`AccountKind::User`] for every account.
+/// Engines that do (SQL Server's server roles, Oracle's roles) report [`AccountKind::Role`], and
+/// SQL Server's Windows groups report [`AccountKind::Group`]. PostgreSQL has one concept (`ROLE`),
+/// so its login-capable roles are `User` and the rest are `Role`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AccountKind {
+    #[default]
+    User,
+    /// A directory-backed group principal (SQL Server's Windows group).
+    Group,
+    /// A role: a principal that exists to be granted to others.
+    Role,
+}
+
+impl AccountKind {
+    /// The app i18n key naming this kind.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            AccountKind::User => "user.kind.user",
+            AccountKind::Group => "user.kind.group",
+            AccountKind::Role => "user.kind.role",
+        }
+    }
+}
+
 /// One account (a MySQL user or role) as listed by the Users tab.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UserAccount {
     pub user: String,
     pub host: String,
+    /// Whether this account is a user, a group or a role. Engines without the distinction report
+    /// [`AccountKind::User`] and their editor shows no 类型 control.
+    #[serde(default)]
+    pub kind: AccountKind,
     /// The authentication plugin, e.g. `caching_sha2_password`, `mysql_native_password`, `auth_socket`.
     pub plugin: String,
     /// Whether the account has a password set (`authentication_string` is non-empty). The server

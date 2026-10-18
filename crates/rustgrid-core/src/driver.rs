@@ -11,8 +11,8 @@ use crate::model::{
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use crate::user::{
-    ObjectPrivilegeRow, PrivilegeCatalog, ServerSecurableGrant, UserAccount, UserDetails, UserEdit,
-    UserEditSection, UserMapping,
+    AccountKind, ObjectPrivilegeRow, PrivilegeCatalog, ServerSecurableGrant, UserAccount,
+    UserDetails, UserEdit, UserEditSection, UserMapping,
 };
 use crate::view::{ViewDetails, ViewEdit};
 
@@ -159,6 +159,10 @@ pub enum DatabaseEditorTab {
 /// ([`Connection::privilege_catalog`]), not from this spec.
 #[derive(Debug, Clone)]
 pub struct UserEditorSpec {
+    /// The account kinds the editor offers, in 类型 dropdown order. Engines that do not separate
+    /// users from roles (and engines with no accounts at all) leave the single-entry default: the
+    /// 常规 page then shows no 类型 control and the Users list no 类型 column.
+    pub kinds: Vec<AccountKind>,
     /// The user@host identity row and its host quick chips (MySQL/MariaDB).
     pub host: bool,
     /// The authentication-plugin dropdown.
@@ -218,9 +222,11 @@ pub struct UserEditorSpec {
 }
 
 impl UserEditorSpec {
-    /// MySQL/MariaDB: every field.
+    /// MySQL/MariaDB: every field. Accounts can be users or roles (MySQL 8 / MariaDB 10.0.5+), so
+    /// the 常规 page offers a 类型 choice.
     pub fn mysql() -> Self {
         Self {
+            kinds: vec![AccountKind::User, AccountKind::Role],
             host: true,
             authentication_plugin: true,
             password_expiry: true,
@@ -520,6 +526,15 @@ pub trait Connection: Send + Sync {
         Err(Error::Query(
             "user management is not supported by this driver".to_string(),
         ))
+    }
+
+    /// Whether this **server** can hold roles at all, so the Users tab only offers the 用户 / 角色
+    /// switch where the 角色 list can actually be filled (and `CREATE ROLE` would not fail).
+    ///
+    /// Engines whose role support depends on the server version override this: MySQL 8 and MariaDB
+    /// have roles, MySQL 5.7 and earlier do not. Oracle, SQL Server and PostgreSQL always do.
+    async fn roles_supported(&self) -> bool {
+        true
     }
 
     /// The privileges this engine can grant, for the account editor and the object-privilege

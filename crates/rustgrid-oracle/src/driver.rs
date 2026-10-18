@@ -4,12 +4,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use oracledb::PoolConfig;
 use rustgrid_core::{
-    AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldChoice,
-    ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec,
-    ConnectionHomePage, ConnectionPage, ConnectionStandardField, DatabaseEditorSpec,
-    DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerTab,
-    Driver, DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
+    AccountKind, AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig,
+    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
+    ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
+    DatabaseEditorSpec, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
+    DesignerIndexKind, DesignerTab, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
+    DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec, TlsMode,
+    UserEditorSpec,
 };
 
 use crate::connection::OracleConnection;
@@ -69,6 +70,8 @@ impl Driver for OracleDriver {
 
     fn user_editor(&self) -> UserEditorSpec {
         UserEditorSpec {
+            // Oracle keeps users and roles in separate dictionaries, so both are offered.
+            kinds: vec![AccountKind::User, AccountKind::Role],
             // Oracle users have no host, plugin, password expiry or resource limits. The account
             // list has no super-user concept (`is_super_user` is always false).
             host: false,

@@ -1119,10 +1119,18 @@ impl AppView {
                     t!(button_key).to_string(),
                 )
             }
-            Some(DeleteConfirm::User { label, .. }) => (
+            Some(DeleteConfirm::User { label, role, .. }) => (
                 t!("user.delete_title").to_string(),
-                t!("user.delete_confirm", name = label.clone()).to_string(),
-                t!("user.delete_button").to_string(),
+                if *role {
+                    t!("user.delete_role_confirm", name = label.clone()).to_string()
+                } else {
+                    t!("user.delete_confirm", name = label.clone()).to_string()
+                },
+                if *role {
+                    t!("user.delete_role_button").to_string()
+                } else {
+                    t!("user.delete_button").to_string()
+                },
             ),
             Some(DeleteConfirm::Routine { label, .. }) => (
                 t!("routine.delete_title").to_string(),
