@@ -9,6 +9,26 @@ All notable changes to RustGrid are documented in this file. The format is based
 UI labels are quoted as the app shows them, so this file quotes the English strings;
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) quotes the 简体中文 ones.
 
+## [0.0.15] - 2026-10-19
+
+### Added
+
+- The detail lists sort: click a column header to order by it, click again to reverse — on Tables,
+  Views, Functions, Users, Backup and the saved queries.
+- Options → Editor: "Ctrl + mouse wheel resizes the font", on by default — hold Ctrl and scroll over
+  a query editor to zoom it in or out.
+- Options → General: "Restore on startup", on by default — the query tabs, connections, open
+  databases and table tabs of the last run come back.
+- The query result tabs page with ← / → when the result sets do not all fit.
+
+### Changed
+
+- Every detail list is more compact (28px rows), so more rows fit in the pane.
+- Options → General: the object-search switch is now "Keep the object search", on by default, and
+  each list keeps its own text — a table search no longer filters views, functions or queries.
+- The Editor settings (font, size, Show Line Numbers, Word Wrap) reach the editors that are already
+  open, instead of only the tabs opened afterwards.
+
 ## [0.0.14] - 2026-10-18
 
 ### Added
