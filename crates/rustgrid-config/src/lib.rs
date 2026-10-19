@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 13;
+const SETTINGS_VERSION: u32 = 14;
 const SETTINGS_FILE: &str = "settings.json";
 const QUERIES_VERSION: u32 = 1;
 const QUERIES_FILE: &str = "queries.json";
@@ -230,6 +230,9 @@ struct SettingsFile {
     editor_line_numbers: bool,
     #[serde(default = "default_true")]
     editor_word_wrap: bool,
+    /// Ctrl + mouse wheel resizes the SQL editor's font (on by default).
+    #[serde(default = "default_true")]
+    editor_ctrl_wheel_zoom: bool,
     /// Connection-profile ids whose tree node is expanded.
     #[serde(default)]
     expanded_connections: Vec<String>,
@@ -258,9 +261,15 @@ struct SettingsFile {
     /// commands the user changed are stored; an empty list unbinds the command.
     #[serde(default)]
     shortcuts: BTreeMap<String, Vec<String>>,
-    /// Keep the object list's search text when switching tabs (off: switching clears it).
-    #[serde(default)]
+    /// Keep the object list's search text when switching tabs or databases (off: switching
+    /// clears it). On by default; a file written before version 14 turned it on as well, since
+    /// its old default (`false`) was never chosen deliberately.
+    #[serde(default = "default_true")]
     preserve_object_search: bool,
+    /// Restore the previous session (query tabs, connections, open databases and table tabs) on
+    /// the next start.
+    #[serde(default = "default_true")]
+    restore_session: bool,
     /// The most statements one query run may execute (0: no limit).
     #[serde(default = "default_max_statements")]
     max_statements_per_run: u32,
@@ -345,6 +354,8 @@ pub struct AppSettings {
     pub editor_font_size: u32,
     pub editor_line_numbers: bool,
     pub editor_word_wrap: bool,
+    /// Whether Ctrl + mouse wheel resizes the SQL editor's font in place.
+    pub editor_ctrl_wheel_zoom: bool,
     /// Connection-profile ids whose tree node is expanded.
     pub expanded_connections: Vec<String>,
     /// Expanded database names per connection-profile id.
@@ -364,9 +375,12 @@ pub struct AppSettings {
     /// keystroke strings (`"secondary-r"`). Commands not listed keep their built-in keystrokes;
     /// an empty list unbinds the command.
     pub shortcuts: BTreeMap<String, Vec<String>>,
-    /// Keep the object list's search text when switching tabs (off: switching clears it, so
-    /// coming back shows every object).
+    /// Keep the object list's search text when switching tabs or databases (off: switching clears
+    /// it, so coming back shows every object).
     pub preserve_object_search: bool,
+    /// Restore the previous session (open connections, query tabs, open databases and table tabs)
+    /// on the next start.
+    pub restore_session: bool,
     /// The most statements one query run may execute, against accidents (0: no limit).
     pub max_statements_per_run: u32,
     /// Stop a script at its first failing statement (off: run the rest and report each).
@@ -384,6 +398,7 @@ impl Default for AppSettings {
             editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
             editor_line_numbers: true,
             editor_word_wrap: true,
+            editor_ctrl_wheel_zoom: true,
             expanded_connections: Vec::new(),
             expanded_databases: BTreeMap::new(),
             groups: Vec::new(),
@@ -392,7 +407,8 @@ impl Default for AppSettings {
             grid_show_comments: false,
             grid_show_types: false,
             shortcuts: BTreeMap::new(),
-            preserve_object_search: false,
+            preserve_object_search: true,
+            restore_session: true,
             max_statements_per_run: DEFAULT_MAX_STATEMENTS,
             stop_on_error: false,
         }
@@ -616,6 +632,7 @@ impl ConfigStore {
             editor_font_size: file.editor_font_size,
             editor_line_numbers: file.editor_line_numbers,
             editor_word_wrap: file.editor_word_wrap,
+            editor_ctrl_wheel_zoom: file.editor_ctrl_wheel_zoom,
             expanded_connections: file.expanded_connections,
             expanded_databases: file.expanded_databases,
             groups: file.groups,
@@ -628,7 +645,11 @@ impl ConfigStore {
                 file.run_shortcut,
                 file.run_selected_shortcut,
             ),
-            preserve_object_search: file.preserve_object_search,
+            // 保留对象搜索 is on by default now; a file written by an older version kept the old
+            // default (`false`) from before it was a choice worth making, so upgrading turns it on
+            // once. A file this version wrote carries whatever the user chose.
+            preserve_object_search: file.preserve_object_search || file.version < SETTINGS_VERSION,
+            restore_session: file.restore_session,
             max_statements_per_run: file.max_statements_per_run,
             stop_on_error: file.stop_on_error,
         })
@@ -646,6 +667,7 @@ impl ConfigStore {
             editor_font_size: settings.editor_font_size,
             editor_line_numbers: settings.editor_line_numbers,
             editor_word_wrap: settings.editor_word_wrap,
+            editor_ctrl_wheel_zoom: settings.editor_ctrl_wheel_zoom,
             expanded_connections: settings.expanded_connections.clone(),
             expanded_databases: settings.expanded_databases.clone(),
             groups: settings.groups.clone(),
@@ -655,6 +677,7 @@ impl ConfigStore {
             grid_show_types: settings.grid_show_types,
             shortcuts: settings.shortcuts.clone(),
             preserve_object_search: settings.preserve_object_search,
+            restore_session: settings.restore_session,
             max_statements_per_run: settings.max_statements_per_run,
             stop_on_error: settings.stop_on_error,
             run_shortcut: None,
@@ -863,5 +886,25 @@ mod tests {
         let json = serde_json::to_string(&saved).expect("serialize");
         assert!(!json.contains("run_shortcut"));
         assert!(json.contains(r#""query.run":["f9"]"#));
+    }
+
+    #[test]
+    fn preserve_object_search_turns_on_once_and_restore_session_defaults_on() {
+        // A file written before version 14 kept the old default (`false`); upgrading turns the
+        // setting on, because "保留对象搜索" is on by default now.
+        let old = r#"{ "version": 13, "preserve_object_search": false }"#;
+        let file: SettingsFile = serde_json::from_str(old).expect("parse v13");
+        assert!(file.preserve_object_search || file.version < SETTINGS_VERSION);
+        assert!(file.restore_session, "启动时恢复 defaults to on");
+        assert!(
+            file.editor_ctrl_wheel_zoom,
+            "Ctrl + wheel zoom defaults to on"
+        );
+
+        // A file this version wrote keeps the user's choice.
+        let current =
+            format!(r#"{{ "version": {SETTINGS_VERSION}, "preserve_object_search": false }}"#);
+        let file: SettingsFile = serde_json::from_str(&current).expect("parse current");
+        assert!(!(file.preserve_object_search || file.version < SETTINGS_VERSION));
     }
 }

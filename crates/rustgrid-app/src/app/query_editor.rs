@@ -73,6 +73,7 @@ impl AppView {
             readonly: false,
         };
         let weak = cx.weak_entity();
+        let zoom_weak = weak.clone();
         let editor = cx.new(|cx| {
             ui::SqlEditor::new(cx)
                 .options(options)
@@ -80,6 +81,12 @@ impl AppView {
                 .scope(scope_handle)
                 .on_change(Rc::new(move |text, cx| {
                     let _ = weak.update(cx, |app, cx| app.on_query_editor_changed(index, text, cx));
+                }))
+                // Ctrl + wheel resizes the editor font (Options → 编辑器).
+                .on_zoom(Rc::new(move |step, cx| {
+                    zoom_weak
+                        .update(cx, |app, cx| app.zoom_editor_font(step, cx))
+                        .unwrap_or(false)
                 }))
         });
         editor.update(cx, |editor, cx| editor.set_text(sql, cx));
@@ -267,7 +274,15 @@ impl AppView {
             readonly: true,
         };
         let sql = sql.to_string();
-        let editor = cx.new(|cx| ui::SqlEditor::new(cx).options(options));
+        let weak = cx.weak_entity();
+        let editor = cx.new(|cx| {
+            ui::SqlEditor::new(cx)
+                .options(options)
+                .on_zoom(Rc::new(move |step, cx| {
+                    weak.update(cx, |app, cx| app.zoom_editor_font(step, cx))
+                        .unwrap_or(false)
+                }))
+        });
         editor.update(cx, |editor, cx| editor.set_text(sql, cx));
         self.preview_editors.insert(key.to_string(), editor.clone());
         editor.into_any_element()

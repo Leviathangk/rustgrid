@@ -1,6 +1,9 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui::ScrollHandle;
 use rustgrid_core::{
     CellValue, ColumnInfo, Connection, ConnectionProfile, FilterCondition, FilterConjunction,
     FilterNode, FilterOperator, QueryResult, RoutineDetails, RoutineInfo, RoutineKind, SortColumn,
@@ -448,6 +451,16 @@ impl ViewTabState {
     }
 }
 
+/// The query result panel's tab strip (信息 plus one 结果 tag per result set): its horizontal
+/// scroll, and whether the last layout found more tabs than fit. When they do not fit, the strip
+/// shows ◀ / ▶ paging buttons (see `AppView::render_query_result_tabs`), like the main tab bar.
+#[derive(Default)]
+pub struct QueryResultTabs {
+    pub scroll: ScrollHandle,
+    /// Written by the strip's measurement canvas after each layout and read on the next render.
+    pub overflow: Rc<Cell<bool>>,
+}
+
 /// An open SQL editor tab. `sql` is the editable document; `caret` and `anchor` are byte
 /// offsets into it, so they can be matched against `TextLayout` indices directly.
 pub struct QueryTab {
@@ -481,6 +494,8 @@ pub struct QueryTab {
     pub result_grids: Vec<Option<u64>>,
     /// The bottom result panel's active tab: `0` is 信息, `1..=n` is the `n`-th result set.
     pub active_result: usize,
+    /// The result tab strip's scroll state (it pages with ◀ / ▶ when the tabs do not fit).
+    pub result_tabs: QueryResultTabs,
     /// The last run's error, if it failed.
     pub result_error: Option<String>,
     /// The script that was run, shown on the 信息 tab.
@@ -523,6 +538,7 @@ impl QueryTab {
             results: Vec::new(),
             result_grids: Vec::new(),
             active_result: 0,
+            result_tabs: QueryResultTabs::default(),
             result_error: None,
             last_sql: String::new(),
             last_elapsed: None,

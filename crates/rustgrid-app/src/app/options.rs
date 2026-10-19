@@ -1,11 +1,12 @@
 //! The Options window (设置): a separate OS window, opened from the titlebar's settings button.
 //!
-//! It hosts the 常规 page (the language selector — the app theme is still chosen from the titlebar
-//! dropdown), the 编辑器 page, which configures the SQL editor (a live preview, font family, font
-//! size, syntax theme and the line-number / word-wrap toggles), the 快捷键 page (the query editor's
-//! 运行 / 运行已选 keystrokes), the 数据 page (grid display) and 关于. Every edit is staged and only
-//! applied on 确定, so 取消 discards them. Like the Export/Import/User windows, `AppView` owns the
-//! state and this module renders it; `AppView::sync_dialog` is not involved.
+//! It hosts the 常规 page (the language selector, 启动时恢复 and 保留对象搜索), the 编辑器 page,
+//! which configures the SQL editor (a live preview, font family, font size, the Ctrl + wheel zoom,
+//! and the line-number / word-wrap toggles), the 快捷键 page (the query editor's 运行 / 运行已选
+//! keystrokes), the 数据 page (grid display) and 关于. Every edit is staged and only applied on 确定,
+//! so 取消 discards them — and 确定 pushes the 编辑器 settings into the editors that are already
+//! open instead of leaving them for the next tab. Like the Export/Import/User windows, `AppView`
+//! owns the state and this module renders it; `AppView::sync_dialog` is not involved.
 
 use super::*;
 use gpui_kit::component::switch::Switch;
@@ -31,8 +32,9 @@ const EDITOR_FONTS: &[&str] = &[
     "Courier New",
 ];
 
-/// The font sizes offered by the editor size dropdown, in px.
-const EDITOR_FONT_SIZES: &[u32] = &[10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24];
+/// The font sizes offered by the editor size dropdown, in px. Also the ladder the query editor's
+/// Ctrl + wheel zoom steps along (see `AppView::zoom_editor_font`).
+pub(super) const EDITOR_FONT_SIZES: &[u32] = &[10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24];
 
 /// The SQL sample shown in the editor page's live preview.
 const EDITOR_PREVIEW_SQL: &str = "SELECT u.id, u.name\nFROM users u\nORDER BY u.id LIMIT 5;";
@@ -199,10 +201,12 @@ impl AppView {
         self.options_editor_font_size = self.editor_font_size;
         self.options_editor_line_numbers = self.editor_line_numbers;
         self.options_editor_word_wrap = self.editor_word_wrap;
+        self.options_editor_ctrl_wheel_zoom = self.editor_ctrl_wheel_zoom;
         self.options_grid_show_comments = self.grid_show_comments;
         self.options_grid_show_types = self.grid_show_types;
         self.options_shortcuts = self.shortcuts.clone();
         self.options_preserve_object_search = self.preserve_object_search;
+        self.options_restore_session = self.restore_session;
         self.options_stop_on_error = self.stop_on_error;
         self.set_options_max_statements(self.max_statements_per_run.to_string(), cx);
         self.recording_shortcut = None;
@@ -394,11 +398,17 @@ impl AppView {
         self.editor_font_size = self.options_editor_font_size;
         self.editor_line_numbers = self.options_editor_line_numbers;
         self.editor_word_wrap = self.options_editor_word_wrap;
+        self.editor_ctrl_wheel_zoom = self.options_editor_ctrl_wheel_zoom;
         self.grid_show_comments = self.options_grid_show_comments;
         self.grid_show_types = self.options_grid_show_types;
         self.shortcuts = self.options_shortcuts.clone();
         self.preserve_object_search = self.options_preserve_object_search;
+        self.restore_session = self.options_restore_session;
         self.stop_on_error = self.options_stop_on_error;
+        // The 编辑器 settings reach the editors that are already open, not only the next one: the
+        // font is rendered from the wrapper's options every frame, and 显示行号 / 自动换行 are
+        // pushed into each editor's state here.
+        self.apply_editor_display_settings(window, cx);
         // An empty or invalid entry keeps the current limit.
         if let Ok(limit) = self.options_max_statements.trim().parse::<u32>() {
             self.max_statements_per_run = limit;
@@ -1012,6 +1022,25 @@ impl AppView {
             .child(
                 toggle_row(
                     self.theme,
+                    "options-restore-session",
+                    t!("options.general.restore_session").to_string(),
+                    self.options_restore_session,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.general.restore_session").to_string(), cx),
+                )
+                .tooltip(ui::text_tooltip(
+                    t!("options.general.restore_session_hint").to_string(),
+                ))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_restore_session = !this.options_restore_session;
+                    cx.notify();
+                })),
+            )
+            .child(
+                toggle_row(
+                    self.theme,
                     "options-preserve-object-search",
                     t!("options.general.preserve_object_search").to_string(),
                     self.options_preserve_object_search,
@@ -1023,6 +1052,9 @@ impl AppView {
                         cx,
                     ),
                 )
+                .tooltip(ui::text_tooltip(
+                    t!("options.general.preserve_object_search_hint").to_string(),
+                ))
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.options_preserve_object_search = !this.options_preserve_object_search;
                     cx.notify();
@@ -1173,6 +1205,25 @@ impl AppView {
                     cx.notify();
                 })),
             )
+            .child(
+                toggle_row(
+                    theme,
+                    "options-editor-ctrl-wheel-zoom",
+                    t!("options.editor.ctrl_wheel_zoom").to_string(),
+                    self.options_editor_ctrl_wheel_zoom,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.editor.ctrl_wheel_zoom").to_string(), cx),
+                )
+                .tooltip(ui::text_tooltip(
+                    t!("options.editor.ctrl_wheel_zoom_hint").to_string(),
+                ))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_editor_ctrl_wheel_zoom = !this.options_editor_ctrl_wheel_zoom;
+                    cx.notify();
+                })),
+            )
     }
 
     /// The live preview: the sample SQL painted with the app theme's SQL colors and the staged
@@ -1234,10 +1285,12 @@ impl AppView {
                     this.options_editor_font_size = DEFAULT_EDITOR_FONT_SIZE;
                     this.options_editor_line_numbers = true;
                     this.options_editor_word_wrap = true;
+                    this.options_editor_ctrl_wheel_zoom = true;
                     this.options_grid_show_comments = false;
                     this.options_grid_show_types = false;
                     this.options_shortcuts.clear();
-                    this.options_preserve_object_search = false;
+                    this.options_preserve_object_search = true;
+                    this.options_restore_session = true;
                     this.options_stop_on_error = false;
                     this.set_options_max_statements(
                         rustgrid_config::DEFAULT_MAX_STATEMENTS.to_string(),

@@ -12,8 +12,9 @@ use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use gpui::{
-    App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, px,
+    App, AppContext, Context, DispatchPhase, Entity, HitboxBehavior, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollDelta, ScrollWheelEvent, SharedString, Styled,
+    Subscription, Window, canvas, div, px,
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{
@@ -52,10 +53,20 @@ impl Default for SqlEditorOptions {
 /// Called with the whole new text whenever the editor's content changes.
 pub(crate) type SqlEditorChange = Rc<dyn Fn(&str, &mut App)>;
 
+/// Called when the pointer scrolls over the editor with Ctrl/⌘ held, with the wheel's direction
+/// (`> 0` zooms in). The app changes the font-size setting and pushes it back through
+/// [`SqlEditor::set_font`]; the returned flag says whether the gesture was consumed (the setting
+/// can be off, or the size already at its end), so an unconsumed wheel still scrolls the editor.
+pub(crate) type SqlEditorZoom = Rc<dyn Fn(f32, &mut App) -> bool>;
+
 pub(crate) struct SqlEditor {
     text: String,
     options: SqlEditorOptions,
+    /// 自动换行: applied to the inner state (whose own default is also on).
+    word_wrap: bool,
     on_change: Option<SqlEditorChange>,
+    /// Ctrl + wheel zoom, when the app wires it up (Options → 编辑器, on by default).
+    on_zoom: Option<SqlEditorZoom>,
     /// The provider, or a factory that builds it with the inner state's context.
     provider: Option<Rc<dyn gpui_kit::component::input::CompletionProvider>>,
     /// The provider's live connection/database/schema scope, so re-scoping does not need to
@@ -89,7 +100,9 @@ impl SqlEditor {
         Self {
             text: String::new(),
             options: SqlEditorOptions::default(),
+            word_wrap: true,
             on_change: None,
+            on_zoom: None,
             provider: None,
             scope: None,
             state: None,
@@ -114,6 +127,47 @@ impl SqlEditor {
     pub(crate) fn on_change(mut self, callback: SqlEditorChange) -> Self {
         self.on_change = Some(callback);
         self
+    }
+
+    /// Handle Ctrl + mouse wheel over the editor (resizing the font) with `callback`.
+    pub(crate) fn on_zoom(mut self, callback: SqlEditorZoom) -> Self {
+        self.on_zoom = Some(callback);
+        self
+    }
+
+    /// Change the font without touching the inner state: the render applies the wrapped options
+    /// every frame, so this is enough (and needs no window) — the Ctrl + wheel zoom path.
+    pub(crate) fn set_font(
+        &mut self,
+        font_family: SharedString,
+        font_size: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.options.font_family = font_family;
+        self.options.font_size = font_size;
+        cx.notify();
+    }
+
+    /// Apply the 编辑器 display settings to an already-built editor: the font (per frame) plus the
+    /// line-number and word-wrap switches, which live on the inner state and need a window.
+    pub(crate) fn set_display_options(
+        &mut self,
+        font_family: SharedString,
+        font_size: f32,
+        line_number: bool,
+        word_wrap: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.options.line_number = line_number;
+        self.word_wrap = word_wrap;
+        self.set_font(font_family, font_size, cx);
+        if let Some(state) = self.state.clone() {
+            state.update(cx, |state, cx| {
+                state.set_line_number(line_number, window, cx);
+                state.set_soft_wrap(word_wrap, window, cx);
+            });
+        }
     }
 
     pub(crate) fn provider(
@@ -316,6 +370,7 @@ impl SqlEditor {
         if self.state.is_none() {
             let options = self.options.clone();
             let provider = self.provider.clone();
+            let word_wrap = self.word_wrap;
             let state = cx.new(|cx| {
                 let language = if options.language.as_ref() == "sql" {
                     plain_sql_language()
@@ -325,6 +380,9 @@ impl SqlEditor {
                 let mut state = EditorState::new(window, cx)
                     .language(language)
                     .line_number(options.line_number);
+                // The kit's own default is on; the setting is applied explicitly so a wrap choice
+                // made in the Options window is what the editor actually uses.
+                state.set_soft_wrap(word_wrap, window, cx);
                 if let Some(provider) = provider {
                     state.lsp_mut().completion_provider = Some(provider);
                 }
@@ -433,7 +491,7 @@ impl Render for SqlEditor {
             return div().into_any_element();
         };
         let editor = Editor::new(&state)
-            .font_family(family)
+            .font_family(family.clone())
             .text_size(px(font_size))
             .bordered(false)
             .readonly(readonly)
@@ -447,17 +505,55 @@ impl Render for SqlEditor {
             // documents scroll inside the editor instead of overflowing the frame.
             .flex_1()
             .min_h(px(0.0));
-        div()
+        let mut frame = div()
             .id("sql-editor-frame")
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .w_full()
             .overflow_hidden()
-            .child(editor)
-            .test_support()
-            .into_any_element()
+            .child(editor);
+        if let Some(zoom) = self.on_zoom.clone() {
+            // Ctrl/⌘ + wheel resizes the font. A plain wheel must still scroll the editor, and
+            // scrollable containers (the editor's own viewport) handle the wheel in the *bubble*
+            // phase — so the gesture is claimed here, in the capture phase, over a hitbox that
+            // covers the editor, exactly like the table grid's wheel handling.
+            frame = frame.child(
+                canvas(
+                    |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                    move |_bounds, hitbox, window, _cx| {
+                        window.on_mouse_event(
+                            move |event: &ScrollWheelEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture
+                                    || !hitbox.should_handle_scroll(window)
+                                {
+                                    return;
+                                }
+                                if !(event.modifiers.control || event.modifiers.platform) {
+                                    return;
+                                }
+                                let dy = match event.delta {
+                                    ScrollDelta::Lines(delta) => delta.y,
+                                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                                };
+                                if dy == 0.0 {
+                                    return;
+                                }
+                                // The wheel's natural direction: up (negative delta) zooms in.
+                                if zoom(if dy < 0.0 { 1.0 } else { -1.0 }, cx) {
+                                    cx.stop_propagation();
+                                }
+                            },
+                        );
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
+        frame.test_support().into_any_element()
     }
 }
 

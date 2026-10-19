@@ -1073,6 +1073,11 @@ impl AppView {
                 .nth(tab - 1)
         };
         state.grid_id = grid_id;
+        // Reveal the chosen tag in the (paged) strip. 信息 is pinned outside it, so only the
+        // 结果 tags are items of its scroll handle.
+        if tab > 0 {
+            state.result_tabs.scroll.scroll_to_item(tab - 1);
+        }
         self.active_grid = grid_id.and_then(|id| {
             self.grids
                 .iter()
@@ -1237,6 +1242,8 @@ impl AppView {
                     tab.results = results;
                     tab.result_grids = result_grids;
                     tab.active_result = active_result;
+                    // A new run starts the result tab strip from its first tag again.
+                    tab.result_tabs.scroll.set_offset(Point::default());
                     tab.grid_id = active_grid_id;
                     tab.last_sql = sql;
                     tab.last_elapsed = Some(elapsed);

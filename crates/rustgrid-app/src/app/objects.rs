@@ -70,6 +70,46 @@ struct ObjectRenderData {
     rename: Option<RenameRow>,
 }
 
+/// The sort value of one Tables/Views 详细列表 cell, for the column at `column` (a column the
+/// category does not show cannot be active).
+fn table_sort_key(
+    table: &rustgrid_core::TableInfo,
+    status: Option<&rustgrid_core::TableStatus>,
+    category: Category,
+    column: usize,
+) -> SortKey {
+    let yes = t!("common.yes").to_string();
+    let no = t!("common.no").to_string();
+    match category {
+        Category::Views => match column {
+            1 => SortKey::text(if table.updatable { &yes } else { &no }),
+            _ => SortKey::text(&object_display(&table.name)),
+        },
+        _ => match column {
+            1 => SortKey::number(status.and_then(|s| s.auto_increment).map(|v| v as f64)),
+            2 => SortKey::opt_text(status.and_then(|s| s.updated.as_deref())),
+            3 => SortKey::number(status.and_then(|s| s.data_length).map(|v| v as f64)),
+            4 => SortKey::opt_text(status.and_then(|s| s.engine.as_deref())),
+            5 => SortKey::number(status.and_then(|s| s.rows).map(|v| v as f64)),
+            6 => SortKey::opt_text(status.and_then(|s| s.comment.as_deref())),
+            _ => SortKey::text(&object_display(&table.name)),
+        },
+    }
+}
+
+/// The sort value of one Functions 详细列表 cell: 名 / 修改日期 / 函数类型 / 决定性 / 注释.
+fn routine_sort_key(routine: &RoutineInfo, column: usize) -> SortKey {
+    let yes = t!("common.yes").to_string();
+    let no = t!("common.no").to_string();
+    match column {
+        1 => SortKey::opt_text(routine.modified.as_deref()),
+        2 => SortKey::text(routine.kind.sql_name()),
+        3 => SortKey::text(if routine.deterministic { &yes } else { &no }),
+        4 => SortKey::text(&single_line(&routine.comment)),
+        _ => SortKey::text(&object_display(&routine.name)),
+    }
+}
+
 /// The schema prefix of a schema-qualified object name (`dbo` in `dbo.users`).
 fn schema_of(name: &str) -> Option<&str> {
     name.split_once('.')
@@ -751,6 +791,15 @@ impl AppView {
         cx.notify();
     }
 
+    /// Clear the object search unless 保留对象搜索 is on: the search is then kept when the shown
+    /// tab, database, schema or connection changes, so one search covers them all (Navicat's
+    /// behaviour with the setting on).
+    pub(super) fn clear_object_search_unless_kept(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.preserve_object_search && !self.object_search.is_empty() {
+            self.clear_object_search(cx);
+        }
+    }
+
     /// The content of the object status shown in the window's bottom status bar: item count on the
     /// left, connection and database on the right (Navicat layout).
     pub(super) fn render_object_status(
@@ -891,6 +940,8 @@ impl ObjectPane {
             detail_scroll: DetailScroll::default(),
             table_columns: Rc::new(RefCell::new(DetailColumns::default())),
             routine_columns: Rc::new(RefCell::new(DetailColumns::default())),
+            table_sort: DetailSort::default(),
+            routine_sort: DetailSort::default(),
             visible_keys: Vec::new(),
             focus: cx.focus_handle(),
             theme,
@@ -898,6 +949,21 @@ impl ObjectPane {
             typeahead: String::new(),
             typeahead_at: None,
             nav_generation: 0,
+        }
+    }
+
+    /// The Tables/Views 详细列表's active sort, ignoring a column the current category does not
+    /// show (the pane stays while the main tab switches Tables ↔ Views).
+    fn effective_table_sort(&self) -> DetailSort {
+        let columns = if self.category == Category::Views {
+            2
+        } else {
+            7
+        };
+        if self.table_sort.column < columns {
+            self.table_sort
+        } else {
+            DetailSort::default()
         }
     }
 
@@ -952,7 +1018,9 @@ impl ObjectPane {
                         })
                         .collect();
                     let mut items = items;
-                    items.sort_by_key(|routine| routine.name.to_lowercase());
+                    // 名 / 修改日期 / 函数类型 / 决定性 / 注释, by the header the user clicked.
+                    let sort = self.routine_sort;
+                    sort.sort_by(&mut items, |routine| routine_sort_key(routine, sort.column));
                     self.visible_keys
                         .extend(items.iter().map(|routine| routine.name.clone()));
                     match mode {
@@ -991,8 +1059,18 @@ impl ObjectPane {
                     })
                     .collect();
                 let mut items = items;
-                // Present objects in name order (Navicat's default), not the driver's catalog order.
-                items.sort_by_key(|table| table.name.to_lowercase());
+                // The clicked header decides the order (name order by default, Navicat's default),
+                // not the driver's catalog order.
+                let category = self.category;
+                let sort = self.effective_table_sort();
+                sort.sort_by(&mut items, |table| {
+                    let status = table_statuses.as_ref().and_then(|list| {
+                        list.iter()
+                            .find(|(name, _)| name == &table.name)
+                            .map(|(_, status)| status)
+                    });
+                    table_sort_key(table, status, category, sort.column)
+                });
                 self.visible_keys
                     .extend(items.iter().map(|table| table.name.clone()));
                 match mode {
@@ -1123,15 +1201,26 @@ impl ObjectPane {
         };
         let fitted = self.table_detail_widths(tables, statuses);
         let widths = self.table_columns.borrow_mut().resolve(&fitted);
+        let sort = self.effective_table_sort();
         let mut header = ui::detail_header_row(theme);
         for (index, label) in labels.into_iter().enumerate() {
             let width = widths[index];
+            let cell = ui::detail_header_cell(
+                SharedString::from(format!("object-sort-{index}")),
+                label,
+                sort.indicator(index),
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.table_sort.toggle(index);
+                    cx.notify();
+                }),
+            );
             header = header.child(ui::detail_header_column(
                 SharedString::from(format!("object-resize-{index}")),
                 width,
                 self.table_columns.borrow().resizing(index),
                 theme,
-                ui::detail_header_cell_plain(label, theme),
+                cell,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                     this.table_columns
@@ -1235,7 +1324,7 @@ impl ObjectPane {
                 } else {
                     theme.icon_table
                 },
-                22.0,
+                ui::DETAIL_BADGE_SIZE,
             ))
             .child(label);
         ui::detail_row(
@@ -1539,12 +1628,22 @@ impl ObjectPane {
         .enumerate()
         {
             let width = widths[index];
+            let cell = ui::detail_header_cell(
+                SharedString::from(format!("routine-sort-{index}")),
+                label,
+                self.routine_sort.indicator(index),
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.routine_sort.toggle(index);
+                    cx.notify();
+                }),
+            );
             header = header.child(ui::detail_header_column(
                 SharedString::from(format!("routine-resize-{index}")),
                 width,
                 self.routine_columns.borrow().resizing(index),
                 theme,
-                ui::detail_header_cell_plain(label, theme),
+                cell,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                     this.routine_columns
@@ -1634,7 +1733,7 @@ impl ObjectPane {
                 .child(ui::leading_icon_badge(
                     routine_icon(kind),
                     routine_icon_color(kind, theme),
-                    22.0,
+                    ui::DETAIL_BADGE_SIZE,
                 ))
                 .child(ui::detail_cell_text(
                     SharedString::from(format!(

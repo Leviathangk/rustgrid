@@ -58,9 +58,9 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::time_field::{TimeField, TimeFieldState, TimePrecision};
 
 use ui::{
-    ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, DetailScroll, TextInput,
-    TextInputOptions, ViewMode, checkbox_box, main_separator, scrollbar_fractions, scrollbar_thumb,
-    toolbar_separator,
+    ButtonKind, ColumnGrid, ComboBox, ComboOption, DetailColumns, DetailScroll, DetailSort,
+    SortKey, TextInput, TextInputOptions, ViewMode, checkbox_box, main_separator,
+    scrollbar_fractions, scrollbar_thumb, toolbar_separator,
 };
 
 // Cell-navigation actions for the in-place grid editor. gpui-kit's `Root` binds `tab`/`shift-tab`
@@ -1456,6 +1456,10 @@ struct ObjectPane {
     table_columns: Rc<RefCell<DetailColumns>>,
     /// The Functions 详细列表's content-fitted / user-resized column widths.
     routine_columns: Rc<RefCell<DetailColumns>>,
+    /// The Tables/Views 详细列表's active sort (点击表头 column).
+    table_sort: DetailSort,
+    /// The Functions 详细列表's active sort.
+    routine_sort: DetailSort,
     /// The visible row keys of the last render, in display order (Shift-extend / marquee base).
     visible_keys: Vec<String>,
     /// Focus target for the list, so F2 reaches [`AppView::begin_rename_table`].
@@ -2214,8 +2218,11 @@ pub struct AppView {
     /// The user's keymap overrides (command id -> keystrokes), edited on the Options window's
     /// 快捷键 page; see [`keymap`].
     shortcuts: BTreeMap<String, Vec<String>>,
-    /// Keep the object search when switching tabs (Options → General).
+    /// Keep the object search when switching tabs or databases (Options → General).
     preserve_object_search: bool,
+    /// Restore the previous session at startup: connections, query tabs, open databases and table
+    /// tabs (Options → General, 启动时恢复). Read once at startup, like the settings themselves.
+    restore_session: bool,
     /// The most statements one query run may execute, 0 for no limit (Options → General).
     max_statements_per_run: u32,
     /// Stop a script at its first failing statement (Options → General).
@@ -2273,6 +2280,8 @@ pub struct AppView {
     editor_font_size: u32,
     editor_line_numbers: bool,
     editor_word_wrap: bool,
+    /// Whether Ctrl + mouse wheel resizes the SQL editor's font (Options → 编辑器).
+    editor_ctrl_wheel_zoom: bool,
     /// The Options window's selected left-nav page.
     options_section: OptionsSection,
     /// Staged editor settings, applied on OK so Cancel discards them.
@@ -2280,12 +2289,20 @@ pub struct AppView {
     options_editor_font_size: u32,
     options_editor_line_numbers: bool,
     options_editor_word_wrap: bool,
+    /// The staged 编辑器 page toggle (Ctrl + wheel zooms the editor font), applied on OK.
+    options_editor_ctrl_wheel_zoom: bool,
     /// The staged 数据 page toggle (grid field comments), applied on OK.
     options_grid_show_comments: bool,
     /// The staged 数据 page toggle (grid field types), applied on OK.
     options_grid_show_types: bool,
     /// The staged 常规 page toggle (keep the object search across tab switches), applied on OK.
     options_preserve_object_search: bool,
+    /// The staged 常规 page toggle (restore the session at the next start), applied on OK.
+    options_restore_session: bool,
+    /// The Users 详细列表's active sort (点击表头 column).
+    users_sort: DetailSort,
+    /// The Backup 详细列表's active sort (点击表头 column).
+    backup_sort: DetailSort,
     /// The staged 常规 page statement limit (as typed) and stop-on-error toggle, applied on OK.
     options_max_statements: String,
     options_max_statements_input: Option<Entity<TextInput>>,
@@ -2678,11 +2695,16 @@ impl AppView {
         // Every user command's keystrokes: built-in defaults, replaced by the settings' overrides,
         // and re-bound when the Options window applies a change.
         let bound_keys = keymap::bind_keymap(cx, &settings.shortcuts, &[]);
-        // Restore the last session once the view exists, and save it on quit.
-        cx.spawn(async move |this, cx| {
-            let _ = this.update(cx, |view, cx| view.restore_session(cx));
-        })
-        .detach();
+        // Restore the last session once the view exists — unless 启动时恢复 is off, in which case
+        // nothing is restored *and* nothing is saved (a session file is only written once
+        // `restore_session` has run), so the next start is a clean one.
+        let restore_session = settings.restore_session;
+        if restore_session {
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |view, cx| view.restore_session(cx));
+            })
+            .detach();
+        }
         cx.on_app_quit(|view, cx| {
             view.save_session_now(cx);
             async {}
@@ -2900,6 +2922,7 @@ impl AppView {
             grid_field_layouts: settings.grid_field_layouts.clone(),
             shortcuts: settings.shortcuts.clone(),
             preserve_object_search: settings.preserve_object_search,
+            restore_session: settings.restore_session,
             max_statements_per_run: settings.max_statements_per_run,
             stop_on_error: settings.stop_on_error,
             query_info_editors: std::collections::HashMap::new(),
@@ -2962,14 +2985,19 @@ impl AppView {
             editor_font_size: settings.editor_font_size,
             editor_line_numbers: settings.editor_line_numbers,
             editor_word_wrap: settings.editor_word_wrap,
+            editor_ctrl_wheel_zoom: settings.editor_ctrl_wheel_zoom,
             options_section: OptionsSection::General,
             options_editor_font_family: settings.editor_font_family.clone(),
             options_editor_font_size: settings.editor_font_size,
             options_editor_line_numbers: settings.editor_line_numbers,
             options_editor_word_wrap: settings.editor_word_wrap,
+            options_editor_ctrl_wheel_zoom: settings.editor_ctrl_wheel_zoom,
             options_grid_show_comments: settings.grid_show_comments,
             options_grid_show_types: settings.grid_show_types,
             options_preserve_object_search: settings.preserve_object_search,
+            options_restore_session: settings.restore_session,
+            users_sort: DetailSort::default(),
+            backup_sort: DetailSort::default(),
             options_max_statements: settings.max_statements_per_run.to_string(),
             options_max_statements_input: None,
             options_stop_on_error: settings.stop_on_error,
@@ -3265,6 +3293,7 @@ impl AppView {
             editor_font_size: self.editor_font_size,
             editor_line_numbers: self.editor_line_numbers,
             editor_word_wrap: self.editor_word_wrap,
+            editor_ctrl_wheel_zoom: self.editor_ctrl_wheel_zoom,
             expanded_connections,
             expanded_databases,
             groups: self.tree_layout.clone(),
@@ -3274,6 +3303,7 @@ impl AppView {
             grid_show_types: self.grid_show_types,
             shortcuts: self.shortcuts.clone(),
             preserve_object_search: self.preserve_object_search,
+            restore_session: self.restore_session,
             max_statements_per_run: self.max_statements_per_run,
             stop_on_error: self.stop_on_error,
         }) {
@@ -3340,6 +3370,87 @@ impl AppView {
     /// The SQL editor's font size in px, clamped to a usable range.
     pub(super) fn editor_font_size(&self) -> f32 {
         self.editor_font_size.clamp(8, 48) as f32
+    }
+
+    /// Ctrl + wheel over a SQL editor: step the font size to the next/previous size the 编辑器
+    /// page offers (`step > 0` zooms in), apply it to every open editor and remember it. The step
+    /// keeps the size inside the dropdown's list, so the 字号 field always shows what is in use.
+    /// Returns whether the gesture was consumed (an unconsumed wheel still scrolls the editor).
+    pub(super) fn zoom_editor_font(&mut self, step: f32, cx: &mut Context<'_, Self>) -> bool {
+        if !self.editor_ctrl_wheel_zoom || step == 0.0 {
+            return false;
+        }
+        let sizes = options::EDITOR_FONT_SIZES;
+        let current = self.editor_font_size;
+        let next = if step > 0.0 {
+            sizes.iter().copied().find(|size| *size > current)
+        } else {
+            sizes.iter().rev().copied().find(|size| *size < current)
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        self.editor_font_size = next;
+        // Mirror the change into the staged value, so the Options window's live preview follows the
+        // zoom and a later 确定 does not put the old size back.
+        self.options_editor_font_size = next;
+        self.apply_editor_font(cx);
+        self.persist_settings();
+        cx.notify();
+        true
+    }
+
+    /// The SQL editors the app owns in the main window: query editors, their 信息 logs and the
+    /// routine/view SQL 预览 panes.
+    fn open_sql_editors(&self) -> Vec<Entity<ui::SqlEditor>> {
+        self.query_editors
+            .iter()
+            .flatten()
+            .chain(self.query_info_editors.values())
+            .chain(self.preview_editors.values())
+            .cloned()
+            .collect()
+    }
+
+    /// Push the current editor font into every open SQL editor (the Ctrl + wheel zoom path; the
+    /// font is what the editor renders, so no window is needed).
+    fn apply_editor_font(&mut self, cx: &mut Context<'_, Self>) {
+        let font: SharedString = self.editor_font().into();
+        let size = self.editor_font_size();
+        for editor in self.open_sql_editors() {
+            editor.update(cx, |editor, cx| editor.set_font(font.clone(), size, cx));
+        }
+    }
+
+    /// Apply the 编辑器 settings (font, size, 显示行号, 自动换行) to every open SQL editor, so a
+    /// change takes effect at once instead of only in editors opened afterwards. The 信息 log and
+    /// the SQL 预览 panes keep their line numbers off, exactly as they are created.
+    pub(super) fn apply_editor_display_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let font: SharedString = self.editor_font().into();
+        let size = self.editor_font_size();
+        let word_wrap = self.editor_word_wrap;
+        let line_numbers = self.editor_line_numbers;
+        let query_editors = self.query_editors.clone();
+        for editor in query_editors.into_iter().flatten() {
+            editor.update(cx, |editor, cx| {
+                editor.set_display_options(font.clone(), size, line_numbers, word_wrap, window, cx)
+            });
+        }
+        let plain: Vec<Entity<ui::SqlEditor>> = self
+            .query_info_editors
+            .values()
+            .chain(self.preview_editors.values())
+            .cloned()
+            .collect();
+        for editor in plain {
+            editor.update(cx, |editor, cx| {
+                editor.set_display_options(font.clone(), size, false, word_wrap, window, cx)
+            });
+        }
     }
 
     /// The remembered list layout for a page, defaulting to 详细列表.
@@ -4127,9 +4238,7 @@ impl Render for AppView {
             let first = self.last_shown_tab.is_none();
             self.last_shown_tab = Some(shown);
             if !first {
-                if !self.preserve_object_search && !self.object_search.is_empty() {
-                    self.clear_object_search(cx);
-                }
+                self.clear_object_search_unless_kept(cx);
                 match shown {
                     None => {
                         if let Some(pane) = self.object_pane.as_ref() {

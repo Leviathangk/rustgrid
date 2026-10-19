@@ -42,7 +42,12 @@ pub(crate) const GRID_BOTTOM_MARGIN: f32 = 16.0;
 
 /// The height of a 详细列表's sticky header strip, shared by [`detail_header_row`] and the
 /// vertical scrollbar, which starts below it.
-pub(crate) const DETAIL_HEADER_HEIGHT: f32 = 34.0;
+pub(crate) const DETAIL_HEADER_HEIGHT: f32 = 32.0;
+/// The height of one 详细列表 row. Every page uses it through [`detail_row`], so all detail lists
+/// have the same (deliberately compact) density.
+pub(crate) const DETAIL_ROW_HEIGHT: f32 = 28.0;
+/// The side of the leading icon badge in a 详细列表 row.
+pub(crate) const DETAIL_BADGE_SIZE: f32 = 18.0;
 /// The thickness of the app-drawn scrollbars, matching [`hscrollbar_track`] / [`vscrollbar_track`].
 pub(crate) const DETAIL_SCROLLBAR_THICKNESS: f32 = 14.0;
 
@@ -764,17 +769,112 @@ pub(crate) fn detail_header_cell(
         )
 }
 
-/// A non-sortable header cell of a 详细列表 (used by columns the page does not sort by).
-pub(crate) fn detail_header_cell_plain(label: String, theme: Theme) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .h_full()
-        .whitespace_nowrap()
-        .text_size(px(12.0))
-        .text_color(rgb(theme.text_muted))
-        .child(label)
+/// One 详细列表 cell's comparable value, for a header-click sort. Pages map their columns onto
+/// these (a missing value, text compared case-insensitively, or a number). The ordering is total,
+/// so the key can be handed to `sort_by_cached_key`.
+#[derive(Clone)]
+pub(crate) enum SortKey {
+    /// No value (e.g. a table whose status did not load). Ascending, these come first.
+    Empty,
+    Text(String),
+    /// A number carrying a value that may be absent; `None` sorts as [`SortKey::Empty`].
+    Number(Option<f64>),
+}
+
+impl SortKey {
+    /// A text key (case-insensitive; an empty string counts as missing).
+    pub(crate) fn text(value: &str) -> Self {
+        let value = value.trim();
+        if value.is_empty() {
+            Self::Empty
+        } else {
+            Self::Text(value.to_lowercase())
+        }
+    }
+
+    /// A text key from an optional value.
+    pub(crate) fn opt_text(value: Option<&str>) -> Self {
+        value.map(Self::text).unwrap_or(Self::Empty)
+    }
+
+    /// A number key from an optional value.
+    pub(crate) fn number(value: Option<f64>) -> Self {
+        match value {
+            Some(value) => Self::Number(Some(value)),
+            None => Self::Empty,
+        }
+    }
+}
+
+impl Ord for SortKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (Self::Empty, Self::Empty) => Ordering::Equal,
+            (Self::Empty, _) => Ordering::Less,
+            (_, Self::Empty) => Ordering::Greater,
+            (Self::Number(left), Self::Number(right)) => left
+                .unwrap_or(f64::NEG_INFINITY)
+                .total_cmp(&right.unwrap_or(f64::NEG_INFINITY)),
+            (Self::Text(left), Self::Text(right)) => left.cmp(right),
+            // Mixed kinds never come from one column; order them deterministically anyway.
+            (Self::Text(_), Self::Number(_)) => Ordering::Less,
+            (Self::Number(_), Self::Text(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for SortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for SortKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for SortKey {}
+
+/// The active sort of one 详细列表: which column, and whether it runs descending. A page keeps one
+/// per list, clicks a header through [`toggle`](Self::toggle), passes
+/// [`indicator`](Self::indicator) to [`detail_header_cell`] and orders its rows with
+/// [`sort_by`](Self::sort_by). The first column (usually the name) is the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DetailSort {
+    pub(crate) column: usize,
+    pub(crate) descending: bool,
+}
+
+impl DetailSort {
+    /// A click on `column`'s header: the same column flips the direction, another one starts
+    /// ascending there.
+    pub(crate) fn toggle(&mut self, column: usize) {
+        if self.column == column {
+            self.descending = !self.descending;
+        } else {
+            self.column = column;
+            self.descending = false;
+        }
+    }
+
+    /// What `column`'s header cell paints: `Some(descending)` while it is the active sort.
+    pub(crate) fn indicator(&self, column: usize) -> Option<bool> {
+        (self.column == column).then_some(self.descending)
+    }
+
+    /// Order `items` by `key`, which yields the active column's value for an item. The key is
+    /// computed once per item (a table can have thousands of rows, and its key is the column's
+    /// text), not once per comparison.
+    pub(crate) fn sort_by<T>(&self, items: &mut [T], mut key: impl FnMut(&T) -> SortKey) {
+        if self.descending {
+            items.sort_by_cached_key(|item| std::cmp::Reverse(key(item)));
+        } else {
+            items.sort_by_cached_key(|item| key(item));
+        }
+    }
 }
 
 /// The base styling of one 详细列表 row. The caller adds its column cells and the click handlers.
@@ -790,7 +890,7 @@ pub(crate) fn detail_row(
         .items_center()
         .gap_3()
         .w_full()
-        .h(px(40.0))
+        .h(px(DETAIL_ROW_HEIGHT))
         .px_3()
         .flex_none()
         .border_b_1()
@@ -1168,4 +1268,57 @@ pub(crate) fn marquee_rect(
             .border_1()
             .border_color(rgb(theme.brand)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DetailSort, SortKey};
+
+    #[test]
+    fn a_detail_sort_toggles_direction_and_starts_elsewhere_ascending() {
+        let mut sort = DetailSort::default();
+        assert_eq!(
+            sort,
+            DetailSort {
+                column: 0,
+                descending: false
+            }
+        );
+        assert_eq!(sort.indicator(0), Some(false));
+        assert_eq!(sort.indicator(1), None);
+
+        sort.toggle(0);
+        assert_eq!(sort.indicator(0), Some(true));
+        sort.toggle(0);
+        assert_eq!(sort.indicator(0), Some(false));
+
+        sort.toggle(2);
+        assert_eq!(sort.column, 2);
+        assert!(!sort.descending, "a new column starts ascending");
+        assert_eq!(sort.indicator(0), None);
+    }
+
+    #[test]
+    fn sort_keys_compare_text_case_insensitively_and_put_missing_values_first() {
+        let mut items = vec!["Beta", "", "alpha", "Gamma"];
+        let mut sort = DetailSort::default();
+        sort.sort_by(&mut items, |text| SortKey::text(text));
+        assert_eq!(items, vec!["", "alpha", "Beta", "Gamma"]);
+
+        sort.toggle(0);
+        sort.sort_by(&mut items, |text| SortKey::text(text));
+        assert_eq!(items, vec!["Gamma", "Beta", "alpha", ""]);
+
+        // Numbers sort numerically, not lexicographically, with missing values first.
+        let mut numbers = vec![10u64, 2, 100];
+        sort.toggle(0); // back to ascending
+        sort.sort_by(&mut numbers, |value| SortKey::number(Some(*value as f64)));
+        assert_eq!(numbers, vec![2, 10, 100]);
+
+        let mut optional = vec![Some(3u64), None, Some(1)];
+        sort.sort_by(&mut optional, |value| {
+            SortKey::number(value.map(|value| value as f64))
+        });
+        assert_eq!(optional, vec![None, Some(1), Some(3)]);
+    }
 }

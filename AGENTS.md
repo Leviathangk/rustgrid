@@ -660,7 +660,8 @@ shadcn chrome described above. Implemented today:
     **defaults to 平铺网格**. Both layouts come from the shared `ui` chrome, so all pages look the
     same: one `ui::grid_item`/`grid_column` tile template (20px rows, 16px `leading_icon_badge`) and
     one `ui::detail_header_row`/`detail_row` table template (shared `gap_3` so header and data
-    columns line up, 22px badges). The detail lists have Navicat's compact columns, but each is
+    columns line up, one compact row metric — see item 17 — and `ui::DETAIL_BADGE_SIZE` badges).
+    The detail lists have Navicat's compact columns, but each is
     **fitted to its content** (the widest of its header label and its visible cells, via
     `ui::detail_column_width`) and **drag-resizable** from the handle on its header's right edge
     (per-page `ui::DetailColumns` state, seeded through `resolve` and updated by `begin_resize` /
@@ -721,6 +722,45 @@ shadcn chrome described above. Implemented today:
     (`OptionsSection::Data`, between 编辑器 and 关于) holds the two grid display switches, 展示备注
     (`AppSettings::grid_show_comments`) and 展示类型 (`grid_show_types`), both off by default, which
     paint each column's comment / data type under its name in the grid header.
+
+17. 详细列表 density and sorting (`ui/views.rs` + every list page): all detail lists share one
+    compact row metric — `DETAIL_ROW_HEIGHT` (28px), `DETAIL_BADGE_SIZE` (18px) and a 32px header —
+    so Tables/Views/Functions, Users, Backup, Queries and the backup configurations line up and read
+    as the same table. Every column is **sortable**: a click on a header sorts by that column
+    (ascending), a second click reverses it, and another column starts ascending there. The state is
+    one `DetailSort` per page (`DetailSort::toggle` / `indicator` / `sort_by`), the arrow comes from
+    `ui::detail_header_cell`, and the cell values are mapped to `ui::SortKey` (text compared
+    case-insensitively, counts/sizes/dates where the engine reports them, missing values first). The
+    sort lives beside the page's `DetailColumns`/`DetailScroll`, so it survives a re-render (and a
+    pane's Tables ↔ Views switch falls back to the name order when the column no longer exists). A
+    table's overview columns come from the same `table_statuses` map the cells render from, so the
+    sort and the visible values always agree; the Backup list sorts files and saved configurations
+    as one list (a configuration has no date/size, so it sorts into the empty group there).
+
+18. Query-page comfort settings (`app/options.rs`, `AppView::zoom_editor_font`,
+    `ui/sql_editor.rs`): the 编辑器 page adds **Ctrl + 鼠标滚轮调整字体大小**
+    (`AppSettings::editor_ctrl_wheel_zoom`, on by default). `SqlEditor` takes an `on_zoom` callback
+    and claims the wheel gesture in the **capture** phase over a hitbox covering the editor (a plain
+    wheel still scrolls it; a scrollable container handles the wheel in the bubble phase), so the
+    app can step the font size along the same `EDITOR_FONT_SIZES` ladder the 字号 dropdown offers
+    and remember it. The 编辑器 settings now reach the editors that are already open: 确定 pushes the
+    font, 显示行号 and 自动换行 into every query editor, 信息 log and SQL 预览 pane
+    (`SqlEditor::set_display_options`), instead of only the editors opened afterwards. The 常规 page
+    adds **启动时恢复** (`AppSettings::restore_session`, on by default, tooltip: restore query tabs,
+    connections, open databases and table tabs at the next start) — the workspace session is then
+    neither restored nor saved, so a start with it off is a clean one — and the object-search switch
+    is now simply **保留对象搜索** (`preserve_object_search`, on by default). With it on, the object
+    list's search text survives a tab switch *and* a database/schema/connection switch
+    (`AppView::clear_object_search_unless_kept` guards every former unconditional clear), so one
+    search covers the same table name in every environment. A `settings.json` written before this
+    version had the old `false` default, so loading turns the setting on once; files this version
+    writes keep the user's choice.
+
+    The query result panel's tab strip (信息 + one 结果 tag per result set) scrolls horizontally and
+    shows ◀ / ▶ paging buttons **only while the tags do not all fit** (`QueryTab::result_tabs`,
+    mirroring the main tab bar). The strip's overflow is measured by a canvas after layout (like
+    `DetailList`), so the buttons appear on the next frame instead of waiting for another render,
+    and selecting a result scrolls its tag into view.
 
 Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL and Oracle, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`

@@ -795,7 +795,7 @@ impl AppView {
                 // A schema-qualified engine shows objects only once a schema is opened: opening
                 // the database just reveals its schemas in the tree and clears the content pane.
                 self.object_pane = None;
-                self.clear_object_search(cx);
+                self.clear_object_search_unless_kept(cx);
                 self.active_grid = None;
                 self.active_query = None;
                 self.active_design = None;
@@ -819,7 +819,7 @@ impl AppView {
                     },
                 };
                 self.open_object_pane(connection_index, database_index, None, category, cx);
-                self.clear_object_search(cx);
+                self.clear_object_search_unless_kept(cx);
                 self.active_grid = None;
                 self.active_query = None;
                 self.active_design = None;
@@ -929,7 +929,7 @@ impl AppView {
             }
             _ => {
                 self.open_object_pane(connection_index, database_index, schema, category, cx);
-                self.clear_object_search(cx);
+                self.clear_object_search_unless_kept(cx);
             }
         }
         if category == Category::Functions {
@@ -1034,7 +1034,7 @@ impl AppView {
         }
 
         self.open_object_pane(connection_index, database_index, schema, category, cx);
-        self.clear_object_search(cx);
+        self.clear_object_search_unless_kept(cx);
         self.active_grid = None;
         self.active_query = None;
         self.active_design = None;
@@ -1171,7 +1171,7 @@ impl AppView {
             _ => Category::Tables,
         };
         self.open_object_pane(connection_index, database_index, Some(schema), category, cx);
-        self.clear_object_search(cx);
+        self.clear_object_search_unless_kept(cx);
         self.active_grid = None;
         self.active_query = None;
         self.active_design = None;

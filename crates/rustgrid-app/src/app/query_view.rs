@@ -244,7 +244,9 @@ impl AppView {
             .into_any_element()
     }
 
-    /// The bottom result tabs: a fixed 信息 tab then one 结果 tag per result set.
+    /// The bottom result tabs: a fixed 信息 tab then one 结果 tag per result set. The 结果 tags scroll
+    /// horizontally and, only when they do not all fit, ◀ / ▶ buttons page them — the same
+    /// pattern as the main tab bar above the pane.
     fn render_query_result_tabs(
         &self,
         query_index: usize,
@@ -254,7 +256,59 @@ impl AppView {
             return div().into_any_element();
         };
         let theme = self.theme;
+        let scroll = query.result_tabs.scroll.clone();
+        let show_arrows = query.result_tabs.overflow.get();
+        let info_tab = self.query_result_tab(
+            "query-result-info",
+            t!("query.info_tab").to_string(),
+            0,
+            query.active_result == 0,
+            cx,
+        );
+
+        let mut strip = div()
+            .id("query-result-tab-strip")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_x_scroll()
+            .track_scroll(&scroll);
+        let mut result_number = 0usize;
+        for (index, _) in query.results.iter().enumerate() {
+            if query.result_grids.get(index).copied().flatten().is_none() {
+                continue;
+            }
+            result_number += 1;
+            strip = strip.child(self.query_result_tab(
+                SharedString::from(format!("query-result-{index}")),
+                t!("query.result_tab", n = result_number).to_string(),
+                result_number,
+                query.active_result == result_number,
+                cx,
+            ));
+        }
+
+        // The strip's content width is only known after layout, so a measurement canvas records
+        // the overflow state and asks for one more frame when it changes; the buttons are drawn
+        // from the previous measurement.
+        let measure_scroll = scroll.clone();
+        let overflow = query.result_tabs.overflow.clone();
+        let measure = canvas(
+            |_bounds, _window: &mut Window, _cx: &mut App| {},
+            move |_bounds, _state, window: &mut Window, _cx: &mut App| {
+                let overflows = measure_scroll.max_offset().x > px(0.0);
+                if overflow.get() != overflows {
+                    overflow.set(overflows);
+                    window.request_animation_frame();
+                }
+            },
+        );
+
         let mut bar = div()
+            .relative()
             .flex()
             .flex_row()
             .items_center()
@@ -265,28 +319,82 @@ impl AppView {
             .bg(rgb(theme.toolbar_bg))
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(self.query_result_tab(
-                "query-result-info",
-                t!("query.info_tab").to_string(),
-                0,
-                query.active_result == 0,
-                cx,
-            ));
-        let mut result_number = 0usize;
-        for (index, _) in query.results.iter().enumerate() {
-            if query.result_grids.get(index).copied().flatten().is_none() {
-                continue;
-            }
-            result_number += 1;
-            bar = bar.child(self.query_result_tab(
-                SharedString::from(format!("query-result-{index}")),
-                t!("query.result_tab", n = result_number).to_string(),
-                result_number,
-                query.active_result == result_number,
-                cx,
-            ));
+            .child(info_tab);
+        if show_arrows {
+            bar = bar.child(self.query_result_scroll_button(query_index, true, cx));
         }
-        bar.into_any_element()
+        bar = bar.child(strip);
+        if show_arrows {
+            bar = bar.child(self.query_result_scroll_button(query_index, false, cx));
+        }
+        bar.child(measure.absolute().inset_0()).into_any_element()
+    }
+
+    /// One ◀ / ▶ button of the result tab strip: it pans the tags by about a page.
+    fn query_result_scroll_button(
+        &self,
+        query_index: usize,
+        left: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let scroll = self
+            .queries
+            .get(query_index)
+            .map(|query| query.result_tabs.scroll.clone());
+        let icon = if left {
+            "icons/tab-prev.svg"
+        } else {
+            "icons/tab-next.svg"
+        };
+        div()
+            .id(SharedString::from(format!(
+                "query-result-scroll-{}-{query_index}",
+                if left { "left" } else { "right" }
+            )))
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(18.0))
+            .h(px(18.0))
+            .flex_none()
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .text_color(rgb(theme.text_muted))
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                let Some(scroll) = scroll.clone() else {
+                    return;
+                };
+                if this.query_result_scroll(&scroll, if left { -180.0 } else { 180.0 }) {
+                    cx.notify();
+                }
+            }))
+            .child(
+                svg()
+                    .path(icon)
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .flex_none()
+                    .text_color(rgb(theme.text_muted)),
+            )
+            .into_any_element()
+    }
+
+    /// Pan the result tab strip by `delta` px. Returns whether it moved.
+    fn query_result_scroll(&self, scroll: &ScrollHandle, delta: f32) -> bool {
+        let max = f32::from(scroll.max_offset().x);
+        if max <= 0.0 {
+            return false;
+        }
+        let current = -f32::from(scroll.offset().x);
+        let next = (current + delta).clamp(0.0, max);
+        if next == current {
+            return false;
+        }
+        let y = scroll.offset().y;
+        scroll.set_offset(Point::new(px(-next), y));
+        true
     }
 
     /// One bottom result tag. `tab` is the value [`AppView::select_query_result`] selects.
@@ -615,7 +723,7 @@ impl AppView {
                 .child(ui::leading_icon_badge(
                     "icons/queries.svg",
                     theme.icon_queries,
-                    22.0,
+                    ui::DETAIL_BADGE_SIZE,
                 ))
                 .child(ui::detail_cell_text(
                     SharedString::from(format!("query-cell-{index}-0")),

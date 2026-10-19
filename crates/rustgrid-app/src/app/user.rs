@@ -46,6 +46,26 @@ impl UsersColumn {
         }
     }
 
+    /// The account's value for the column as a sort key: the resource limits compare numerically,
+    /// everything else as text.
+    fn sort_key(self, account: &UserAccount) -> SortKey {
+        match self {
+            UsersColumn::Name => SortKey::text(&account.label()),
+            UsersColumn::Kind => SortKey::text(&t!(account.kind.label_key())),
+            UsersColumn::MaxQuestions => SortKey::number(Some(account.max_questions as f64)),
+            UsersColumn::MaxUpdates => SortKey::number(Some(account.max_updates as f64)),
+            UsersColumn::MaxConnections => SortKey::number(Some(account.max_connections as f64)),
+            UsersColumn::MaxUserConnections => {
+                SortKey::number(Some(account.max_user_connections as f64))
+            }
+            UsersColumn::SuperUser => SortKey::text(&if account.is_super_user() {
+                t!("common.yes").to_string()
+            } else {
+                t!("common.no").to_string()
+            }),
+        }
+    }
+
     /// The account's value for the column. 名称 renders a badge plus this text, so it returns the
     /// account label; every other column is plain text.
     fn value(self, account: &UserAccount) -> String {
@@ -329,19 +349,31 @@ impl AppView {
             .collect()
     }
 
-    /// The visible accounts as `(index, selection key, account)`, in display order.
+    /// The visible accounts as `(index, selection key, account)`, in display order (the active
+    /// 详细列表 sort, by name unless a header was clicked).
     fn visible_users(&self) -> Vec<(usize, String, UserAccount)> {
         let Loadable::Loaded(users) = &self.users else {
             return Vec::new();
         };
-        self.filtered_users()
+        let mut visible: Vec<(usize, String, UserAccount)> = self
+            .filtered_users()
             .into_iter()
             .filter_map(|index| {
                 users
                     .get(index)
                     .map(|account| (index, user_key(account), account.clone()))
             })
-            .collect()
+            .collect();
+        // The sort column is an index into the columns the 详细列表 currently shows.
+        if let Some(column) = self
+            .users_detail_columns()
+            .get(self.users_sort.column)
+            .copied()
+        {
+            self.users_sort
+                .sort_by(&mut visible, |(_, _, account)| column.sort_key(account));
+        }
+        visible
     }
 
     /// The Users main tab body: the toolbar plus the account list.
@@ -587,12 +619,22 @@ impl AppView {
         let mut header = ui::detail_header_row(theme);
         for (index, column) in columns.iter().enumerate() {
             let width = widths[index];
+            let cell = ui::detail_header_cell(
+                SharedString::from(format!("users-sort-{index}")),
+                column.header(),
+                self.users_sort.indicator(index),
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.users_sort.toggle(index);
+                    cx.notify();
+                }),
+            );
             header = header.child(ui::detail_header_column(
                 SharedString::from(format!("users-resize-{index}")),
                 width,
                 self.users_columns.borrow().resizing(index),
                 theme,
-                ui::detail_header_cell_plain(column.header(), theme),
+                cell,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                     this.users_columns
@@ -658,7 +700,7 @@ impl AppView {
                         .child(ui::leading_icon_badge(
                             Self::user_kind_icon(account.kind),
                             Self::user_kind_color(theme, account.kind),
-                            22.0,
+                            ui::DETAIL_BADGE_SIZE,
                         ))
                         .child(ui::detail_cell_text(
                             SharedString::from(format!("user-cell-{index}-0")),
