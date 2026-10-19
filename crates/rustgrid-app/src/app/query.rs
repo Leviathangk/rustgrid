@@ -164,9 +164,8 @@ impl AppView {
         self.active_query = Some(self.queries.len() - 1);
         self.active_grid = None;
         self.active_design = None;
-        if !self.preserve_object_search {
-            self.clear_object_search(cx);
-        }
+        // Switching to a query tab clears every list's search unless 保留对象搜索 keeps them.
+        self.clear_object_search_unless_kept(cx);
         self.query_focus_pending = true;
         self.main_tab = MainTab::Queries;
         cx.notify();
@@ -1818,7 +1817,7 @@ impl AppView {
 
     /// The visible query entries' selection keys, in the list's current (sorted) order.
     fn query_visible_keys(&self, cx: &App) -> Vec<String> {
-        self.sorted_visible_query_files(cx, &self.object_search)
+        self.sorted_visible_query_files(cx, &self.object_search_text(VIEW_PAGE_QUERIES))
             .into_iter()
             .filter_map(|index| self.query_files.get(index))
             .map(query_file_key)

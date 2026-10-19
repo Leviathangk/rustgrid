@@ -749,12 +749,17 @@ shadcn chrome described above. Implemented today:
     adds **启动时恢复** (`AppSettings::restore_session`, on by default, tooltip: restore query tabs,
     connections, open databases and table tabs at the next start) — the workspace session is then
     neither restored nor saved, so a start with it off is a clean one — and the object-search switch
-    is now simply **保留对象搜索** (`preserve_object_search`, on by default). With it on, the object
-    list's search text survives a tab switch *and* a database/schema/connection switch
-    (`AppView::clear_object_search_unless_kept` guards every former unconditional clear), so one
-    search covers the same table name in every environment. A `settings.json` written before this
-    version had the old `false` default, so loading turns the setting on once; files this version
-    writes keep the user's choice.
+    is now simply **保留对象搜索** (`preserve_object_search`, on by default). The one search box is
+    shared by 表 / 视图 / 函数 / 查询, and `AppView::object_searches` files its text **per list**
+    (keyed by the `VIEW_PAGE_*` page of the shown list, `AppView::object_search_page`), so 表's
+    search never filters 视图 or 查询; `sync_object_search` (called once per render) swaps the
+    field's content when the shown list changes, `set_object_search` writes the typed text to that
+    list's entry, `clear_object_search` (Esc) clears just that one and
+    `clear_object_search_unless_kept` clears every list on the page/database/schema/connection
+    switches it guards. With the setting on each list's search survives all of those, so one search
+    covers the same table name in every environment; 用户 and 备份 already keep their own box. A
+    `settings.json` written before this version had the old `false` default, so loading turns the
+    setting on once; files this version writes keep the user's choice.
 
     The query result panel's tab strip (信息 + one 结果 tag per result set) scrolls horizontally and
     shows ◀ / ▶ paging buttons **only while the tags do not all fit** (`QueryTab::result_tabs`,

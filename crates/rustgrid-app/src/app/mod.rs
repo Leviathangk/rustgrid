@@ -2235,7 +2235,14 @@ pub struct AppView {
     /// The keystrokes (and contexts) the keymap was last bound with, so a change in the Options
     /// window can shadow the old ones (the keymap has no removal API).
     bound_keys: keymap::BoundKeys,
-    object_search: String,
+    /// The search text of each list that shares the object search box (表 / 视图 / 函数 / 查询),
+    /// keyed by its page id. Every list keeps its own search, so 表's text never filters 视图 or
+    /// 查询; 保留对象搜索 keeps them while the shown page, database or connection changes, and with
+    /// it off a switch clears all of them.
+    object_searches: BTreeMap<String, String>,
+    /// The page whose text `object_search_input` currently shows, so switching pages swaps the
+    /// field's content to that list's own search (see [`AppView::sync_object_search`]).
+    search_box_page: Option<&'static str>,
     object_search_input: Entity<TextInput>,
     /// Scroll position of the backup/restore object picker, so it can show a vertical scrollbar.
     backup_objects_scroll: ScrollHandle,
@@ -2928,7 +2935,8 @@ impl AppView {
             query_info_editors: std::collections::HashMap::new(),
             last_shown_tab: None,
             bound_keys,
-            object_search: String::new(),
+            object_searches: BTreeMap::new(),
+            search_box_page: None,
             backup_objects_scroll: ScrollHandle::new(),
             object_search_input: {
                 let weak = app.clone();
@@ -2948,9 +2956,7 @@ impl AppView {
                         let weak = weak.clone();
                         move |text, _window, cx| {
                             let _ = weak.update(cx, |app, cx| {
-                                app.object_search = text.to_string();
-                                app.notify_object_pane(cx);
-                                cx.notify();
+                                app.set_object_search(text.to_string(), cx);
                             });
                         }
                     }))
@@ -4143,6 +4149,9 @@ impl Render for AppView {
             self.synced_input_theme = Some(self.theme);
         }
         self.sync_cached_children(cx);
+        // The one search box is shared by 表 / 视图 / 函数 / 查询: swap in the shown page's own text
+        // before the content pane renders its toolbar.
+        self.sync_object_search(cx);
         self.ensure_query_combos(cx);
         self.sync_db_combos(cx);
         self.sync_db_option_combos(cx);

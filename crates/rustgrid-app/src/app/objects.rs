@@ -782,22 +782,83 @@ impl AppView {
             .child(self.object_search_input.clone())
     }
 
-    /// Clear the object search box and refresh the filtered list.
+    /// The list page whose search the shared box currently edits: the saved-query list on the 查询
+    /// main tab, otherwise the object list's category (表 / 视图 / 函数). `None` when the shown page
+    /// keeps its own search box (用户, 备份) or the content pane shows something else entirely.
+    fn object_search_page(&self, cx: &App) -> Option<&'static str> {
+        if self.main_tab == MainTab::Queries {
+            return Some(VIEW_PAGE_QUERIES);
+        }
+        let category = self
+            .object_pane
+            .as_ref()
+            .map(|pane| pane.read(cx).category)?;
+        match category {
+            Category::Tables | Category::Views | Category::Functions => {
+                Some(view_page_for_category(category))
+            }
+            _ => None,
+        }
+    }
+
+    /// One list's search text (`VIEW_PAGE_*`), empty when nothing was typed there.
+    pub(super) fn object_search_text(&self, page: &str) -> String {
+        self.object_searches.get(page).cloned().unwrap_or_default()
+    }
+
+    /// Store the search box's text under the page it edits. The box is one field shared by several
+    /// lists, so the text is filed per page: 表's search never filters 查询, and so on.
+    pub(super) fn set_object_search(&mut self, text: String, cx: &mut Context<'_, Self>) {
+        if let Some(page) = self.object_search_page(cx) {
+            if text.is_empty() {
+                self.object_searches.remove(page);
+            } else {
+                self.object_searches.insert(page.to_string(), text);
+            }
+        }
+        self.notify_object_pane(cx);
+        cx.notify();
+    }
+
+    /// Keep the search box showing the active list's own text: switching 表 ↔ 视图 ↔ 函数 ↔ 查询
+    /// swaps the field's content instead of letting one list's search filter another.
+    pub(super) fn sync_object_search(&mut self, cx: &mut Context<'_, Self>) {
+        let page = self.object_search_page(cx);
+        if self.search_box_page == page {
+            return;
+        }
+        self.search_box_page = page;
+        let Some(page) = page else {
+            return;
+        };
+        let text = self.object_search_text(page);
+        self.object_search_input
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// Clear the shown list's search and list every object again.
     pub(super) fn clear_object_search(&mut self, cx: &mut Context<'_, Self>) {
-        self.object_search.clear();
+        if let Some(page) = self.object_search_page(cx) {
+            self.object_searches.remove(page);
+        }
         self.object_search_input
             .update(cx, |input, cx| input.set_text("", cx));
         self.notify_object_pane(cx);
         cx.notify();
     }
 
-    /// Clear the object search unless 保留对象搜索 is on: the search is then kept when the shown
-    /// tab, database, schema or connection changes, so one search covers them all (Navicat's
-    /// behaviour with the setting on).
+    /// Clear every list's search unless 保留对象搜索 is on: the searches are then kept while the
+    /// shown tab, database, schema or connection changes. With the setting off a switch forgets
+    /// them all, so coming back shows every object again.
     pub(super) fn clear_object_search_unless_kept(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.preserve_object_search && !self.object_search.is_empty() {
-            self.clear_object_search(cx);
+        if self.preserve_object_search || self.object_searches.is_empty() {
+            return;
         }
+        self.object_searches.clear();
+        self.object_search_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.notify_object_pane(cx);
+        cx.notify();
     }
 
     /// The content of the object status shown in the window's bottom status bar: item count on the
@@ -2281,7 +2342,9 @@ impl Render for ObjectPane {
             let supports_schemas =
                 app.driver_supports(self.connection_index, DriverCapability::Schemas);
             (
-                app.object_search.clone(),
+                // The pane filters by its own category's search, not by whatever another list's
+                // search box holds.
+                app.object_search_text(view_page_for_category(self.category)),
                 tables,
                 table_statuses,
                 routines,

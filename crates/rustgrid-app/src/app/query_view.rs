@@ -590,7 +590,8 @@ impl AppView {
                 .into_any_element();
         }
 
-        let visible = self.sorted_visible_query_files(cx, &self.object_search);
+        let visible =
+            self.sorted_visible_query_files(cx, &self.object_search_text(VIEW_PAGE_QUERIES));
         let body = match self.view_mode(VIEW_PAGE_QUERIES) {
             ViewMode::Detail => self.render_query_detail(&visible, theme, cx),
             ViewMode::Grid => self.render_query_tiles(&visible, theme, cx),

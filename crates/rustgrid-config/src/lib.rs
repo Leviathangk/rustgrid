@@ -261,9 +261,9 @@ struct SettingsFile {
     /// commands the user changed are stored; an empty list unbinds the command.
     #[serde(default)]
     shortcuts: BTreeMap<String, Vec<String>>,
-    /// Keep the object list's search text when switching tabs or databases (off: switching
-    /// clears it). On by default; a file written before version 14 turned it on as well, since
-    /// its old default (`false`) was never chosen deliberately.
+    /// Keep each list's own search text (表 / 视图 / 函数 / 查询) when switching tabs or
+    /// databases (off: switching clears them). On by default; a file written before version 14
+    /// turned it on as well, since its old default (`false`) was never chosen deliberately.
     #[serde(default = "default_true")]
     preserve_object_search: bool,
     /// Restore the previous session (query tabs, connections, open databases and table tabs) on
@@ -375,8 +375,8 @@ pub struct AppSettings {
     /// keystroke strings (`"secondary-r"`). Commands not listed keep their built-in keystrokes;
     /// an empty list unbinds the command.
     pub shortcuts: BTreeMap<String, Vec<String>>,
-    /// Keep the object list's search text when switching tabs or databases (off: switching clears
-    /// it, so coming back shows every object).
+    /// Keep each list's own search text (表 / 视图 / 函数 / 查询) when switching tabs or databases
+    /// (off: switching clears them, so coming back shows every object).
     pub preserve_object_search: bool,
     /// Restore the previous session (open connections, query tabs, open databases and table tabs)
     /// on the next start.
