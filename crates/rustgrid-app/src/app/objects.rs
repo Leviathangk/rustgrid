@@ -118,8 +118,9 @@ fn schema_of(name: &str) -> Option<&str> {
 }
 
 /// The bare object name shown in lists (`wes_station` for `dbo.wes_station`); the schema is
-/// already implied by the selected schema node.
-fn object_display(name: &str) -> String {
+/// already implied by the selected schema node. Shared with the in-place rename editor, which must
+/// prefill the bare name rather than the internal `schema.object` identity.
+pub(super) fn object_display(name: &str) -> String {
     name.split_once('.')
         .filter(|(schema, object)| !schema.is_empty() && !object.is_empty())
         .map(|(_, object)| object.to_string())
@@ -2486,9 +2487,20 @@ impl Render for ObjectPane {
 
 #[cfg(test)]
 mod nav_tests {
-    use super::{ObjectStep, object_nav_target};
+    use super::{ObjectStep, object_display, object_nav_target};
 
     const DETAIL: usize = usize::MAX;
+
+    #[test]
+    fn a_rename_edits_the_bare_name_of_a_schema_qualified_object() {
+        // The in-place editor and the list must agree: no internal `public.` prefix leaks in.
+        assert_eq!(
+            object_display("public.qrtz_cron_triggers"),
+            "qrtz_cron_triggers"
+        );
+        assert_eq!(object_display("dbo.users"), "users");
+        assert_eq!(object_display("users"), "users");
+    }
 
     #[test]
     fn detail_list_moves_by_row_and_page_and_ignores_left_right() {

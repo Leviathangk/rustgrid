@@ -4,6 +4,7 @@
 //! truth; [`AppView::sync_dialog`] reconciles it with the Root dialog stack each render, opening
 //! or closing as needed.
 
+use super::objects::object_display;
 use super::*;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
@@ -860,11 +861,14 @@ impl AppView {
         let change = weak.clone();
         let submit = weak.clone();
         let cancel = weak.clone();
-        let initial = old_name.clone();
+        // The list shows `dbo.users` as `users`, so the editor must start from that same bare
+        // name; the internal qualified identity stays in `old_name` to find the row and the table.
+        let initial = object_display(&old_name);
+        let input_initial = initial.clone();
         let input = cx.new(move |cx| {
             TextInput::new(
                 theme,
-                initial,
+                input_initial,
                 TextInputOptions {
                     bare: true,
                     text_size: Some(12.0),
@@ -909,7 +913,7 @@ impl AppView {
             connection_index,
             database_index,
             old_name: old_name.clone(),
-            new_name: old_name,
+            new_name: initial,
             input,
         });
         // Clicking away is a commit, like the grid's in-place cell editor.
@@ -945,8 +949,11 @@ impl AppView {
         };
         self.rename_blur = None;
         self.notify_rename_pane(edit.pane, cx);
-        let new_name = edit.new_name.trim().to_string();
-        if new_name.is_empty() || new_name == edit.old_name {
+        // The editor edits the bare name (the schema is implied by the selected schema node), so
+        // the comparison and the driver call both use that form; a pasted `schema.name` is reduced
+        // to its bare part too, exactly as the list displays it.
+        let new_name = object_display(edit.new_name.trim());
+        if new_name.is_empty() || new_name == object_display(&edit.old_name) {
             cx.notify();
             return;
         }
