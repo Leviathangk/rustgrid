@@ -13,6 +13,7 @@ impl AppView {
         match target {
             MarqueeTarget::Users => &self.users_selection,
             MarqueeTarget::Backups => &self.backups_selection,
+            MarqueeTarget::Transfers => &self.transfers_selection,
             MarqueeTarget::Queries => &self.query_selection,
             MarqueeTarget::Objects => &self.objects_selection,
         }
@@ -23,6 +24,7 @@ impl AppView {
         match target {
             MarqueeTarget::Users => &mut self.users_selection,
             MarqueeTarget::Backups => &mut self.backups_selection,
+            MarqueeTarget::Transfers => &mut self.transfers_selection,
             MarqueeTarget::Queries => &mut self.query_selection,
             MarqueeTarget::Objects => &mut self.objects_selection,
         }
@@ -36,6 +38,7 @@ impl AppView {
         match target {
             MarqueeTarget::Users => &self.users_row_rects,
             MarqueeTarget::Backups => &self.backups_row_rects,
+            MarqueeTarget::Transfers => &self.transfers_row_rects,
             MarqueeTarget::Queries => &self.query_row_rects,
             MarqueeTarget::Objects => &self.objects_row_rects,
         }
@@ -63,6 +66,7 @@ impl AppView {
         match target {
             MarqueeTarget::Users => &mut self.users_row_rects,
             MarqueeTarget::Backups => &mut self.backups_row_rects,
+            MarqueeTarget::Transfers => &mut self.transfers_row_rects,
             MarqueeTarget::Queries => &mut self.query_row_rects,
             MarqueeTarget::Objects => &mut self.objects_row_rects,
         }

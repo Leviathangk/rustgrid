@@ -618,7 +618,6 @@ impl AppView {
             return;
         }
         if tab == MainTab::Sync {
-            self.sync_default_scope(cx);
             self.active_grid = None;
             self.active_query = None;
             self.active_design = None;

@@ -30,8 +30,8 @@ pub use model::{
     ConnectionProfile, DatabaseInfo, DatabaseOptions, DriverId, FilterCondition, FilterConjunction,
     FilterGroup, FilterNode, FilterOperator, ForeignKeyDef, IndexColumnDef, IndexDef, ObjectDump,
     ObjectKind, PageRequest, QueryResult, RowInsert, RowUpdate, SavedBackup, SavedBackupSelection,
-    SavedQuery, SortColumn, TableInfo, TableOptions, TablePage, TableSchema, TableStatus,
-    TriggerDef, UniqueKeyDef,
+    SavedQuery, SavedTransfer, SortColumn, TableInfo, TableOptions, TablePage, TableSchema,
+    TableStatus, TransferMode, TriggerDef, UniqueKeyDef,
 };
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use registry::{BuiltinDriverSource, DriverRegistry, DriverSource};

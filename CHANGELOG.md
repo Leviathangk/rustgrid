@@ -15,6 +15,8 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 
 - The Transfer main tab (after Backup): compare a source database with a target and apply the
   difference — structure, data, both, or a full transfer — with per-table status and a run log.
+- The Transfer tab lists saved transfer configurations; New Transfer opens a child window where a
+  configuration is named, saved and run.
 - The detail lists sort: click a column header to order by it, click again to reverse — on Tables,
   Views, Functions, Users, Backup and the saved queries.
 - Options → Editor: "Ctrl + mouse wheel resizes the font", on by default — hold Ctrl and scroll over
@@ -30,6 +32,8 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
   each list keeps its own text — a table search no longer filters views, functions or queries.
 - The Editor settings (font, size, Show Line Numbers, Word Wrap) reach the editors that are already
   open, instead of only the tabs opened afterwards.
+- The Transfer window never picks a target on its own, the active mode is clearly highlighted, and
+  the source/target pickers have room for their full width.
 
 ## [0.0.14] - 2026-10-18
 

@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::options::ConnectionOptions;
 
+/// Serde default for the switches that are on unless a saved file says otherwise.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DriverId(pub String);
 
@@ -740,6 +745,47 @@ impl SavedBackup {
             BackupObjectKind::Event => &mut self.events,
         }
     }
+}
+
+/// What a saved data transfer does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferMode {
+    /// Structure and data.
+    #[default]
+    All,
+    /// Structure only.
+    Schema,
+    /// Data only.
+    Data,
+    /// Drop/recreate the table and copy every row (a full overwrite).
+    Transfer,
+}
+
+/// A named data-transfer configuration saved from the 传输 window: the source and target scopes,
+/// the mode, the options and (when not all of them) the tables to copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTransfer {
+    pub name: String,
+    /// The source `ConnectionProfile::id`.
+    pub source_connection_id: String,
+    pub source_database: String,
+    /// The target `ConnectionProfile::id`. Empty while a new transfer has no target yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_connection_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_database: String,
+    #[serde(default)]
+    pub mode: TransferMode,
+    #[serde(default = "default_true")]
+    pub include_delete: bool,
+    #[serde(default)]
+    pub existing_only: bool,
+    /// The selected tables; empty means every table of the source database.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
 }
 
 /// The outcome of running an arbitrary SQL statement from the query editor.

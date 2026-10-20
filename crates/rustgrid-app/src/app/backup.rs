@@ -3130,6 +3130,9 @@ impl AppView {
     pub(super) fn on_window_closed(&mut self, id: WindowId, cx: &mut Context<'_, Self>) {
         if self.main_window_id == Some(id) {
             self.backup_window = None;
+            self.sync_window = None;
+            self.sync.options_open = false;
+            self.sync.config_name_input = None;
             self.new_backup_dialog = None;
             self.backup_name_input = None;
             self.restore_dialog = None;
@@ -3189,6 +3192,23 @@ impl AppView {
             self.extract_dialog = None;
             self.dump_dialog = None;
             self.run_sql_dialog = None;
+            cx.notify();
+            return;
+        }
+        if self
+            .sync_window
+            .as_ref()
+            .is_some_and(|handle| handle.window_id() == id)
+        {
+            // Closing the transfer window stops its run, exactly like closing the Backup window.
+            self.sync
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.sync.running = false;
+            self.sync.options_open = false;
+            self.sync.config_name_input = None;
+            self.sync.needs_refresh = false;
+            self.sync_window = None;
             cx.notify();
             return;
         }

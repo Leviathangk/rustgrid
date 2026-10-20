@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
-use rustgrid_core::{ConnectionProfile, SavedBackup, SavedQuery};
+use rustgrid_core::{ConnectionProfile, SavedBackup, SavedQuery, SavedTransfer};
 use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
@@ -18,6 +18,8 @@ const QUERIES_FILE: &str = "queries.json";
 const QUERIES_DIR: &str = "queries";
 const BACKUPS_VERSION: u32 = 1;
 const BACKUPS_FILE: &str = "backups.json";
+const TRANSFERS_VERSION: u32 = 1;
+const TRANSFERS_FILE: &str = "transfers.json";
 const BACKUPS_DIR: &str = "backups";
 const DATABASES_VERSION: u32 = 1;
 const DATABASES_FILE: &str = "databases.json";
@@ -438,6 +440,13 @@ struct BackupsFile {
     backups: Vec<SavedBackup>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TransfersFile {
+    version: u32,
+    #[serde(default)]
+    transfers: Vec<SavedTransfer>,
+}
+
 /// The last database list seen for each connection (keyed by `ConnectionProfile::id`), so the save
 /// dialog can offer databases without opening the connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -727,6 +736,28 @@ impl ConfigStore {
         };
         let contents = serde_json::to_string_pretty(&file)?;
         fs::write(self.root.join(BACKUPS_FILE), contents)?;
+        Ok(())
+    }
+
+    /// The saved 传输 configurations (`transfers.json`), independent of any open connection.
+    pub fn load_transfers(&self) -> ConfigResult<Vec<SavedTransfer>> {
+        let path = self.root.join(TRANSFERS_FILE);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents = fs::read_to_string(path)?;
+        let file: TransfersFile = serde_json::from_str(&contents)?;
+        Ok(file.transfers)
+    }
+
+    pub fn save_transfers(&self, transfers: &[SavedTransfer]) -> ConfigResult<()> {
+        fs::create_dir_all(&self.root)?;
+        let file = TransfersFile {
+            version: TRANSFERS_VERSION,
+            transfers: transfers.to_vec(),
+        };
+        let contents = serde_json::to_string_pretty(&file)?;
+        fs::write(self.root.join(TRANSFERS_FILE), contents)?;
         Ok(())
     }
 

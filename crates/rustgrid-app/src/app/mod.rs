@@ -29,9 +29,9 @@ use rustgrid_core::{
     DriverRegistry, Error, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
     FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, PrivilegeId,
     PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo,
-    RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, ServerSecurableGrant, TableStatus,
-    TlsMode, TunnelAuth, TunnelKind, TunnelLayer, UserAccount, UserDetails, UserEdit,
-    UserEditSection, UserEditorSpec, UserMapping, ViewEdit,
+    RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, SavedTransfer,
+    ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind, TunnelLayer, UserAccount,
+    UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping, ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -258,6 +258,8 @@ pub(super) const VIEW_PAGE_USERS: &str = "users";
 
 /// The stable settings key for the Backup tab's remembered list layout.
 pub(super) const VIEW_PAGE_BACKUPS: &str = "backups";
+/// The 传输 page's own list layout key.
+pub(super) const VIEW_PAGE_TRANSFERS: &str = "transfers";
 
 /// The stable settings key for the Tables object list's remembered layout.
 pub(super) const VIEW_PAGE_TABLES: &str = "tables";
@@ -1027,6 +1029,7 @@ enum RowPane {
 pub(super) enum MarqueeTarget {
     Users,
     Backups,
+    Transfers,
     Queries,
     Objects,
 }
@@ -1745,6 +1748,8 @@ enum DeleteConfirm {
     BackupFile { index: usize },
     /// Delete a saved backup configuration.
     BackupConfig { index: usize },
+    /// Delete one or more saved 传输 configurations.
+    TransferConfigs { indices: Vec<usize> },
     /// Delete several backup files and/or saved configurations at once (the list's
     /// multi-selection).
     BackupEntries {
@@ -2033,6 +2038,8 @@ pub struct AppView {
     query_grid: ColumnGrid,
     /// Saved backup configurations loaded from `backups.json`.
     backup_configs: Vec<SavedBackup>,
+    /// Saved 传输 configurations loaded from `transfers.json`.
+    transfer_configs: Vec<SavedTransfer>,
     /// Backup files found under the config dir's `backups/` tree.
     backup_files: Vec<BackupFileInfo>,
     /// The 数据传输/同步 page's state.
@@ -2457,6 +2464,14 @@ pub struct AppView {
     backups_selection: ListSelection,
     /// The Backup list's row rectangles in window space, for the marquee.
     backups_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
+    /// The 传输 configurations list's multi-selection (Explorer-style).
+    transfers_selection: ListSelection,
+    /// The 传输 configurations list's row rectangles in window space, for the marquee.
+    transfers_row_rects: std::collections::HashMap<String, Bounds<Pixels>>,
+    /// The OS window hosting the 传输 workbench, if open.
+    sync_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// Focus target for the 传输 window, so ESC closes it before any control is focused.
+    sync_window_focus: FocusHandle,
     /// The table/view object list's multi-selection (Explorer-style).
     objects_selection: ListSelection,
     /// The object list's row rectangles in window space, for the marquee.
@@ -2682,6 +2697,7 @@ impl AppView {
         let _ = config.migrate_legacy_queries();
         let query_files = query::scan_query_files(&config);
         let backup_configs = config.load_backups().unwrap_or_default();
+        let transfer_configs = config.load_transfers().unwrap_or_default();
         let database_cache = config.load_database_cache().unwrap_or_default();
         // Fixed editing mechanics, not user commands (those are the keymap's, below). Claim Tab
         // inside the cell editor so it advances to the next cell rather than moving window focus
@@ -2802,6 +2818,7 @@ impl AppView {
             query_sort: QuerySort::default(),
             query_grid: ColumnGrid::default(),
             backup_configs,
+            transfer_configs,
             backup_files: Vec::new(),
             sync: sync::SyncState::new(cx),
             backup_selected: None,
@@ -3132,6 +3149,10 @@ impl AppView {
             users_grid: ColumnGrid::default(),
             backups_selection: ListSelection::default(),
             backups_row_rects: std::collections::HashMap::new(),
+            transfers_selection: ListSelection::default(),
+            transfers_row_rects: std::collections::HashMap::new(),
+            sync_window: None,
+            sync_window_focus: cx.focus_handle(),
             objects_selection: ListSelection::default(),
             objects_row_rects: std::collections::HashMap::new(),
             marquee: None,
@@ -3223,6 +3244,14 @@ impl AppView {
         self.backup_search_input.update(cx, |input, cx| {
             input.set_placeholder(t!("backup.search").to_string(), cx);
         });
+        self.sync.transfer_search_input.update(cx, |input, cx| {
+            input.set_placeholder(t!("sync.config.search").to_string(), cx);
+        });
+        if let Some(input) = self.sync.config_name_input.clone() {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(t!("sync.config.name_placeholder").to_string(), cx);
+            });
+        }
         self.routine_find_input.update(cx, |input, cx| {
             input.set_placeholder(t!("routine.find").to_string(), cx);
         });
@@ -3781,6 +3810,12 @@ impl AppView {
         self.sync
             .search_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
+        self.sync
+            .transfer_search_input
+            .update(cx, |input, cx| input.set_theme(theme, cx));
+        if let Some(input) = self.sync.config_name_input.clone() {
+            input.update(cx, |input, cx| input.set_theme(theme, cx));
+        }
         self.routine_find_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         if let Some(input) = self.db_name_input.as_ref() {
@@ -3919,24 +3954,14 @@ impl AppView {
                 .child(self.render_users_status())
                 .into_any_element()
         } else if self.main_tab == MainTab::Sync {
-            let checked = self.sync.checked_indices().len();
-            let text = if self.sync.comparing {
-                t!(
-                    "sync.status_bar_comparing",
-                    done = self.sync.compared,
-                    total = self.sync.compare_total
-                )
-                .to_string()
-            } else {
-                t!("sync.status_bar", count = checked).to_string()
-            };
+            let count = self.visible_transfer_indices().len();
             div()
                 .flex_1()
                 .min_w(px(0.0))
                 .px_2()
                 .text_size(px(12.0))
                 .text_color(rgb(theme.text))
-                .child(text)
+                .child(t!("sync.status_bar_configs", count = count).to_string())
                 .into_any_element()
         } else if self.active_grid.is_none()
             && self.active_query.is_none()
@@ -4409,10 +4434,6 @@ impl Render for AppView {
 
         if self.connect_menu_open {
             root = root.child(self.render_connect_menu(cx));
-        }
-
-        if self.sync.options_open {
-            root = root.child(self.render_sync_options(cx));
         }
 
         if let Some(menu) = self.context_menu.as_ref() {

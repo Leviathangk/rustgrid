@@ -139,6 +139,7 @@ impl AppView {
             DeleteConfirm::SavedQueries { indices } => self.delete_saved_queries(indices, cx),
             DeleteConfirm::BackupFile { index } => self.delete_backup_file(index, cx),
             DeleteConfirm::BackupConfig { index } => self.delete_backup_config(index, cx),
+            DeleteConfirm::TransferConfigs { indices } => self.delete_transfer_configs(indices, cx),
             DeleteConfirm::BackupEntries { files, configs } => {
                 self.delete_backups(files, configs, cx)
             }

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use rustgrid_core::{
     CellValue, ColumnInfo, DataDiff, ObjectKind, PageRequest, RowChange, RowChangeKind,
-    SchemaChange, SchemaChangeKind, SortColumn, TableSchema, diff_columns, diff_rows,
+    SchemaChange, SchemaChangeKind, SortColumn, TableSchema, TransferMode, diff_columns, diff_rows,
     render_change_sql,
 };
 
@@ -78,6 +78,25 @@ impl SyncMode {
 
     fn uses_data(self) -> bool {
         matches!(self, SyncMode::All | SyncMode::Data | SyncMode::Transfer)
+    }
+
+    /// The persisted form of the mode (`transfers.json`).
+    fn to_saved(self) -> TransferMode {
+        match self {
+            SyncMode::All => TransferMode::All,
+            SyncMode::Schema => TransferMode::Schema,
+            SyncMode::Data => TransferMode::Data,
+            SyncMode::Transfer => TransferMode::Transfer,
+        }
+    }
+
+    fn from_saved(mode: TransferMode) -> Self {
+        match mode {
+            TransferMode::All => SyncMode::All,
+            TransferMode::Schema => SyncMode::Schema,
+            TransferMode::Data => SyncMode::Data,
+            TransferMode::Transfer => SyncMode::Transfer,
+        }
     }
 }
 
@@ -313,6 +332,28 @@ pub(super) struct SyncState {
     pub target_combo: Option<Entity<ComboBox>>,
     pub target_database_combo: Option<Entity<ComboBox>>,
     pub search_input: Entity<TextInput>,
+    /// The 传输 configurations list's search text and its field.
+    pub transfer_search: String,
+    pub transfer_search_input: Entity<TextInput>,
+    /// The 传输 list's layout state (column widths, sort, scroll and tile grid).
+    pub transfer_columns: Rc<RefCell<DetailColumns>>,
+    pub transfer_sort: Rc<RefCell<DetailSort>>,
+    pub transfer_detail_scroll: DetailScroll,
+    pub transfer_grid: ColumnGrid,
+    /// Focus target for the 传输 list, so Ctrl+A / Delete reach it.
+    pub transfer_focus: FocusHandle,
+    /// The configuration name typed in the transfer window's footer.
+    pub config_name: String,
+    /// The configuration-name field of the transfer window.
+    pub config_name_input: Option<Entity<TextInput>>,
+    /// The current settings were written back to `transfers.json` since the last edit.
+    pub config_saved: bool,
+    /// Why the last 保存配置 was rejected (shown in the window footer).
+    pub config_error: Option<String>,
+    /// A scope was chosen while a side was still connecting: compare once both are ready.
+    pub needs_refresh: bool,
+    /// The saved table selection to re-apply when the comparison installs its table list.
+    pub pending_tables: Option<HashSet<String>>,
     /// Bumped by every new comparison, so a stale background task cannot write into the page.
     pub generation: u64,
 }
@@ -337,6 +378,28 @@ impl SyncState {
             .on_change(Rc::new(move |text, _window, cx| {
                 let _ = weak.update(cx, |app, cx| {
                     app.sync.search = text.to_string();
+                    cx.notify();
+                });
+            }))
+        });
+        let weak = cx.weak_entity();
+        let transfer_search_input = cx.new(move |cx| {
+            TextInput::new(
+                Theme::dark(),
+                "",
+                TextInputOptions {
+                    placeholder: t!("sync.config.search").to_string().into(),
+                    icon: Some("icons/search.svg"),
+                    clearable: true,
+                    size: Some(gpui_kit::component::Size::XSmall),
+                    text_size: Some(12.0),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |app, cx| {
+                    app.sync.transfer_search = text.to_string();
                     cx.notify();
                 });
             }))
@@ -376,6 +439,19 @@ impl SyncState {
             target_combo: None,
             target_database_combo: None,
             search_input,
+            transfer_search: String::new(),
+            transfer_search_input,
+            transfer_columns: Rc::new(RefCell::new(DetailColumns::default())),
+            transfer_sort: Rc::new(RefCell::new(DetailSort::default())),
+            transfer_detail_scroll: DetailScroll::default(),
+            transfer_grid: ColumnGrid::default(),
+            transfer_focus: cx.focus_handle(),
+            config_name: String::new(),
+            config_name_input: None,
+            config_saved: false,
+            config_error: None,
+            needs_refresh: false,
+            pending_tables: None,
             generation: 0,
         }
     }
@@ -586,58 +662,31 @@ impl AppView {
                 combo.set_enabled(self.sync.target_connection.is_some(), cx);
             });
         }
-    }
-
-    /// Default the two sides from the connection tree's selection the first time the page opens.
-    pub(super) fn sync_default_scope(&mut self, cx: &mut Context<'_, Self>) {
-        if self.sync.source_connection.is_some() && self.sync.target_connection.is_some() {
-            return;
-        }
-        let mut changed = false;
-        if let Some((connection_index, database_index)) = self.tree_selection_scope(cx) {
-            if self.sync.source_connection.is_none() {
-                self.sync.source_connection = Some(connection_index);
-                self.sync.source_database = self
-                    .database_name(connection_index, database_index)
-                    .unwrap_or_default();
-                changed = true;
-            }
-            if self.sync.target_connection.is_none() {
-                // Prefer another open connection as the target, so 源 → 目标 is a real transfer.
-                let target = self
-                    .connections
-                    .iter()
-                    .enumerate()
-                    .find(|(index, node)| {
-                        *index != connection_index
-                            && matches!(node.status, ConnectionStatus::Connected(_))
-                    })
-                    .map(|(index, _)| index)
-                    .unwrap_or(connection_index);
-                self.sync.target_connection = Some(target);
-                self.sync.target_database = if target == connection_index {
-                    self.sync.source_database.clone()
-                } else {
-                    self.first_database_name(target).unwrap_or_default()
-                };
-                changed = true;
-            }
-        } else if self.sync.source_connection.is_none()
-            && let Some((index, _)) = self
-                .connections
-                .iter()
-                .enumerate()
-                .find(|(_, node)| matches!(node.status, ConnectionStatus::Connected(_)))
+        // A configuration opened before its connections were open only becomes comparable once
+        // both sides finish connecting; start the comparison then.
+        if self.sync.needs_refresh
+            && self.sync_window.is_some()
+            && self.sync_connections_ready()
+            && !self.sync.source_database.is_empty()
+            && !self.sync.target_database.is_empty()
         {
-            self.sync.source_connection = Some(index);
-            self.sync.source_database = self.first_database_name(index).unwrap_or_default();
-            self.sync.target_connection = Some(index);
-            self.sync.target_database = self.sync.source_database.clone();
-            changed = true;
-        }
-        if changed {
             self.sync_refresh(cx);
         }
+    }
+
+    /// Whether both sides of the transfer are connected, so a comparison can run.
+    fn sync_connections_ready(&self) -> bool {
+        let (Some(source), Some(target)) =
+            (self.sync.source_connection, self.sync.target_connection)
+        else {
+            return false;
+        };
+        [source, target].iter().all(|index| {
+            matches!(
+                self.connections.get(*index).map(|node| &node.status),
+                Some(ConnectionStatus::Connected(_))
+            )
+        })
     }
 
     fn first_database_name(&self, connection_index: usize) -> Option<String> {
@@ -651,34 +700,13 @@ impl AppView {
         }
     }
 
-    /// Point the source side at a tree database (a click on a database row while the 传输 page is
-    /// showing). Keeps the rest of the scope and re-compares.
-    pub(super) fn sync_pick_source(
-        &mut self,
-        connection_index: usize,
-        database_index: usize,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(database) = self.database_name(connection_index, database_index) else {
-            return;
-        };
-        if self.sync.source_connection == Some(connection_index)
-            && self.sync.source_database == database
-        {
-            return;
-        }
-        self.sync.source_connection = Some(connection_index);
-        self.sync.source_database = database;
-        self.sync_refresh(cx);
-        cx.notify();
-    }
-
     pub(super) fn sync_source_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
         let index = value.parse::<usize>().ok();
         self.sync.source_connection = index;
         self.sync.source_database = index
             .and_then(|index| self.first_database_name(index))
             .unwrap_or_default();
+        self.sync.config_saved = false;
         if let Some(index) = index
             && !matches!(
                 self.connections.get(index).map(|node| &node.status),
@@ -697,6 +725,7 @@ impl AppView {
         self.sync.target_database = index
             .and_then(|index| self.first_database_name(index))
             .unwrap_or_default();
+        self.sync.config_saved = false;
         if let Some(index) = index
             && !matches!(
                 self.connections.get(index).map(|node| &node.status),
@@ -715,6 +744,7 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.sync.source_database = value.to_string();
+        self.sync.config_saved = false;
         self.sync_refresh(cx);
         cx.notify();
     }
@@ -725,6 +755,7 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.sync.target_database = value.to_string();
+        self.sync.config_saved = false;
         self.sync_refresh(cx);
         cx.notify();
     }
@@ -756,6 +787,403 @@ impl AppView {
             .unwrap_or_default()
     }
 
+    // ----- Saved transfer configurations ---------------------------------------------------------
+
+    /// The saved configurations after the list's search filter, in model order.
+    pub(super) fn visible_transfer_indices(&self) -> Vec<usize> {
+        let needle = self.sync.transfer_search.trim().to_lowercase();
+        self.transfer_configs
+            .iter()
+            .enumerate()
+            .filter(|(_, config)| needle.is_empty() || config.name.to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The visible configuration indices in the 详细列表's active sort order.
+    fn sorted_transfer_indices(&self) -> Vec<usize> {
+        let mut indices = self.visible_transfer_indices();
+        let sort = *self.sync.transfer_sort.borrow();
+        sort.sort_by(&mut indices, |index| {
+            let Some(config) = self.transfer_configs.get(*index) else {
+                return SortKey::Empty;
+            };
+            match sort.column {
+                1 => {
+                    SortKey::text(&self.transfer_scope_label(
+                        &config.source_connection_id,
+                        &config.source_database,
+                    ))
+                }
+                2 => {
+                    SortKey::text(&self.transfer_scope_label(
+                        &config.target_connection_id,
+                        &config.target_database,
+                    ))
+                }
+                3 => SortKey::text(&sync_mode_label(SyncMode::from_saved(config.mode))),
+                _ => SortKey::text(&config.name),
+            }
+        });
+        indices
+    }
+
+    /// `connection · database` for a saved scope, or a muted placeholder when unset.
+    fn transfer_scope_label(&self, connection_id: &str, database: &str) -> String {
+        if connection_id.is_empty() && database.is_empty() {
+            return String::new();
+        }
+        let connection = self
+            .connections
+            .iter()
+            .find(|node| node.profile.id == connection_id)
+            .map(|node| node.profile.name.clone())
+            .unwrap_or_else(|| connection_id.to_string());
+        if database.is_empty() {
+            connection
+        } else {
+            format!("{connection} · {database}")
+        }
+    }
+
+    fn transfer_key(&self, index: usize) -> Option<String> {
+        self.transfer_configs
+            .get(index)
+            .map(|config| format!("transfer:{}", config.name))
+    }
+
+    fn transfer_index_by_key(&self, key: &str) -> Option<usize> {
+        let name = key.strip_prefix("transfer:")?;
+        self.transfer_configs
+            .iter()
+            .position(|config| config.name == name)
+    }
+
+    /// The visible rows' selection keys, in the order the list shows them.
+    fn visible_transfer_keys(&self) -> Vec<String> {
+        let indices = if self.view_mode(VIEW_PAGE_TRANSFERS) == ViewMode::Detail {
+            self.sorted_transfer_indices()
+        } else {
+            self.visible_transfer_indices()
+        };
+        indices
+            .into_iter()
+            .filter_map(|index| self.transfer_key(index))
+            .collect()
+    }
+
+    /// The selected configurations, resolved back from the selection's name keys.
+    fn selected_transfer_indices(&self) -> Vec<usize> {
+        self.transfers_selection
+            .items()
+            .iter()
+            .filter_map(|key| self.transfer_index_by_key(key))
+            .collect()
+    }
+
+    /// Apply one list-row click under the click's modifier mode.
+    pub(super) fn hit_transfer(
+        &mut self,
+        key: &str,
+        modifiers: Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let visible = self.visible_transfer_keys();
+        if modifiers.shift {
+            self.transfers_selection.extend_to(&visible, key);
+        } else {
+            self.transfers_selection
+                .hit(&visible, key, selection_mode(modifiers));
+        }
+        cx.notify();
+    }
+
+    /// Open the 新建传输 window with a fresh scope. The source starts at the tree's current
+    /// database, but the target deliberately starts empty: a transfer must name its destination
+    /// rather than silently default to the source or to another open connection.
+    pub(super) fn open_new_transfer(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(source) = self.default_query_connection(cx) else {
+            self.error_dialog = Some(t!("sync.error.not_connected").to_string());
+            cx.notify();
+            return;
+        };
+        // A file-based engine's `profile.database` is the file path, not a database name; leave
+        // the scope empty so the combos pick the file's own database (`main`) after connecting.
+        let file_based = self
+            .connections
+            .get(source)
+            .and_then(|node| self.registry.get(&node.profile.driver))
+            .is_some_and(|driver| driver.is_file_based());
+        let source_database = if file_based {
+            String::new()
+        } else {
+            self.default_query_database(source, cx).unwrap_or_default()
+        };
+        // Reset the page for the new configuration.
+        self.sync.config_name = String::new();
+        self.sync.config_saved = false;
+        self.sync.config_error = None;
+        self.sync.pending_tables = None;
+        self.sync.mode = SyncMode::All;
+        self.sync.include_delete = true;
+        self.sync.existing_only = false;
+        self.sync.source_connection = Some(source);
+        self.sync.source_database = source_database;
+        self.sync.target_connection = None;
+        self.sync.target_database = String::new();
+        self.reset_sync_run();
+        if !matches!(
+            self.connections.get(source).map(|node| &node.status),
+            Some(ConnectionStatus::Connected(_))
+        ) {
+            self.connect(source, cx);
+        }
+        let weak = cx.weak_entity();
+        self.sync.config_name_input = Some(make_transfer_name_input(
+            self.theme,
+            String::new(),
+            &weak,
+            cx,
+        ));
+        self.sync.needs_refresh = false;
+        self.sync_refresh(cx);
+        self.open_sync_window(t!("sync.window.new").to_string(), cx);
+        cx.notify();
+    }
+
+    /// Open a saved configuration in the 传输 window.
+    pub(super) fn open_transfer_config(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let Some(config) = self.transfer_configs.get(index).cloned() else {
+            return;
+        };
+        self.sync.config_name = config.name.clone();
+        self.sync.config_saved = true;
+        self.sync.config_error = None;
+        self.sync.mode = SyncMode::from_saved(config.mode);
+        self.sync.include_delete = config.include_delete;
+        self.sync.existing_only = config.existing_only;
+        self.sync.pending_tables = (!config.tables.is_empty())
+            .then(|| config.tables.iter().cloned().collect::<HashSet<String>>());
+        let source = self
+            .connections
+            .iter()
+            .position(|node| node.profile.id == config.source_connection_id);
+        let target = self
+            .connections
+            .iter()
+            .position(|node| node.profile.id == config.target_connection_id);
+        self.sync.source_connection = source;
+        self.sync.source_database = source
+            .map(|_| config.source_database.clone())
+            .unwrap_or_default();
+        self.sync.target_connection = target;
+        self.sync.target_database = target
+            .map(|_| config.target_database.clone())
+            .unwrap_or_default();
+        for index in [source, target].into_iter().flatten() {
+            if !matches!(
+                self.connections.get(index).map(|node| &node.status),
+                Some(ConnectionStatus::Connected(_))
+            ) {
+                self.connect(index, cx);
+            }
+        }
+        self.reset_sync_run();
+        let weak = cx.weak_entity();
+        self.sync.config_name_input = Some(make_transfer_name_input(
+            self.theme,
+            config.name.clone(),
+            &weak,
+            cx,
+        ));
+        self.sync.needs_refresh = false;
+        if self.sync_connections_ready() {
+            self.sync_refresh(cx);
+        } else if self.sync.source_connection.is_some() && self.sync.target_connection.is_some() {
+            self.sync.needs_refresh = true;
+        }
+        self.open_sync_window(
+            t!("sync.window.edit", name = config.name.clone()).to_string(),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Clear the previous run's progress/log so a freshly opened configuration starts clean.
+    fn reset_sync_run(&mut self) {
+        self.sync.running = false;
+        self.sync.progress = 0.0;
+        self.sync.log.clear();
+        self.sync.log_open = false;
+        self.sync.started = None;
+        self.sync.elapsed = None;
+        self.sync.error = None;
+        self.sync.tables.clear();
+        self.sync.selected = None;
+        self.sync.compared = 0;
+        self.sync.compare_total = 0;
+        self.sync.options_open = false;
+    }
+
+    /// Write the window's current scope, mode, options and table selection into `transfers.json`.
+    /// An existing name is replaced in place, so 保存配置 doubles as 另存为 when the name changes.
+    pub(super) fn save_transfer_config(&mut self, cx: &mut Context<'_, Self>) {
+        let name = self.sync.config_name.trim().to_string();
+        if name.is_empty() {
+            self.sync.config_error = Some(t!("sync.config.error_name").to_string());
+            cx.notify();
+            return;
+        }
+        let (Some(source), Some(target)) =
+            (self.sync.source_connection, self.sync.target_connection)
+        else {
+            self.sync.config_error = Some(t!("sync.config.error_scope").to_string());
+            cx.notify();
+            return;
+        };
+        if self.sync.source_database.is_empty() || self.sync.target_database.is_empty() {
+            self.sync.config_error = Some(t!("sync.config.error_scope").to_string());
+            cx.notify();
+            return;
+        }
+        let checked: Vec<String> = self
+            .sync
+            .checked_indices()
+            .into_iter()
+            .filter_map(|index| self.sync.tables.get(index).map(|table| table.name.clone()))
+            .collect();
+        if !self.sync.tables.is_empty() && checked.is_empty() {
+            self.sync.config_error = Some(t!("sync.config.error_tables").to_string());
+            cx.notify();
+            return;
+        }
+        let all_tables = !self.sync.tables.is_empty() && checked.len() == self.sync.tables.len();
+        let config = SavedTransfer {
+            name: name.clone(),
+            source_connection_id: self
+                .connections
+                .get(source)
+                .map(|node| node.profile.id.clone())
+                .unwrap_or_default(),
+            source_database: self.sync.source_database.clone(),
+            target_connection_id: self
+                .connections
+                .get(target)
+                .map(|node| node.profile.id.clone())
+                .unwrap_or_default(),
+            target_database: self.sync.target_database.clone(),
+            mode: self.sync.mode.to_saved(),
+            include_delete: self.sync.include_delete,
+            existing_only: self.sync.existing_only,
+            tables: if all_tables { Vec::new() } else { checked },
+            comment: String::new(),
+        };
+        let mut configs = std::mem::take(&mut self.transfer_configs);
+        match configs.iter().position(|existing| existing.name == name) {
+            Some(index) => configs[index] = config,
+            None => configs.push(config),
+        }
+        self.transfer_configs = configs;
+        match self.config.save_transfers(&self.transfer_configs) {
+            Ok(()) => {
+                self.sync.config_saved = true;
+                self.sync.config_error = None;
+            }
+            Err(error) => {
+                self.sync.config_error = Some(error.to_string());
+                self.sync.config_saved = false;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Ask before deleting the selected configurations.
+    pub(super) fn confirm_delete_transfer(&mut self, cx: &mut Context<'_, Self>) {
+        let mut indices = self.selected_transfer_indices();
+        if indices.is_empty() {
+            return;
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        self.delete_confirm = Some(DeleteConfirm::TransferConfigs { indices });
+        cx.notify();
+    }
+
+    pub(super) fn delete_transfer_configs(
+        &mut self,
+        indices: Vec<usize>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut indices = indices;
+        indices.sort_unstable();
+        indices.dedup();
+        let mut removed = false;
+        for index in indices.into_iter().rev() {
+            if index < self.transfer_configs.len() {
+                self.transfer_configs.remove(index);
+                removed = true;
+            }
+        }
+        if removed && let Err(error) = self.config.save_transfers(&self.transfer_configs) {
+            self.warn_persist("transfer configurations", error, cx);
+        }
+        self.transfers_selection.clear();
+        cx.notify();
+    }
+
+    /// Open (or focus) the OS window hosting the 传输 workbench. Like the Backup window, it is a
+    /// normal top-level window so the page keeps the main window free; the open is deferred because
+    /// the new window renders immediately and reads `AppView`.
+    pub(super) fn open_sync_window(&mut self, title: String, cx: &mut Context<'_, Self>) {
+        if self.sync_window.is_some() {
+            return;
+        }
+        let weak = cx.weak_entity();
+        let app_entity = cx.entity();
+        let focus = self.sync_window_focus.clone();
+        cx.defer(move |cx: &mut App| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let bounds = Bounds::centered(None, size(px(1120.0), px(720.0)), cx);
+            let view_weak = weak.clone();
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(title.clone().into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    #[cfg(target_os = "windows")]
+                    crate::win_resize::install(window);
+                    window.activate_window();
+                    let view = cx.new(|cx| TransferWindow::new(view_weak.clone(), &app_entity, cx));
+                    let root = cx.new(|cx| gpui_kit::component::Root::new(view, window, cx));
+                    window.focus(&focus, cx);
+                    root
+                },
+            );
+            match opened {
+                Ok(handle) => {
+                    app.update(cx, |app, cx| {
+                        app.sync_window = Some(handle);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    app.update(cx, |app, cx| {
+                        app.error_dialog = Some(error.to_string());
+                        cx.notify();
+                    });
+                }
+            }
+        });
+    }
+
     // ----- Comparison ----------------------------------------------------------------------------
 
     /// Reload the source's tables and compare every one against the target.
@@ -776,6 +1204,17 @@ impl AppView {
             cx.notify();
             return;
         }
+        // A saved configuration can name connections that are still opening; retry from
+        // `sync_sync_combos` once both report connected.
+        if !self.sync_connections_ready() {
+            self.sync.tables.clear();
+            self.sync.selected = None;
+            self.sync.comparing = false;
+            self.sync.needs_refresh = true;
+            cx.notify();
+            return;
+        }
+        self.sync.needs_refresh = false;
         let (Some(source), Some(target)) = (
             self.connection_arc(source_index),
             self.connection_arc(target_index),
@@ -796,6 +1235,8 @@ impl AppView {
         self.sync.compare_total = 0;
         let source_database = self.sync.source_database.clone();
         let target_database = self.sync.target_database.clone();
+        // A saved configuration carries its table selection; apply it to the list this run builds.
+        let pending_tables = self.sync.pending_tables.take();
         let runtime = self.runtime.clone();
         cx.notify();
 
@@ -835,7 +1276,13 @@ impl AppView {
                 }
                 app.sync.tables = names
                     .iter()
-                    .map(|name| SyncTable::new(name.clone(), target_names.contains(name)))
+                    .map(|name| {
+                        let mut table = SyncTable::new(name.clone(), target_names.contains(name));
+                        if let Some(saved) = pending_tables.as_ref() {
+                            table.checked = saved.contains(name);
+                        }
+                        table
+                    })
                     .collect();
                 app.sync.compare_total = total;
                 app.sync.selected = (!names.is_empty()).then_some(0);
@@ -1213,8 +1660,581 @@ impl AppView {
 
     // ----- Rendering -----------------------------------------------------------------------------
 
-    /// The 数据传输/同步 page.
+    // ----- Rendering: the saved-transfer list ----------------------------------------------------
+
+    /// The 传输 main tab. It lists the saved configurations exactly like the Backup tab; a
+    /// configuration opens in a child window that owns the comparison workbench, so the page
+    /// itself stays a list.
     pub(super) fn render_sync(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let empty = self.transfer_configs.is_empty();
+        let body: AnyElement = if empty {
+            self.render_transfer_empty(cx)
+        } else if self.view_mode(VIEW_PAGE_TRANSFERS) == ViewMode::Detail {
+            self.render_transfer_detail(cx)
+        } else {
+            self.render_transfer_tiles(cx)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_hidden()
+            .child(self.render_transfer_toolbar(cx))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .bg(rgb(theme.editor_bg))
+                    .track_focus(&self.sync.transfer_focus)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            this.begin_marquee(
+                                MarqueeTarget::Transfers,
+                                event.position,
+                                event.modifiers,
+                                cx,
+                            );
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                            // A right-click on the blank area just clears the highlight; the
+                            // toolbar's 删除 is the only destructive path.
+                            this.transfers_selection.clear();
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                        if this.sync.transfer_columns.borrow_mut().drag_resize(event) {
+                            cx.notify();
+                        }
+                        this.drag_marquee(MarqueeTarget::Transfers, event, cx);
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                            if this.sync.transfer_columns.borrow_mut().end_resize() {
+                                cx.notify();
+                            }
+                            this.end_marquee(cx);
+                        }),
+                    )
+                    .child(body)
+                    .when_some(
+                        self.marquee_rect_for(MarqueeTarget::Transfers),
+                        |pane, rect| pane.child(rect),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_transfer_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
+        let theme = self.theme;
+        let single = self
+            .transfers_selection
+            .single()
+            .and_then(|key| self.transfer_index_by_key(key));
+        let has_selection = !self.transfers_selection.is_empty();
+        let weak = cx.weak_entity();
+        let on_select = Rc::new(
+            move |mode: ViewMode, _event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |app, cx| {
+                    app.set_view_mode(VIEW_PAGE_TRANSFERS, mode, cx)
+                });
+            },
+        );
+        let view_mode = self.view_mode(VIEW_PAGE_TRANSFERS);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .flex_none()
+            .bg(rgb(theme.toolbar_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(self.toolbar_item(
+                        "transfer-new",
+                        "icons/plus.svg",
+                        t!("sync.new").to_string(),
+                        true,
+                        cx.listener(|this, _event, _window, cx| this.open_new_transfer(cx)),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "transfer-edit",
+                        "icons/design_table.svg",
+                        t!("sync.edit").to_string(),
+                        single.is_some(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            if let Some(index) = single {
+                                this.open_transfer_config(index, cx);
+                            }
+                        }),
+                    ))
+                    .child(toolbar_separator(theme))
+                    .child(self.toolbar_item(
+                        "transfer-delete",
+                        "icons/delete_table.svg",
+                        t!("sync.delete").to_string(),
+                        has_selection,
+                        cx.listener(|this, _event, _window, cx| this.confirm_delete_transfer(cx)),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::view_mode_toggle(theme, view_mode, on_select))
+                    .child(
+                        div()
+                            .w(px(220.0))
+                            .h(px(24.0))
+                            .child(self.sync.transfer_search_input.clone()),
+                    ),
+            )
+    }
+
+    /// A centred hint shown while no transfer configuration exists.
+    fn render_transfer_empty(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                svg()
+                    .path("icons/sync.svg")
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .text_color(rgb(theme.text_muted)),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(t!("sync.config.empty").to_string()),
+            )
+            .child(ui::button(
+                "transfer-empty-new",
+                t!("sync.new").to_string(),
+                ButtonKind::Default,
+                theme,
+                cx.listener(|this, _event, _window, cx| this.open_new_transfer(cx)),
+            ))
+            .into_any_element()
+    }
+
+    /// The content-fitted widths of the 传输 columns (名称 / 源 / 目标 / 模式).
+    fn transfer_detail_widths(&self) -> Vec<f32> {
+        let mut longest = [
+            ui::approx_text_width(&t!("common.name")) + 30.0,
+            ui::approx_text_width(&t!("sync.config.source")),
+            ui::approx_text_width(&t!("sync.config.target")),
+            ui::approx_text_width(&t!("sync.config.mode")),
+        ];
+        for index in self.visible_transfer_indices() {
+            let Some(config) = self.transfer_configs.get(index) else {
+                continue;
+            };
+            longest[0] = longest[0].max(ui::approx_text_width(&config.name) + 30.0);
+            longest[1] = longest[1].max(ui::approx_text_width(
+                &self.transfer_scope_label(&config.source_connection_id, &config.source_database),
+            ));
+            longest[2] = longest[2].max(ui::approx_text_width(
+                &self.transfer_scope_label(&config.target_connection_id, &config.target_database),
+            ));
+            longest[3] = longest[3].max(ui::approx_text_width(&sync_mode_label(
+                SyncMode::from_saved(config.mode),
+            )));
+        }
+        vec![
+            ui::detail_column_width(longest[0], 220.0),
+            ui::detail_column_width(longest[1], 170.0),
+            ui::detail_column_width(longest[2], 170.0),
+            ui::detail_column_width(longest[3], 110.0),
+        ]
+    }
+
+    /// The 传输 详细列表: 名称 / 源 / 目标 / 模式.
+    fn render_transfer_detail(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let fitted = self.transfer_detail_widths();
+        let widths = self.sync.transfer_columns.borrow_mut().resolve(&fitted);
+        let mut header = ui::detail_header_row(theme);
+        for (index, label) in [
+            t!("common.name").to_string(),
+            t!("sync.config.source").to_string(),
+            t!("sync.config.target").to_string(),
+            t!("sync.config.mode").to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let width = widths[index];
+            let cell = ui::detail_header_cell(
+                SharedString::from(format!("transfer-sort-{index}")),
+                label,
+                self.sync.transfer_sort.borrow().indicator(index),
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.sync.transfer_sort.borrow_mut().toggle(index);
+                    cx.notify();
+                }),
+            );
+            header = header.child(ui::detail_header_column(
+                SharedString::from(format!("transfer-resize-{index}")),
+                width,
+                self.sync.transfer_columns.borrow().resizing(index),
+                theme,
+                cell,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.sync.transfer_columns.borrow_mut().begin_resize(
+                        index,
+                        event.position.x,
+                        width,
+                    );
+                    cx.notify();
+                }),
+            ));
+        }
+
+        let mut list = ui::DetailList::new(
+            "transfer-detail",
+            &self.sync.transfer_detail_scroll,
+            ui::detail_content_width(&widths),
+            header,
+        );
+        for index in self.sorted_transfer_indices() {
+            list = list.child(self.transfer_detail_row(index, &widths, theme, cx));
+        }
+        list.render(theme)
+    }
+
+    fn transfer_detail_row(
+        &self,
+        index: usize,
+        widths: &[f32],
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let Some(config) = self.transfer_configs.get(index) else {
+            return div().into_any_element();
+        };
+        let key = format!("transfer:{}", config.name);
+        let selected = self.transfers_selection.contains(&key);
+        let name = config.name.clone();
+        let source =
+            self.transfer_scope_label(&config.source_connection_id, &config.source_database);
+        let target =
+            self.transfer_scope_label(&config.target_connection_id, &config.target_database);
+        let mode = sync_mode_label(SyncMode::from_saved(config.mode));
+        let click_key = key.clone();
+        let open_key = key.clone();
+        let row = ui::detail_row(
+            SharedString::from(format!("transfer-row-{index}")),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+            this.hit_transfer(&click_key, event.modifiers(), cx);
+            if event.click_count() >= 2
+                && let Some(index) = this.transfer_index_by_key(&open_key)
+            {
+                this.open_transfer_config(index, cx);
+            }
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .w(px(widths[0]))
+                .flex_none()
+                .overflow_hidden()
+                .text_color(rgb(theme.text))
+                .child(ui::leading_icon_badge(
+                    "icons/sync.svg",
+                    theme.brand,
+                    ui::DETAIL_BADGE_SIZE,
+                ))
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!("transfer-cell-{index}-0")),
+                    name,
+                )),
+        )
+        .child(
+            div()
+                .w(px(widths[1]))
+                .flex_none()
+                .text_color(rgb(theme.text_muted))
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!("transfer-cell-{index}-1")),
+                    source,
+                )),
+        )
+        .child(
+            div()
+                .w(px(widths[2]))
+                .flex_none()
+                .text_color(rgb(theme.text_muted))
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!("transfer-cell-{index}-2")),
+                    target,
+                )),
+        )
+        .child(
+            div()
+                .w(px(widths[3]))
+                .flex_none()
+                .text_color(rgb(theme.text_muted))
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!("transfer-cell-{index}-3")),
+                    mode,
+                )),
+        );
+        super::list_ops::row_with_rect(cx.weak_entity(), row, MarqueeTarget::Transfers, key)
+    }
+
+    /// The 传输 平铺网格: saved configurations in a column-major grid.
+    fn render_transfer_tiles(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let indices = self.visible_transfer_indices();
+        if indices.is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .into_any_element();
+        }
+        let width = ui::grid_item_width(
+            indices
+                .iter()
+                .filter_map(|index| self.transfer_configs.get(*index))
+                .map(|config| ui::approx_text_width(&config.name))
+                .fold(0.0, f32::max),
+        );
+        let rows = self.sync.transfer_grid.rows_per_column();
+        let mut columns = ui::grid_columns();
+        let mut column = ui::grid_column();
+        let mut count = 0usize;
+        for index in indices {
+            if count == rows {
+                columns = columns.child(column);
+                column = ui::grid_column();
+                count = 0;
+            }
+            let Some(config) = self.transfer_configs.get(index) else {
+                continue;
+            };
+            let key = format!("transfer:{}", config.name);
+            let selected = self.transfers_selection.contains(&key);
+            let name = config.name.clone();
+            let click_key = key.clone();
+            let open_key = key.clone();
+            let tile = ui::grid_item_sized(
+                SharedString::from(format!("transfer-tile-{index}")),
+                selected,
+                theme,
+                width,
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                this.hit_transfer(&click_key, event.modifiers(), cx);
+                if event.click_count() >= 2
+                    && let Some(index) = this.transfer_index_by_key(&open_key)
+                {
+                    this.open_transfer_config(index, cx);
+                }
+            }))
+            .child(ui::leading_icon_badge("icons/sync.svg", theme.brand, 16.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(rgb(theme.text))
+                    .child(name),
+            );
+            column = column.child(super::list_ops::row_with_rect(
+                cx.weak_entity(),
+                tile,
+                MarqueeTarget::Transfers,
+                key,
+            ));
+            count += 1;
+        }
+        if count > 0 {
+            columns = columns.child(column);
+        }
+
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_hidden();
+        grid = grid.child(
+            self.sync
+                .transfer_grid
+                .scroller("transfer-grid-scroll")
+                .child(columns),
+        );
+        if self.sync.transfer_grid.overflows() {
+            grid = grid.child(
+                self.sync
+                    .transfer_grid
+                    .scrollbar("transfer-grid-hscrollbar", theme)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            if this.sync.transfer_grid.begin(event.position.x) {
+                                cx.notify();
+                            }
+                        }),
+                    ),
+            );
+        }
+        grid.into_any_element()
+    }
+
+    // ----- Rendering: the transfer window -------------------------------------------------------
+
+    /// The child window's contents: a themed titlebar, the comparison workbench and the footer that
+    /// names and saves the configuration.
+    pub(super) fn sync_window_contents(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let title = if self.sync.config_name.trim().is_empty() {
+            t!("sync.window.new").to_string()
+        } else {
+            t!("sync.window.edit", name = self.sync.config_name.clone()).to_string()
+        };
+        let mut root = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(theme.dialog_face))
+            .text_color(rgb(theme.text))
+            .track_focus(&self.sync_window_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    if this.sync.options_open {
+                        this.sync.options_open = false;
+                        cx.notify();
+                    } else {
+                        window.remove_window();
+                    }
+                }
+            }))
+            .child(super::backup::backup_window_titlebar(title, theme))
+            .child(self.render_sync_workbench(cx))
+            .child(self.render_sync_footer(cx));
+        if self.sync.options_open {
+            root = root.child(self.render_sync_options(cx));
+        }
+        root.into_any_element()
+    }
+
+    /// The window footer: the configuration name, its save state and 保存配置.
+    fn render_sync_footer(&self, cx: &mut Context<'_, Self>) -> Div {
+        let theme = self.theme;
+        let name_input: AnyElement = match self.sync.config_name_input.clone() {
+            Some(input) => div()
+                .w(px(260.0))
+                .h(px(26.0))
+                .child(input)
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
+        let (status, color) = if let Some(error) = self.sync.config_error.as_ref() {
+            (error.clone(), theme.danger)
+        } else if self.sync.config_saved {
+            (t!("sync.config.saved").to_string(), theme.brand)
+        } else {
+            (t!("sync.config.status_idle").to_string(), theme.text_muted)
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .flex_none()
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.dialog_face))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("sync.config.name").to_string()),
+                    )
+                    .child(name_input),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .flex_none()
+                    .child(
+                        div()
+                            .max_w(px(430.0))
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(rgb(color))
+                            .child(status),
+                    )
+                    .child(ui::button(
+                        "sync-config-save",
+                        t!("sync.config.save").to_string(),
+                        ButtonKind::Normal,
+                        theme,
+                        cx.listener(|this, _event, _window, cx| this.save_transfer_config(cx)),
+                    )),
+            )
+    }
+
+    /// The 数据传输/同步 comparison workbench, shown inside the transfer window.
+    pub(super) fn render_sync_workbench(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let mut page = div()
             .flex()
@@ -1243,12 +2263,15 @@ impl AppView {
         page.into_any_element()
     }
 
-    /// The topology + mode switch + actions bar.
+    /// The topology + mode switch + actions bar. It uses two rows: the source → target pickers on
+    /// the first and the mode switch with the run controls on the second, so the target picker is
+    /// never squeezed or overlapped in a narrow window.
     fn render_sync_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
         let cross_engine = !self.sync_same_engine();
         let checked = self.sync.checked_indices().len();
         let running = self.sync.running;
+        let ready = self.sync_connections_ready();
 
         let mut modes = div()
             .flex()
@@ -1259,7 +2282,8 @@ impl AppView {
             .rounded(px(6.0))
             .border_1()
             .border_color(rgb(theme.border))
-            .bg(rgb(theme.header_bg));
+            .bg(rgb(theme.header_bg))
+            .flex_none();
         for mode in [
             SyncMode::All,
             SyncMode::Schema,
@@ -1285,9 +2309,9 @@ impl AppView {
                     .text_size(px(12.0))
                     .when(active, |style| {
                         style
-                            .bg(rgb(theme.button_bg))
-                            .text_color(rgb(theme.text))
-                            .font_weight(FontWeight::MEDIUM)
+                            .bg(rgb(theme.primary))
+                            .text_color(rgb(theme.editor_bg))
+                            .font_weight(FontWeight::SEMIBOLD)
                     })
                     .when(!active, |style| style.text_color(rgb(theme.text_muted)))
                     .when(enabled && !active, |style| {
@@ -1301,6 +2325,9 @@ impl AppView {
                     .when(enabled, |style| {
                         style.on_click(move |_event, _window, cx| {
                             let _ = weak.update(cx, |app, cx| {
+                                if app.sync.mode != mode {
+                                    app.sync.config_saved = false;
+                                }
                                 app.sync.mode = mode;
                                 app.sync.sub_tab = match mode {
                                     SyncMode::Schema => SyncSubTab::Schema,
@@ -1342,7 +2369,7 @@ impl AppView {
         let run = ui::button(
             "sync-run",
             run_label,
-            if checked == 0 || running || self.sync.comparing {
+            if checked == 0 || running || self.sync.comparing || !ready {
                 ButtonKind::Disabled
             } else {
                 ButtonKind::Default
@@ -1350,6 +2377,12 @@ impl AppView {
             theme,
             cx.listener(|this, _event, _window, cx| this.run_sync(cx)),
         );
+
+        let target_hint = if self.sync.target_connection.is_none() {
+            t!("sync.select_target").to_string()
+        } else {
+            String::new()
+        };
 
         div()
             .flex()
@@ -1363,93 +2396,48 @@ impl AppView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .child(self.sync_endpoint_group(true, theme))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .text_size(px(13.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child("→"),
+                    )
+                    .child(self.sync_endpoint_group(false, theme))
+                    .child(div().flex_1().min_w(px(0.0))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .gap_3()
                     .px_2()
-                    .py_1()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1()
-                                    .h(px(24.0))
-                                    .px_2()
-                                    .rounded(px(6.0))
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .bg(rgb(theme.editor_bg))
-                                    .child(
-                                        div().w(px(140.0)).h(px(24.0)).child(
-                                            self.sync
-                                                .source_combo
-                                                .clone()
-                                                .map(|combo| combo.into_any_element())
-                                                .unwrap_or_else(|| div().into_any_element()),
-                                        ),
-                                    )
-                                    .child(
-                                        div().w(px(124.0)).h(px(24.0)).child(
-                                            self.sync
-                                                .source_database_combo
-                                                .clone()
-                                                .map(|combo| combo.into_any_element())
-                                                .unwrap_or_else(|| div().into_any_element()),
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("→"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1()
-                                    .h(px(24.0))
-                                    .px_2()
-                                    .rounded(px(6.0))
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .bg(rgb(theme.editor_bg))
-                                    .child(
-                                        div().w(px(140.0)).h(px(24.0)).child(
-                                            self.sync
-                                                .target_combo
-                                                .clone()
-                                                .map(|combo| combo.into_any_element())
-                                                .unwrap_or_else(|| div().into_any_element()),
-                                        ),
-                                    )
-                                    .child(
-                                        div().w(px(124.0)).h(px(24.0)).child(
-                                            self.sync
-                                                .target_database_combo
-                                                .clone()
-                                                .map(|combo| combo.into_any_element())
-                                                .unwrap_or_else(|| div().into_any_element()),
-                                        ),
-                                    ),
-                            ),
-                    )
+                    .pb_2()
                     .child(modes)
+                    .child(div().flex_1().min_w(px(0.0)))
+                    .when(!target_hint.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.warning))
+                                .child(target_hint),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
                             .gap_2()
+                            .flex_none()
                             .child(options_button)
                             .child(run),
                     ),
@@ -1464,6 +2452,63 @@ impl AppView {
                         .child(self.sync.error.clone().unwrap_or_default()),
                 )
             })
+    }
+
+    /// One side of the source → target picker: a label, the connection dropdown and the database
+    /// dropdown in a single bordered group.
+    fn sync_endpoint_group(&self, source: bool, theme: Theme) -> Div {
+        let (connection, database) = if source {
+            (&self.sync.source_combo, &self.sync.source_database_combo)
+        } else {
+            (&self.sync.target_combo, &self.sync.target_database_combo)
+        };
+        let side = if source {
+            t!("sync.config.source").to_string()
+        } else {
+            t!("sync.config.target").to_string()
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(side),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .h(px(26.0))
+                    .px_2()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.editor_bg))
+                    .child(
+                        div().w(px(150.0)).h(px(24.0)).child(
+                            connection
+                                .clone()
+                                .map(|combo| combo.into_any_element())
+                                .unwrap_or_else(|| div().into_any_element()),
+                        ),
+                    )
+                    .child(
+                        div().w(px(130.0)).h(px(24.0)).child(
+                            database
+                                .clone()
+                                .map(|combo| combo.into_any_element())
+                                .unwrap_or_else(|| div().into_any_element()),
+                        ),
+                    ),
+            )
     }
 
     /// The cross-engine banner: structure sync is unavailable, so say why.
@@ -1526,6 +2571,8 @@ impl AppView {
                     .text_color(rgb(theme.text_muted))
                     .child(if self.sync.comparing {
                         t!("common.loading").to_string()
+                    } else if self.sync.target_connection.is_none() {
+                        t!("sync.select_target").to_string()
                     } else {
                         t!("sync.no_tables").to_string()
                     }),
@@ -1577,6 +2624,7 @@ impl AppView {
                                     if let Some(table) = app.sync.tables.get_mut(index) {
                                         table.checked = !table.checked;
                                     }
+                                    app.sync.config_saved = false;
                                     cx.notify();
                                 });
                             })
@@ -1641,6 +2689,7 @@ impl AppView {
                                             for table in &mut app.sync.tables {
                                                 table.checked = !all_checked;
                                             }
+                                            app.sync.config_saved = false;
                                             cx.notify();
                                         });
                                     })
@@ -1701,9 +2750,14 @@ impl AppView {
                 .bg(rgb(theme.editor_bg))
                 .child(
                     div()
+                        .max_w(px(420.0))
                         .text_size(px(12.0))
                         .text_color(rgb(theme.text_muted))
-                        .child(t!("sync.select_table").to_string()),
+                        .child(if self.sync.target_connection.is_none() {
+                            t!("sync.select_target").to_string()
+                        } else {
+                            t!("sync.select_table").to_string()
+                        }),
                 )
                 .into_any_element();
         };
@@ -2059,6 +3113,7 @@ impl AppView {
                                     {
                                         table.force_transfer = !table.force_transfer;
                                     }
+                                    app.sync.config_saved = false;
                                     cx.notify();
                                 });
                             },
@@ -2453,6 +3508,7 @@ impl AppView {
                             } else {
                                 app.sync.existing_only = !app.sync.existing_only;
                             }
+                            app.sync.config_saved = false;
                             cx.notify();
                         });
                     })
@@ -2477,6 +3533,71 @@ impl AppView {
             .child(popup)
             .into_any_element()
     }
+}
+
+/// The localized label of a mode, for the saved-configuration list's 模式 column.
+fn sync_mode_label(mode: SyncMode) -> String {
+    t!(mode.label_key()).to_string()
+}
+
+/// The child window that hosts the 传输 workbench. It re-renders whenever `AppView` changes, so the
+/// comparison, run progress and log stay live while the work happens in the background.
+pub(super) struct TransferWindow {
+    app: WeakEntity<AppView>,
+    _subscription: Subscription,
+}
+
+impl TransferWindow {
+    pub(super) fn new(
+        app: WeakEntity<AppView>,
+        app_entity: &Entity<AppView>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let subscription = cx.observe(app_entity, |_, _, cx| cx.notify());
+        Self {
+            app,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Render for TransferWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        app.update(cx, |app, cx| app.sync_window_contents(cx))
+    }
+}
+
+/// Build the configuration-name field of the transfer window's footer.
+fn make_transfer_name_input(
+    theme: Theme,
+    initial: String,
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<'_, AppView>,
+) -> Entity<TextInput> {
+    let change = app.clone();
+    let placeholder: SharedString = t!("sync.config.name_placeholder").to_string().into();
+    cx.new(move |cx| {
+        TextInput::new(
+            theme,
+            initial,
+            TextInputOptions {
+                placeholder,
+                ..Default::default()
+            },
+            cx,
+        )
+        .on_change(Rc::new(move |text, _window, cx| {
+            let _ = change.update(cx, |app, cx| {
+                app.sync.config_name = text.to_string();
+                app.sync.config_saved = false;
+                app.sync.config_error = None;
+                cx.notify();
+            });
+        }))
+    })
 }
 
 /// List a database's tables through the runtime.

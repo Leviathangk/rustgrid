@@ -1093,6 +1093,27 @@ impl AppView {
                     t!("backup.delete_button").to_string(),
                 )
             }
+            Some(DeleteConfirm::TransferConfigs { indices }) => {
+                if indices.len() == 1 {
+                    let name = self
+                        .transfer_configs
+                        .get(indices[0])
+                        .map(|config| config.name.clone())
+                        .unwrap_or_default();
+                    (
+                        t!("sync.config.delete_title").to_string(),
+                        t!("sync.config.delete_confirm", name = name).to_string(),
+                        t!("sync.config.delete_button").to_string(),
+                    )
+                } else {
+                    let count = indices.len();
+                    (
+                        t!("sync.config.delete_title").to_string(),
+                        t!("sync.config.delete_multi_confirm", count = count).to_string(),
+                        t!("sync.config.delete_button").to_string(),
+                    )
+                }
+            }
             Some(DeleteConfirm::DesignRows { kind, .. }) => {
                 let (message_key, button_key) = match kind {
                     DesignDeleteKind::Fields => {
