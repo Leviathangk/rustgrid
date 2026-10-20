@@ -384,6 +384,9 @@ async fn designer_round_trips_a_table() {
                 nullable: false,
                 primary_key: true,
                 auto_increment: true,
+                identity: "ALWAYS".to_string(),
+                identity_start: "1000".to_string(),
+                identity_increment: "2".to_string(),
                 ..ColumnDef::default()
             },
             ColumnDef {
@@ -430,10 +433,14 @@ async fn designer_round_trips_a_table() {
         .await
         .expect("read the table back");
     assert!(
-        loaded
-            .columns
-            .iter()
-            .any(|column| column.name == "id" && column.primary_key && column.auto_increment),
+        loaded.columns.iter().any(|column| {
+            column.name == "id"
+                && column.primary_key
+                && column.auto_increment
+                && column.identity == "ALWAYS"
+                && column.identity_start == "1000"
+                && column.identity_increment == "2"
+        }),
         "the identity column did not round trip: {:?}",
         loaded.columns
     );
@@ -498,5 +505,51 @@ async fn designer_round_trips_a_table() {
         .drop_table(&database, table)
         .await
         .expect("drop the scratch table");
+    connection.close().await.unwrap();
+}
+
+/// Regression for the query editor showing no result grid on PostgreSQL: the pinned script
+/// session must report result sets, not only row counts.
+#[tokio::test]
+#[ignore = "requires a live PostgreSQL (RUSTGRID_PG_*)"]
+async fn script_session_returns_result_sets() {
+    let config = config();
+    let database = config
+        .database
+        .clone()
+        .unwrap_or_else(|| "postgres".to_string());
+    let connection = PostgresDriver::new()
+        .connect(&config)
+        .await
+        .expect("connect");
+    let mut session = connection
+        .script_session(Some(&database))
+        .await
+        .expect("open the script session")
+        .expect("pin a connection");
+
+    let results = session
+        .execute_many("SELECT 1 AS n, 'x'::text AS t")
+        .await
+        .expect("run the select");
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].has_result_set,
+        "a SELECT produced no result set: {results:?}"
+    );
+    assert_eq!(results[0].columns.len(), 2);
+    assert_eq!(results[0].rows.len(), 1);
+    assert_eq!(results[0].statement, "SELECT 1 AS n, 'x'::text AS t");
+
+    // A zero-row result set still exposes its columns, so the grid can show an empty table.
+    let empty = session
+        .execute_many("SELECT 1 AS n WHERE false")
+        .await
+        .expect("run the empty select");
+    assert_eq!(empty.len(), 1);
+    assert!(empty[0].has_result_set);
+    assert_eq!(empty[0].columns.len(), 1);
+    assert!(empty[0].rows.is_empty());
+
     connection.close().await.unwrap();
 }

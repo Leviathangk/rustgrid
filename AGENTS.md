@@ -267,15 +267,19 @@ touching UI code.
 - **Per-engine table design.** `DriverDescriptor::table_designer` (`TableDesignerSpec`) is the whole
   designer spec, read from the driver through the registry (`AppView::table_designer`) — never by
   matching on an engine id. `tabs` lists the sub-tabs (`DesignerTab`) in order, `column_options` the
-  per-column controls of the detail panel under the field list (`DesignerColumnOption` — `Default`
-  and `Collation` are editors, the rest are check boxes), `field_columns` the field-list cells after
-  列名/类型 (`DesignerFieldColumn`, where `Length`/`Size`, `Decimals`/`Scale` and
-  `Generated`/`Computed` are the same cells under different names) and `option_fields` the rows of
-  the 选项 page (`DesignerOptionField`). The default is MySQL's shape, so an engine opts in by
-  declaring its own, and only a control the engine's designer SQL actually honors is listed, so no
-  driver shows a dead knob. MySQL/MariaDB keep 自动递增/无符号/填充零 and every tab; SQL Server
-  declares 排序规则/稀疏, 大小/比例/计算列, and the extra 唯一键/检查 tabs; SQLite has no 选项/注释
-  (it has neither) and Oracle no 选项, while PostgreSQL's 选项 keeps only 注释. The character-set /
+  per-column controls of the detail panel under the field list (`DesignerColumnOption` — `Default`,
+  `Collation`, `IdentityGeneration` (a drop-down) and `IdentityStart`/`IdentityIncrement` (text) are
+  editors, the rest are check boxes), `field_columns` the field-list cells after 列名/类型
+  (`DesignerFieldColumn`, where `Length`/`Size`, `Decimals`/`Scale` and `Generated`/`Computed` are
+  the same cells under different names), `option_fields` the rows of the 选项 page
+  (`DesignerOptionField`) and `default_suggestions` the common expressions offered by the chevron
+  beside 默认. The default is MySQL's shape, so an engine opts in by declaring its own, and only a
+  control the engine's designer SQL actually honors is listed, so no driver shows a dead knob.
+  MySQL/MariaDB keep 自动递增/无符号/填充零 and every tab; SQL Server declares 排序规则/稀疏,
+  大小/比例/计算列, and the extra 唯一键/检查 tabs; SQLite has no 选项/注释 (it has neither) and
+  Oracle no 选项, while PostgreSQL's 选项 keeps only 注释 and its column detail adds the identity
+  sequence's 生成方式/起始值/增量 (`ColumnDef::identity`/`identity_start`/`identity_increment`).
+  The character-set /
   collation catalogues are queried only when the spec shows a control fed by them
   (`TableDesignView::needs_option_catalogs`). `ColumnDef` carries the per-column attributes
   (`sparse`) and `TableSchema` the SQL Server-only constraint lists (`unique_keys`, `checks`), so a
@@ -946,6 +950,13 @@ make more engines cheap later — do not build those features early.
   (silently in a release build, which has no console). `runsql.rs::ScriptSessionGuard` now spawns
   the release onto the runtime, so every exit path is covered; copy that shape for any future
   long-lived session/handle.
+- **A driver that pins a `ScriptSession` must also override `ScriptSession::execute_many`.** The
+  query editor runs every statement through the pinned session (so `SET`/`BEGIN` survive), and the
+  trait's default implementation forwards to `execute`, which may only report a row count. That is
+  exactly how PostgreSQL queries ended up showing `受影响行数` and no result tab at all: its
+  `execute` drains rows for Run SQL File, while `collect_results` (now backing both
+  `execute_query_many` and the session's `execute_many`) builds result-set grids. Keep the two
+  paths on one decoder.
 - Stored passwords are encrypted with XChaCha20-Poly1305 (`rustgrid-config/src/secrets.rs`);
   `secrets.json` holds ciphertext keyed by profile `id` and `secret.key` holds the key. The
   profile JSON must stay password-free (a test asserts the plaintext never hits disk).

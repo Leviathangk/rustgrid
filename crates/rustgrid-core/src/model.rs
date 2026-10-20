@@ -482,6 +482,13 @@ pub struct ColumnDef {
     pub default: String,
     pub primary_key: bool,
     pub auto_increment: bool,
+    /// How an identity column is generated: `ALWAYS` or `BY DEFAULT` (PostgreSQL). Empty for
+    /// engines without the choice, or for a serial/auto-increment column that has no identity.
+    pub identity: String,
+    /// The identity sequence's start value, as text.
+    pub identity_start: String,
+    /// The identity sequence's increment, as text.
+    pub identity_increment: String,
     pub unsigned: bool,
     pub zerofill: bool,
     /// Whether the column is `SPARSE` (SQL Server; ignored elsewhere).

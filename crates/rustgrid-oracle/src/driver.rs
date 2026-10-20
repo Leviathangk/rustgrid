@@ -126,6 +126,13 @@ impl Driver for OracleDriver {
                     DesignerFieldColumn::Comment,
                 ],
                 option_fields: Vec::new(),
+                default_suggestions: vec![
+                    "SYSDATE",
+                    "SYSTIMESTAMP",
+                    "CURRENT_DATE",
+                    "CURRENT_TIMESTAMP",
+                    "NULL",
+                ],
                 // Oracle allows one `GENERATED … AS IDENTITY` column per table, on a numeric type.
                 auto_increment: AutoIncrementRule {
                     types: vec!["number", "numeric", "decimal", "integer", "int"],

@@ -232,6 +232,10 @@ enum InputTag {
     /// The selected column's own collation (the detail panel's 排序规则 control).
     ColumnCollation,
     AutoIncrement,
+    /// The selected identity column's generation mode (`ALWAYS` / `BY DEFAULT`).
+    IdentityGeneration,
+    IdentityStart,
+    IdentityIncrement,
     Comment,
     /// The index field editor's search box.
     IndexFieldSearch,
@@ -641,6 +645,14 @@ pub(super) struct TableDesignView {
     /// editor can size itself to the room the view actually has.
     pub(super) root_bounds: Rc<RefCell<Bounds<Pixels>>>,
     pub(super) default_input: Entity<TextInput>,
+    /// The list of common default expressions, opened from the chevron beside 默认.
+    pub(super) default_menu_open: bool,
+    /// The 默认 field's bottom-left in window coordinates, where its suggestions open.
+    pub(super) default_anchor: Rc<RefCell<Option<Point<Pixels>>>>,
+    /// The identity controls shown under 自动递增 (PostgreSQL).
+    pub(super) identity_generation_combo: Entity<ComboBox>,
+    pub(super) identity_start_input: Entity<TextInput>,
+    pub(super) identity_increment_input: Entity<TextInput>,
     /// Pick-lists for the Options tab, fed by `engines`/`charsets`/`collations`.
     pub(super) engine_combo: Entity<ComboBox>,
     pub(super) charset_combo: Entity<ComboBox>,
@@ -763,6 +775,22 @@ impl TableDesignView {
         let column_types = connection.column_types();
         let engines = connection.storage_engines();
         let default_input = text_input(theme, String::new(), weak.clone(), InputTag::Default, cx);
+        let identity_generation_combo =
+            option_combo(theme, weak.clone(), InputTag::IdentityGeneration, cx);
+        let identity_start_input = text_input(
+            theme,
+            String::new(),
+            weak.clone(),
+            InputTag::IdentityStart,
+            cx,
+        );
+        let identity_increment_input = text_input(
+            theme,
+            String::new(),
+            weak.clone(),
+            InputTag::IdentityIncrement,
+            cx,
+        );
         let engine_combo = option_combo(theme, weak.clone(), InputTag::Engine, cx);
         let charset_combo = option_combo(theme, weak.clone(), InputTag::Charset, cx);
         let collation_combo = option_combo(theme, weak.clone(), InputTag::Collation, cx);
@@ -842,6 +870,11 @@ impl TableDesignView {
             combo_anchor: Rc::new(RefCell::new(BTreeMap::new())),
             root_bounds: Rc::new(RefCell::new(Bounds::default())),
             default_input,
+            default_menu_open: false,
+            default_anchor: Rc::new(RefCell::new(None)),
+            identity_generation_combo,
+            identity_start_input,
+            identity_increment_input,
             engine_combo,
             charset_combo,
             collation_combo,
@@ -951,6 +984,27 @@ impl TableDesignView {
                 }
             }
             InputTag::AutoIncrement => self.schema.options.auto_increment = text.to_string(),
+            InputTag::IdentityGeneration => {
+                if let Some(index) = self.selected_field
+                    && let Some(column) = self.schema.columns.get_mut(index)
+                {
+                    column.identity = text.to_string();
+                }
+            }
+            InputTag::IdentityStart => {
+                if let Some(index) = self.selected_field
+                    && let Some(column) = self.schema.columns.get_mut(index)
+                {
+                    column.identity_start = text.to_string();
+                }
+            }
+            InputTag::IdentityIncrement => {
+                if let Some(index) = self.selected_field
+                    && let Some(column) = self.schema.columns.get_mut(index)
+                {
+                    column.identity_increment = text.to_string();
+                }
+            }
             InputTag::Comment => self.schema.options.comment = text.to_string(),
             InputTag::IndexFieldSearch => {
                 // The search only narrows the editor's list; it changes nothing in the draft.
@@ -968,15 +1022,59 @@ impl TableDesignView {
         cx.notify();
     }
 
-    /// Push the selected field's default into the detail panel's input.
+    /// Take one of the engine's common default expressions from the 默认 suggestions.
+    pub(super) fn select_default_suggestion(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        if let Some(index) = self.selected_field
+            && let Some(column) = self.schema.columns.get_mut(index)
+        {
+            column.default = value.to_string();
+        }
+        self.default_input
+            .update(cx, |input, cx| input.set_text(value.to_string(), cx));
+        self.default_menu_open = false;
+        self.dirty = true;
+        cx.notify();
+    }
+
+    /// Push the selected field's default and identity controls into the detail panel.
     fn sync_selected_input(&mut self, cx: &mut Context<'_, Self>) {
-        let default = self
+        self.default_menu_open = false;
+        let column = self
             .selected_field
-            .and_then(|index| self.schema.columns.get(index))
+            .and_then(|index| self.schema.columns.get(index));
+        let default = column
             .map(|column| column.default.clone())
             .unwrap_or_default();
         self.default_input
             .update(cx, |input, cx| input.set_text(default, cx));
+        let identity =
+            column.filter(|column| column.auto_increment && !column.identity.trim().is_empty());
+        let generation = identity
+            .map(|column| column.identity.clone())
+            .filter(|identity| !identity.trim().is_empty())
+            .unwrap_or_else(|| "BY DEFAULT".to_string());
+        let start = identity
+            .map(|column| column.identity_start.clone())
+            .unwrap_or_default();
+        let increment = identity
+            .map(|column| column.identity_increment.clone())
+            .unwrap_or_default();
+        let enabled = identity.is_some();
+        self.identity_start_input
+            .update(cx, |input, cx| input.set_text(start, cx));
+        self.identity_increment_input
+            .update(cx, |input, cx| input.set_text(increment, cx));
+        self.identity_generation_combo.update(cx, |combo, cx| {
+            combo.set_options(
+                vec![
+                    ComboOption::plain("BY DEFAULT"),
+                    ComboOption::plain("ALWAYS"),
+                ],
+                cx,
+            );
+            combo.set_selected(generation, cx);
+            combo.set_enabled(enabled, cx);
+        });
         // The detail panel's per-column collation picker follows the selected field.
         if self
             .designer
@@ -1135,6 +1233,7 @@ impl TableDesignView {
         self.field_rows.rows.clear();
         self.field_rows.rows.insert(index);
         self.field_rows.anchor = Some(index);
+        self.default_menu_open = false;
         self.sync_selected_input(cx);
         cx.notify();
     }
@@ -1149,6 +1248,7 @@ impl TableDesignView {
         self.edit = None;
         self.edit_blur = None;
         self.type_combo = None;
+        self.default_menu_open = false;
         apply_row_selection(
             &mut self.field_rows,
             &mut self.selected_field,
@@ -1165,6 +1265,7 @@ impl TableDesignView {
         self.edit = None;
         self.edit_blur = None;
         self.type_combo = None;
+        self.default_menu_open = false;
         self.index_edit = None;
         self.index_edit_blur = None;
         self.index_combo = None;
@@ -1539,15 +1640,38 @@ impl TableDesignView {
             for (position, other) in self.schema.columns.iter_mut().enumerate() {
                 if position != index {
                     other.auto_increment = false;
+                    other.identity.clear();
+                    other.identity_start.clear();
+                    other.identity_increment.clear();
                 }
             }
         }
+        // Only engines that declare the identity sequence controls (PostgreSQL) use these fields,
+        // and only they must keep a default off an identity column.
+        let identity_controls = self
+            .designer
+            .column_options
+            .iter()
+            .any(|option| matches!(option, DesignerColumnOption::IdentityGeneration));
         if let Some(column) = self.schema.columns.get_mut(index) {
             column.auto_increment = !column.auto_increment;
             if column.auto_increment {
                 column.nullable = false;
+                if identity_controls {
+                    column.default.clear();
+                    // Start as PostgreSQL's `BY DEFAULT` mode with the sequence's usual 1/1
+                    // options; both are editable below.
+                    column.identity = "BY DEFAULT".to_string();
+                    column.identity_start = "1".to_string();
+                    column.identity_increment = "1".to_string();
+                }
+            } else if identity_controls {
+                column.identity.clear();
+                column.identity_start.clear();
+                column.identity_increment.clear();
             }
         }
+        self.sync_selected_input(cx);
         self.mark_dirty(cx);
     }
 

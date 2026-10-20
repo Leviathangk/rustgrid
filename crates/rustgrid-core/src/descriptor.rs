@@ -317,6 +317,12 @@ pub enum DesignerColumnOption {
     Default,
     /// Auto-increment (MySQL) / identity (SQL Server, Oracle, PostgreSQL).
     AutoIncrement,
+    /// How an identity column is generated: `ALWAYS` or `BY DEFAULT` (PostgreSQL).
+    IdentityGeneration,
+    /// The identity sequence's start value (PostgreSQL).
+    IdentityStart,
+    /// The identity sequence's increment (PostgreSQL).
+    IdentityIncrement,
     /// Unsigned integer columns (MySQL/MariaDB).
     Unsigned,
     /// Zerofill (MySQL/MariaDB).
@@ -332,7 +338,11 @@ impl DesignerColumnOption {
     /// [`Collation`](Self::Collation)) are editors.
     pub fn is_toggle(self) -> bool {
         match self {
-            DesignerColumnOption::Default | DesignerColumnOption::Collation => false,
+            DesignerColumnOption::Default
+            | DesignerColumnOption::Collation
+            | DesignerColumnOption::IdentityGeneration
+            | DesignerColumnOption::IdentityStart
+            | DesignerColumnOption::IdentityIncrement => false,
             DesignerColumnOption::AutoIncrement
             | DesignerColumnOption::Unsigned
             | DesignerColumnOption::Zerofill
@@ -345,6 +355,9 @@ impl DesignerColumnOption {
         match self {
             DesignerColumnOption::Default => "design.default",
             DesignerColumnOption::AutoIncrement => "design.auto_increment",
+            DesignerColumnOption::IdentityGeneration => "design.identity.generation",
+            DesignerColumnOption::IdentityStart => "design.identity.start",
+            DesignerColumnOption::IdentityIncrement => "design.identity.increment",
             DesignerColumnOption::Unsigned => "design.unsigned",
             DesignerColumnOption::Zerofill => "design.fill_zero",
             DesignerColumnOption::Collation => "design.collation",
@@ -540,6 +553,9 @@ pub struct TableDesignerSpec {
     pub field_columns: Vec<DesignerFieldColumn>,
     /// The rows shown by the Options tab, in order.
     pub option_fields: Vec<DesignerOptionField>,
+    /// Common default expressions offered beside the 默认 field, in order. Empty when the engine
+    /// declares none, which leaves the field a plain text box.
+    pub default_suggestions: Vec<&'static str>,
     /// The per-column options the index field editor shows, in order.
     pub index_columns: Vec<DesignerIndexColumn>,
     /// The 索引类型 choices, in order: each engine's own index kinds.
@@ -646,6 +662,7 @@ impl Default for TableDesignerSpec {
                 DesignerOptionField::AutoIncrement,
                 DesignerOptionField::Comment,
             ],
+            default_suggestions: vec!["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "NULL"],
             // MySQL's `AUTO_INCREMENT` is a single integer column per table, changeable in place.
             auto_increment: AutoIncrementRule {
                 types: vec![

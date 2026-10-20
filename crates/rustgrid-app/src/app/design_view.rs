@@ -16,8 +16,12 @@ impl TableDesignView {
             DesignerColumnOption::Unsigned => self.toggle_unsigned(cx),
             DesignerColumnOption::Zerofill => self.toggle_zerofill(cx),
             DesignerColumnOption::Sparse => self.toggle_sparse(cx),
-            // The two editor rows are not toggles.
-            DesignerColumnOption::Default | DesignerColumnOption::Collation => {}
+            // The editor rows are not toggles.
+            DesignerColumnOption::Default
+            | DesignerColumnOption::Collation
+            | DesignerColumnOption::IdentityGeneration
+            | DesignerColumnOption::IdentityStart
+            | DesignerColumnOption::IdentityIncrement => {}
         }
     }
 }
@@ -92,6 +96,9 @@ impl TableDesignView {
         }
         if self.fk_ref_open {
             root = root.child(self.render_fk_ref_popup(cx));
+        }
+        if self.default_menu_open {
+            root = root.child(self.render_default_suggestions(cx));
         }
 
         root.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -656,20 +663,19 @@ impl TableDesignView {
                     && (column.auto_increment || rule.allows(&column.data_type))
             })
             .unwrap_or(false);
+        // The identity sequence controls only apply to a column that is an identity (or was just
+        // turned into one through the 自动递增 check box); a serial column keeps its own sequence
+        // and leaves them out.
+        let identity_options = column
+            .map(|column| column.auto_increment && !column.identity.trim().is_empty())
+            .unwrap_or(false);
+        let identity_controls = self
+            .designer
+            .column_options
+            .iter()
+            .any(|option| matches!(option, DesignerColumnOption::IdentityGeneration));
 
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .h(px(DESIGN_DETAIL_HEIGHT))
-            .w_full()
-            .px_2()
-            .py_2()
-            .gap_2()
-            .bg(rgb(theme.dialog_face))
-            .border_t_1()
-            .border_color(rgb(theme.border));
-
+        let mut rows: Vec<AnyElement> = Vec::new();
         for option in self.designer.column_options.iter().copied() {
             // A control the engine cannot use on the selected column is left out entirely rather
             // than shown dead: SQL Server's `IDENTITY` (one numeric column per table, and only on a
@@ -677,14 +683,77 @@ impl TableDesignView {
             if option == DesignerColumnOption::AutoIncrement && !identity_editable {
                 continue;
             }
+            if matches!(
+                option,
+                DesignerColumnOption::IdentityGeneration
+                    | DesignerColumnOption::IdentityStart
+                    | DesignerColumnOption::IdentityIncrement
+            ) && !identity_options
+            {
+                continue;
+            }
+            // An identity column cannot also have a `DEFAULT` (PostgreSQL rejects the pair).
+            if option == DesignerColumnOption::Default
+                && identity_controls
+                && column.is_some_and(|column| column.auto_increment)
+            {
+                continue;
+            }
             let row = match option {
-                DesignerColumnOption::Default => detail_editor_row(
-                    t!(option.label_key()),
-                    div()
+                DesignerColumnOption::Default => {
+                    let mut control = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
                         .w(px(360.0))
                         .h(px(22.0))
-                        .when(!enabled, |style| style.opacity(0.5))
-                        .child(self.default_input.clone())
+                        .when(!enabled, |style| style.opacity(0.5));
+                    let anchor = self.default_anchor.clone();
+                    let mut field = div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h(px(22.0))
+                        .on_children_prepainted(move |bounds, _window, _cx| {
+                            if let Some(first) = bounds.first() {
+                                *anchor.borrow_mut() = Some(Point::new(
+                                    first.origin.x,
+                                    first.origin.y + first.size.height,
+                                ));
+                            }
+                        })
+                        .child(self.default_input.clone());
+                    if enabled && !self.designer.default_suggestions.is_empty() {
+                        field = field.child(self.render_default_suggestion_button());
+                    }
+                    control = control.child(field);
+                    detail_editor_row(t!(option.label_key()), control.into_any_element())
+                }
+                DesignerColumnOption::IdentityGeneration => detail_editor_row(
+                    t!(option.label_key()),
+                    div()
+                        .w(px(OPTION_COMBO_WIDTH))
+                        .h(px(22.0))
+                        .when(!identity_options, |style| style.opacity(0.5))
+                        .child(self.identity_generation_combo.clone())
+                        .into_any_element(),
+                ),
+                DesignerColumnOption::IdentityStart => detail_editor_row(
+                    t!(option.label_key()),
+                    div()
+                        .w(px(120.0))
+                        .h(px(22.0))
+                        .when(!identity_options, |style| style.opacity(0.5))
+                        .child(self.identity_start_input.clone())
+                        .into_any_element(),
+                ),
+                DesignerColumnOption::IdentityIncrement => detail_editor_row(
+                    t!(option.label_key()),
+                    div()
+                        .w(px(120.0))
+                        .h(px(22.0))
+                        .when(!identity_options, |style| style.opacity(0.5))
+                        .child(self.identity_increment_input.clone())
                         .into_any_element(),
                 ),
                 DesignerColumnOption::Collation => detail_editor_row(
@@ -715,10 +784,115 @@ impl TableDesignView {
                     detail_toggle_row(option, checked, enabled, theme, self.self_weak.clone())
                 }
             };
+            rows.push(row);
+        }
+
+        // The panel's height follows its rows: PostgreSQL's identity controls add three rows that
+        // the fixed MySQL-oriented height would clip.
+        let height = (16.0 + rows.len() as f32 * 22.0 + rows.len().saturating_sub(1) as f32 * 8.0)
+            .max(DESIGN_DETAIL_HEIGHT);
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .h(px(height))
+            .w_full()
+            .px_2()
+            .py_2()
+            .gap_2()
+            .bg(rgb(theme.dialog_face))
+            .border_t_1()
+            .border_color(rgb(theme.border));
+        for row in rows {
             panel = panel.child(row);
         }
 
         panel
+    }
+
+    /// The chevron beside 默认 that opens the engine's list of common default expressions.
+    fn render_default_suggestion_button(&self) -> AnyElement {
+        let theme = self.theme;
+        let weak = self.self_weak.clone();
+        div()
+            .id("design-default-suggestions")
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
+            .w(px(20.0))
+            .h(px(20.0))
+            .rounded_sm()
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+            .tooltip(ui::text_tooltip(
+                t!("design.default_suggestions").to_string(),
+            ))
+            .on_click(move |_event, _window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    view.default_menu_open = !view.default_menu_open;
+                    cx.notify();
+                });
+            })
+            .child(
+                svg()
+                    .path("icons/chevron-down.svg")
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .text_color(rgb(theme.text_muted)),
+            )
+            .into_any_element()
+    }
+
+    /// The 默认 suggestions popup, anchored under the default field.
+    fn render_default_suggestions(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let origin = self.root_bounds.borrow().origin;
+        let anchor = self
+            .default_anchor
+            .borrow()
+            .map(|anchor| Point::new(anchor.x - origin.x, anchor.y - origin.y))
+            .unwrap_or_default();
+        let weak = self.self_weak.clone();
+        let mut list = div()
+            .id("design-default-options")
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        for (position, value) in self.designer.default_suggestions.iter().enumerate() {
+            let selected = value.to_string();
+            let choose = weak.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "design-default-option-{position}"
+                    )))
+                    .flex()
+                    .items_center()
+                    .h(px(22.0))
+                    .px_2()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                    .on_click(move |_event, _window, cx| {
+                        let _ = choose
+                            .update(cx, |view, cx| view.select_default_suggestion(&selected, cx));
+                    })
+                    .child(value.to_string()),
+            );
+        }
+        let popup = ui::popup_panel(theme)
+            .id("design-default-list")
+            .left(anchor.x)
+            .top(anchor.y)
+            .w(px(240.0))
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.default_menu_open = false;
+                cx.notify();
+            }));
+        deferred(popup.child(list))
+            .with_priority(100)
+            .into_any_element()
     }
 
     fn render_indexes(&self, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -3252,6 +3426,9 @@ fn detail_option_id(option: DesignerColumnOption) -> &'static str {
     match option {
         DesignerColumnOption::Default => "default",
         DesignerColumnOption::AutoIncrement => "auto-increment",
+        DesignerColumnOption::IdentityGeneration => "identity-generation",
+        DesignerColumnOption::IdentityStart => "identity-start",
+        DesignerColumnOption::IdentityIncrement => "identity-increment",
         DesignerColumnOption::Unsigned => "unsigned",
         DesignerColumnOption::Zerofill => "zerofill",
         DesignerColumnOption::Collation => "collation",

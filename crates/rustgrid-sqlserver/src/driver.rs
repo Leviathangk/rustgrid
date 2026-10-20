@@ -155,6 +155,13 @@ impl Driver for SqlServerDriver {
                     DesignerFieldColumn::Sparse,
                 ],
                 option_fields: Vec::new(),
+                default_suggestions: vec![
+                    "GETDATE()",
+                    "SYSDATETIME()",
+                    "CURRENT_TIMESTAMP",
+                    "NEWID()",
+                    "NULL",
+                ],
                 // SQL Server has at most one `IDENTITY` column per table, only a numeric one, and
                 // `ALTER COLUMN` cannot give an existing column an `IDENTITY`: it is offered on a
                 // new column (or a new table) and shown read-only on one the table already has.

@@ -84,14 +84,18 @@ impl Driver for PostgresDriver {
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
             // PostgreSQL's designer writes columns, indexes, foreign keys and comments; its table
-            // charset/collation/auto-increment are not applied, so 选项 shows the comment only and
-            // a column carries no collation, generated-column or identity control of its own
-            // beyond 自动递增 (serial / identity are both read into it).
+            // charset/collation/auto-increment are not applied, so 选项 shows the comment only. A
+            // column carries no collation or generated-column control, but 自动递增 opens the
+            // identity sequence's generation mode, start and increment (serial is read into the
+            // same flag without an identity).
             table_designer: TableDesignerSpec {
                 tabs: TableDesignerSpec::standard_tabs(),
                 column_options: vec![
                     DesignerColumnOption::Default,
                     DesignerColumnOption::AutoIncrement,
+                    DesignerColumnOption::IdentityGeneration,
+                    DesignerColumnOption::IdentityStart,
+                    DesignerColumnOption::IdentityIncrement,
                 ],
                 field_columns: vec![
                     DesignerFieldColumn::Length,
@@ -101,6 +105,16 @@ impl Driver for PostgresDriver {
                     DesignerFieldColumn::Comment,
                 ],
                 option_fields: vec![DesignerOptionField::Comment],
+                default_suggestions: vec![
+                    "CURRENT_TIMESTAMP",
+                    "CURRENT_DATE",
+                    "CURRENT_TIME",
+                    "LOCALTIME",
+                    "LOCALTIMESTAMP",
+                    "now()",
+                    "gen_random_uuid()",
+                    "NULL",
+                ],
                 // PostgreSQL's identity/serial is one numeric column per table.
                 auto_increment: AutoIncrementRule {
                     types: vec![

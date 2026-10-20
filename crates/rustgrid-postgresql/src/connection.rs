@@ -240,6 +240,12 @@ impl ScriptSession for PostgresScriptSession {
             last_insert_id: None,
         })
     }
+
+    /// The query editor runs every statement through this session, so its result sets must survive
+    /// here; `execute` above is the Run SQL File path, which only needs counts.
+    async fn execute_many(&mut self, sql: &str) -> Result<Vec<QueryResult>> {
+        collect_results(&mut self.connection, sql).await
+    }
 }
 
 #[async_trait]
@@ -617,60 +623,7 @@ impl Connection for PostgresConnection {
     ) -> Result<Vec<QueryResult>> {
         let pool = self.pool(database).await?;
         let mut connection = pool.acquire().await.map_err(map_query_error)?;
-        // One pinned connection for the whole script so `BEGIN`/`COMMIT`, `SET LOCAL` and
-        // temporary tables behave correctly. The server splits the script (including dollar-quoted
-        // function bodies) itself via the simple query protocol.
-        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql.to_string())).fetch_many(&mut *connection);
-        let mut results: Vec<QueryResult> = Vec::new();
-        let mut columns: Vec<ColumnInfo> = Vec::new();
-        let mut rows: Vec<Vec<CellValue>> = Vec::new();
-        while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
-            match item {
-                Either::Left(done) => {
-                    let has_result_set = !columns.is_empty() || !rows.is_empty();
-                    results.push(QueryResult {
-                        statement: String::new(),
-                        columns: std::mem::take(&mut columns),
-                        rows: std::mem::take(&mut rows),
-                        rows_affected: done.rows_affected(),
-                        has_result_set,
-                        last_insert_id: None,
-                    });
-                }
-                Either::Right(row) => {
-                    if columns.is_empty() && rows.is_empty() {
-                        columns = row.columns().iter().map(column_info).collect();
-                    }
-                    let values = (0..columns.len())
-                        .map(|index| decode_text_cell(&row, index))
-                        .collect();
-                    rows.push(values);
-                }
-            }
-        }
-        drop(stream);
-
-        let statements = split_statements(sql);
-        if results.len() == statements.len() {
-            for (result, statement) in results.iter_mut().zip(statements.iter()) {
-                result.statement = statement.clone();
-                // A zero-row result set exposes no columns through `fetch_many`; prepare the single
-                // statement to recover its metadata (not `describe`, which is `offline`-gated).
-                if !result.has_result_set
-                    && crate::helpers::returns_result_set(statement)
-                    && let Ok(described) = prepare_columns(&pool, statement).await
-                {
-                    result.columns = described;
-                    result.has_result_set = true;
-                }
-            }
-        } else {
-            for result in results.iter_mut() {
-                result.statement = sql.to_string();
-            }
-        }
-
-        Ok(results)
+        collect_results(&mut connection, sql).await
     }
 
     async fn create_database(&self, name: &str, options: &DatabaseOptions) -> Result<()> {
@@ -1236,9 +1189,72 @@ fn column_info(column: &sqlx::postgres::PgColumn) -> ColumnInfo {
     }
 }
 
+/// Run a script on one pinned connection, returning one [`QueryResult`] per statement. The server
+/// splits the script itself (including dollar-quoted function bodies) through the simple query
+/// protocol; `sqlx` reports each statement's rows and completion in order.
+async fn collect_results(
+    connection: &mut sqlx::PgConnection,
+    sql: &str,
+) -> Result<Vec<QueryResult>> {
+    let mut stream = sqlx::raw_sql(AssertSqlSafe(sql.to_string())).fetch_many(&mut *connection);
+    let mut results: Vec<QueryResult> = Vec::new();
+    let mut columns: Vec<ColumnInfo> = Vec::new();
+    let mut rows: Vec<Vec<CellValue>> = Vec::new();
+    while let Some(item) = stream.try_next().await.map_err(map_query_error)? {
+        match item {
+            Either::Left(done) => {
+                let has_result_set = !columns.is_empty() || !rows.is_empty();
+                results.push(QueryResult {
+                    statement: String::new(),
+                    columns: std::mem::take(&mut columns),
+                    rows: std::mem::take(&mut rows),
+                    rows_affected: done.rows_affected(),
+                    has_result_set,
+                    last_insert_id: None,
+                });
+            }
+            Either::Right(row) => {
+                if columns.is_empty() && rows.is_empty() {
+                    columns = row.columns().iter().map(column_info).collect();
+                }
+                let values = (0..columns.len())
+                    .map(|index| decode_text_cell(&row, index))
+                    .collect();
+                rows.push(values);
+            }
+        }
+    }
+    drop(stream);
+
+    let statements = split_statements(sql);
+    if results.len() == statements.len() {
+        for (result, statement) in results.iter_mut().zip(statements.iter()) {
+            result.statement = statement.clone();
+            // A zero-row result set exposes no columns through `fetch_many`; prepare the single
+            // statement to recover its metadata (not `describe`, which is `offline`-gated).
+            if !result.has_result_set
+                && crate::helpers::returns_result_set(statement)
+                && let Ok(described) = prepare_columns(connection, statement).await
+            {
+                result.columns = described;
+                result.has_result_set = true;
+            }
+        }
+    } else {
+        for result in results.iter_mut() {
+            result.statement = sql.to_string();
+        }
+    }
+
+    Ok(results)
+}
+
 /// Prepare one statement to recover its column metadata when a result set had zero rows.
-async fn prepare_columns(pool: &PgPool, sql: &str) -> Result<Vec<ColumnInfo>> {
-    let statement = pool
+async fn prepare_columns(
+    connection: &mut sqlx::PgConnection,
+    sql: &str,
+) -> Result<Vec<ColumnInfo>> {
+    let statement = connection
         .prepare(AssertSqlSafe(sql.to_string()).into_sql_str())
         .await
         .map_err(map_query_error)?;

@@ -79,6 +79,12 @@ impl Driver for SqliteDriver {
                     DesignerFieldColumn::Key,
                 ],
                 option_fields: Vec::new(),
+                default_suggestions: vec![
+                    "CURRENT_TIMESTAMP",
+                    "CURRENT_DATE",
+                    "CURRENT_TIME",
+                    "NULL",
+                ],
                 // `AUTOINCREMENT` only exists on an `INTEGER PRIMARY KEY`.
                 auto_increment: AutoIncrementRule {
                     types: vec!["integer"],
