@@ -100,6 +100,7 @@ impl Driver for SqliteDriver {
                     },
                 ],
                 index_comment: false,
+                trigger_definition: Default::default(),
             },
             id: DriverId::new("sqlite"),
             display_name: "SQLite".to_string(),

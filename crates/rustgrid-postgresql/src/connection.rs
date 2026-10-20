@@ -1027,6 +1027,19 @@ impl Connection for PostgresConnection {
         crate::schema::table_schema_sql(&schema, &bare, original, modified)
     }
 
+    fn table_schema_trigger_sql(
+        &self,
+        _database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> Vec<String> {
+        let (schema, bare) = split_qualified(table)
+            .map(|(schema, bare)| (schema.to_string(), bare.to_string()))
+            .unwrap_or_else(|| ("public".to_string(), table.to_string()));
+        crate::schema::trigger_sql(&schema, &bare, original, modified)
+    }
+
     async fn close(&self) -> Result<()> {
         let pools: Vec<PgPool> = self.pools.lock().await.values().cloned().collect();
         for pool in pools {

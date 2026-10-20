@@ -18,7 +18,7 @@ pub use descriptor::{
     ConnectionFieldLabel, ConnectionFieldSpec, ConnectionFormSpec, ConnectionHomePage,
     ConnectionPage, ConnectionStandardField, DesignerColumnOption, DesignerFieldColumn,
     DesignerIndexColumn, DesignerIndexKind, DesignerOptionField, DesignerTab, DriverDescriptor,
-    DriverIconStyle, TableDesignerSpec,
+    DriverIconStyle, TableDesignerSpec, TriggerDefinition,
 };
 pub use dialect::DriverDialect;
 pub use driver::{
@@ -27,11 +27,11 @@ pub use driver::{
 pub use error::{Error, Result};
 pub use model::{
     BackupObjectKind, CellValue, CheckDef, ColumnDef, ColumnInfo, ConnectionConfig,
-    ConnectionProfile, DatabaseInfo, DatabaseOptions, DriverId, FilterCondition, FilterConjunction,
-    FilterGroup, FilterNode, FilterOperator, ForeignKeyDef, IndexColumnDef, IndexDef, ObjectDump,
-    ObjectKind, PageRequest, QueryResult, RowInsert, RowUpdate, SavedBackup, SavedBackupSelection,
-    SavedQuery, SavedTransfer, SortColumn, TableInfo, TableOptions, TablePage, TableSchema,
-    TableStatus, TransferMode, TriggerDef, UniqueKeyDef,
+    ConnectionProfile, DatabaseInfo, DatabaseOptions, DriverId, ExcludeDef, FilterCondition,
+    FilterConjunction, FilterGroup, FilterNode, FilterOperator, ForeignKeyDef, IndexColumnDef,
+    IndexDef, ObjectDump, ObjectKind, PageRequest, QueryResult, RowInsert, RowUpdate, RuleDef,
+    SavedBackup, SavedBackupSelection, SavedQuery, SavedTransfer, SortColumn, TableInfo,
+    TableOptions, TablePage, TableSchema, TableStatus, TransferMode, TriggerDef, UniqueKeyDef,
 };
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use registry::{BuiltinDriverSource, DriverRegistry, DriverSource};

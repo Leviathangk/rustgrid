@@ -255,8 +255,16 @@ pub enum DesignerTab {
     UniqueKeys,
     /// Check constraints.
     Checks,
+    /// PostgreSQL exclusion constraints.
+    Excludes,
+    /// PostgreSQL rewrite rules.
+    Rules,
+    /// Table triggers.
+    Triggers,
     /// Table-level storage options.
     Options,
+    /// MySQL/MariaDB partitioning.
+    Partition,
     /// The table's comment.
     Comment,
     /// The statement Save would run.
@@ -265,13 +273,17 @@ pub enum DesignerTab {
 
 impl DesignerTab {
     /// Every tab, in the designer's default order.
-    pub const ALL: [DesignerTab; 8] = [
+    pub const ALL: [DesignerTab; 12] = [
         DesignerTab::Fields,
         DesignerTab::Indexes,
         DesignerTab::ForeignKeys,
         DesignerTab::UniqueKeys,
         DesignerTab::Checks,
+        DesignerTab::Excludes,
+        DesignerTab::Rules,
+        DesignerTab::Triggers,
         DesignerTab::Options,
+        DesignerTab::Partition,
         DesignerTab::Comment,
         DesignerTab::Sql,
     ];
@@ -284,7 +296,11 @@ impl DesignerTab {
             DesignerTab::ForeignKeys => "design.tab.foreign_keys",
             DesignerTab::UniqueKeys => "design.tab.unique_keys",
             DesignerTab::Checks => "design.tab.checks",
+            DesignerTab::Excludes => "design.tab.excludes",
+            DesignerTab::Rules => "design.tab.rules",
+            DesignerTab::Triggers => "design.tab.triggers",
             DesignerTab::Options => "design.tab.options",
+            DesignerTab::Partition => "design.tab.partition",
             DesignerTab::Comment => "design.tab.comment",
             DesignerTab::Sql => "design.tab.sql",
         }
@@ -298,7 +314,11 @@ impl DesignerTab {
             DesignerTab::ForeignKeys => "design-tab-foreign-keys",
             DesignerTab::UniqueKeys => "design-tab-unique-keys",
             DesignerTab::Checks => "design-tab-checks",
+            DesignerTab::Excludes => "design-tab-excludes",
+            DesignerTab::Rules => "design-tab-rules",
+            DesignerTab::Triggers => "design-tab-triggers",
             DesignerTab::Options => "design-tab-options",
+            DesignerTab::Partition => "design-tab-partition",
             DesignerTab::Comment => "design-tab-comment",
             DesignerTab::Sql => "design-tab-sql",
         }
@@ -477,6 +497,18 @@ impl AutoIncrementRule {
     }
 }
 
+/// How the designer's trigger body editor is interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TriggerDefinition {
+    /// MySQL/MariaDB: the editor holds the trigger body; the designer writes
+    /// `CREATE TRIGGER … FOR EACH ROW <body>` and edits timing/event separately.
+    #[default]
+    Body,
+    /// SQL Server/PostgreSQL/Oracle: the editor holds the complete `CREATE TRIGGER` statement;
+    /// the designer only drops and replays it, and the name/timing/event cells are read-only.
+    Full,
+}
+
 /// One per-column option an engine's indexes carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesignerIndexColumn {
@@ -531,8 +563,9 @@ impl DesignerIndexKind {
 /// opt in keeps working.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDesignerSpec {
-    /// The sub-tabs shown, in order. 触发器 is deliberately absent: the designer cannot create or
-    /// edit a trigger yet, so it has no tab until it can.
+    /// The sub-tabs shown, in order. An engine adds 触发器 when its driver can load and save
+    /// triggers; the shared vocabulary includes it, but a driver that does not implement trigger
+    /// DDL simply leaves it out.
     pub tabs: Vec<DesignerTab>,
     /// The per-column detail controls shown, in order.
     pub column_options: Vec<DesignerColumnOption>,
@@ -549,6 +582,8 @@ pub struct TableDesignerSpec {
     pub index_comment: bool,
     /// Where the engine accepts an auto-increment (identity) column.
     pub auto_increment: AutoIncrementRule,
+    /// How the 触发器 editor's SQL text is interpreted (body vs. complete definition).
+    pub trigger_definition: TriggerDefinition,
 }
 
 impl TableDesignerSpec {
@@ -620,8 +655,10 @@ impl TableDesignerSpec {
 }
 
 impl Default for TableDesignerSpec {
-    /// MySQL/MariaDB's shape: every tab, no unique-constraint or check-constraint tab (MySQL
-    /// reports those through 索引), MySQL's three column extras, and MySQL's field-list columns.
+    /// MySQL/MariaDB's base shape: every standard tab, no unique-constraint tab (MySQL reports
+    /// uniqueness through 索引), MySQL's three column extras, and MySQL's field-list columns.
+    /// MySQL/MariaDB also have a 检查 tab since MySQL 8.0.16 / MariaDB 10.2, which those two
+    /// drivers add themselves; the generic ODBC driver keeps this base unchanged.
     fn default() -> Self {
         Self {
             tabs: TableDesignerSpec::standard_tabs(),
@@ -687,6 +724,9 @@ impl Default for TableDesignerSpec {
             // `INDEX … COMMENT 'x'` is MySQL's; no other engine the designer has a driver for
             // stores an index comment.
             index_comment: true,
+            // MySQL/MariaDB's trigger editor edits the body; `CREATE TRIGGER` is written by the
+            // driver from the name/timing/event cells.
+            trigger_definition: TriggerDefinition::Body,
         }
     }
 }

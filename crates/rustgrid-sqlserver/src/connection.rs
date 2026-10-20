@@ -17,7 +17,7 @@ use tiberius::{QueryItem, Row, ToSql};
 use crate::driver::map_query_error;
 use crate::helpers::{
     decode_cell, filter_clause, is_dml, leading_keyword, order_clause, qualified_name,
-    quote_identifier, render_literal, returns_result_set, split_statements,
+    quote_identifier, quote_literal, render_literal, returns_result_set, split_statements,
 };
 use crate::pool::{ConnectionManager, SqlClient};
 use crate::user;
@@ -1225,7 +1225,10 @@ impl Connection for SqlServerConnection {
         }
 
         let index_sql = format!(
-            "SELECT i.name, i.is_unique, i.is_primary_key, i.type_desc \
+            "SELECT i.name, i.is_unique, i.is_primary_key, i.type_desc, \
+                    (SELECT CAST(ep.value AS nvarchar(max)) FROM {db}.sys.extended_properties ep \
+                     WHERE ep.major_id = i.object_id AND ep.minor_id = i.index_id \
+                       AND ep.name = N'MS_Description') AS comment \
              FROM {db}.sys.indexes i \
              JOIN {db}.sys.objects o ON o.object_id = i.object_id \
              JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
@@ -1253,7 +1256,7 @@ impl Connection for SqlServerConnection {
                 unique: bool_cell(row, 1),
                 primary: bool_cell(row, 2),
                 index_type: text_cell(row, 3),
-                comment: String::new(),
+                comment: text_cell(row, 4),
             });
         }
 
@@ -1271,7 +1274,22 @@ impl Connection for SqlServerConnection {
                      JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
                      WHERE o.name = @P1 AND s.name = @P2"
                 ),
-                &[Some(table), Some(schema_name)],
+                &[Some(table.clone()), Some(schema_name.clone())],
+            )
+            .await?
+            .unwrap_or_default();
+
+        let table_comment = self
+            .scalar_text(
+                None,
+                &format!(
+                    "SELECT CAST(ep.value AS nvarchar(max)) FROM {db}.sys.extended_properties ep \
+                     JOIN {db}.sys.tables t ON t.object_id = ep.major_id \
+                     JOIN {db}.sys.schemas s ON s.schema_id = t.schema_id \
+                     WHERE s.name = @P1 AND t.name = @P2 AND ep.minor_id = 0 \
+                       AND ep.name = N'MS_Description'"
+                ),
+                &[Some(schema_name), Some(table)],
             )
             .await?
             .unwrap_or_default();
@@ -1281,13 +1299,16 @@ impl Connection for SqlServerConnection {
             indexes,
             unique_keys,
             checks,
+            excludes: Vec::new(),
+            rules: Vec::new(),
             foreign_keys,
             triggers,
+            partitioning: String::new(),
             options: TableOptions {
                 engine: String::new(),
                 charset: String::new(),
                 collation,
-                comment: String::new(),
+                comment: table_comment,
                 auto_increment: String::new(),
             },
         })
@@ -1307,6 +1328,19 @@ impl Connection for SqlServerConnection {
             .map(|(schema, bare)| (schema.to_string(), bare.to_string()))
             .unwrap_or_else(|| (DEFAULT_SCHEMA.to_string(), table.to_string()));
         table_schema_sql(&quote_identifier(&schema), &bare, original, modified)
+    }
+
+    fn table_schema_trigger_sql(
+        &self,
+        _database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> Vec<String> {
+        let (schema, _) = split_schema(table)
+            .map(|(schema, bare)| (schema.to_string(), bare.to_string()))
+            .unwrap_or_else(|| (DEFAULT_SCHEMA.to_string(), table.to_string()));
+        trigger_sql(&schema, original, modified)
     }
 
     async fn view_details(&self, database: &str, name: &str) -> Result<ViewDetails> {
@@ -1743,12 +1777,13 @@ impl SqlServerConnection {
     ) -> Result<Vec<ForeignKeyDef>> {
         let db = quote_identifier(database);
         let sql = format!(
-            "SELECT fk.name, fk.object_id, \
-                    OBJECT_NAME(fk.referenced_object_id), \
+            "SELECT fk.name, fk.object_id, rs.name, ro.name, \
                     fk.delete_referential_action_desc, fk.update_referential_action_desc \
              FROM {db}.sys.foreign_keys fk \
              JOIN {db}.sys.objects o ON o.object_id = fk.parent_object_id \
              JOIN {db}.sys.schemas s ON s.schema_id = o.schema_id \
+             JOIN {db}.sys.objects ro ON ro.object_id = fk.referenced_object_id \
+             JOIN {db}.sys.schemas rs ON rs.schema_id = ro.schema_id \
              WHERE o.name = @P1 AND s.name = @P2 ORDER BY fk.name"
         );
         let result = self
@@ -1778,10 +1813,11 @@ impl SqlServerConnection {
             foreign_keys.push(ForeignKeyDef {
                 name,
                 columns,
-                referenced_table: text_cell(row, 2),
+                referenced_schema: text_cell(row, 2),
+                referenced_table: text_cell(row, 3),
                 referenced_columns,
-                on_delete: normalize_action(&text_cell(row, 3)),
-                on_update: normalize_action(&text_cell(row, 4)),
+                on_delete: normalize_action(&text_cell(row, 4)),
+                on_update: normalize_action(&text_cell(row, 5)),
             });
         }
         Ok(foreign_keys)
@@ -2448,6 +2484,167 @@ fn column_definition(column: &ColumnDef) -> String {
     out
 }
 
+/// One `sp_addextendedproperty` / `sp_updateextendedproperty` / `sp_dropextendedproperty` call for
+/// SQL Server's `MS_Description` extended property (its table/column comment).
+fn extended_property_statement(
+    action: &str,
+    schema: &str,
+    table: &str,
+    level2: Option<(&str, &str)>,
+    value: &str,
+) -> String {
+    let mut sql = format!("EXEC sp_{action}extendedproperty @name=N'MS_Description'");
+    if action != "drop" {
+        sql.push_str(", @value=");
+        sql.push_str(&quote_literal(value));
+    }
+    sql.push_str(", @level0type=N'SCHEMA', @level0name=");
+    sql.push_str(&quote_literal(schema));
+    sql.push_str(", @level1type=N'TABLE', @level1name=");
+    sql.push_str(&quote_literal(table));
+    if let Some((kind, name)) = level2 {
+        sql.push_str(", @level2type=");
+        sql.push_str(&quote_literal(kind));
+        sql.push_str(", @level2name=");
+        sql.push_str(&quote_literal(name));
+    }
+    sql
+}
+
+/// The extended-property statements that reconcile table/column comments between `original` and
+/// `modified`. SQL Server stores comments as `MS_Description`, not in the column definition, so they
+/// are emitted as separate statements after the table/index DDL.
+fn comment_statements(
+    schema: &str,
+    table: &str,
+    original: Option<&TableSchema>,
+    modified: &TableSchema,
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    let original_comment = original
+        .map(|schema| schema.options.comment.as_str())
+        .unwrap_or_default();
+    if original_comment != modified.options.comment {
+        let action = if original_comment.is_empty() {
+            "add"
+        } else if modified.options.comment.is_empty() {
+            "drop"
+        } else {
+            "update"
+        };
+        statements.push(extended_property_statement(
+            action,
+            schema,
+            table,
+            None,
+            &modified.options.comment,
+        ));
+    }
+
+    let original_columns: std::collections::HashMap<&str, &ColumnDef> = original
+        .map(|schema| {
+            schema
+                .columns
+                .iter()
+                .map(|column| (column.name.as_str(), column))
+                .collect()
+        })
+        .unwrap_or_default();
+    for column in &modified.columns {
+        let previous = original_columns
+            .get(column.name.as_str())
+            .map(|column| column.comment.as_str())
+            .unwrap_or_default();
+        if previous != column.comment {
+            let action = if previous.is_empty() {
+                "add"
+            } else if column.comment.is_empty() {
+                "drop"
+            } else {
+                "update"
+            };
+            statements.push(extended_property_statement(
+                action,
+                schema,
+                table,
+                Some(("COLUMN", &column.name)),
+                &column.comment,
+            ));
+        }
+    }
+    statements
+}
+
+/// `MS_Description` for a newly created (or recreated) index. SQL Server stores index comments in
+/// `sys.extended_properties` with `minor_id = index_id`, so a dropped/recreated index loses its
+/// comment and it must be written again.
+fn index_comment_statement(schema: &str, table: &str, index: &IndexDef) -> Option<String> {
+    (!index.comment.trim().is_empty()).then(|| {
+        extended_property_statement(
+            "add",
+            schema,
+            table,
+            Some(("INDEX", &index.name)),
+            index.comment.trim(),
+        )
+    })
+}
+
+/// `DROP`/`CREATE TRIGGER` statements for SQL Server's full trigger definitions.
+fn trigger_sql(
+    schema: &str,
+    original: Option<&TableSchema>,
+    modified: &TableSchema,
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    let original_triggers = original
+        .map(|schema| schema.triggers.as_slice())
+        .unwrap_or(&[]);
+    for trigger in original_triggers {
+        if trigger.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified
+            .triggers
+            .iter()
+            .find(|candidate| candidate.name == trigger.name)
+            .is_some_and(|candidate| candidate == trigger);
+        if !unchanged {
+            statements.push(format!(
+                "DROP TRIGGER IF EXISTS {}.{}",
+                quote_identifier(schema),
+                quote_identifier(&trigger.name)
+            ));
+        }
+    }
+    for trigger in &modified.triggers {
+        // A new full definition has no name yet (the grid's name cell is read-only until the
+        // reload); the statement itself carries the trigger name.
+        if trigger.statement.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original
+            .map(|schema| schema.triggers.as_slice())
+            .is_some_and(|triggers| {
+                triggers
+                    .iter()
+                    .find(|candidate| candidate.name == trigger.name)
+                    .is_some_and(|candidate| candidate == trigger)
+            });
+        if !unchanged {
+            statements.push(
+                trigger
+                    .statement
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim_end()
+                    .to_string(),
+            );
+        }
+    }
+    statements
+}
+
 fn table_schema_sql(
     schema: &str,
     table: &str,
@@ -2455,6 +2652,7 @@ fn table_schema_sql(
     modified: &TableSchema,
 ) -> String {
     let qualified = format!("{schema}.{}", quote_identifier(table));
+    let comments = comment_statements(schema, table, original, modified);
     match original {
         None => {
             let mut definitions: Vec<String> =
@@ -2476,11 +2674,20 @@ fn table_schema_sql(
             }
             definitions.extend(unique_key_definitions(&modified.unique_keys));
             definitions.extend(check_definitions(&modified.checks));
+            definitions.extend(foreign_key_definitions(&modified.foreign_keys));
             let mut statements = vec![format!(
                 "CREATE TABLE {qualified} (\n    {}\n)",
                 definitions.join(",\n    ")
             )];
             statements.extend(create_index_statements(&qualified, &modified.indexes));
+            statements.extend(
+                modified
+                    .indexes
+                    .iter()
+                    .filter(|index| !index.primary)
+                    .filter_map(|index| index_comment_statement(schema, table, index)),
+            );
+            statements.extend(comments);
             statements.join(";\n")
         }
         Some(original) => {
@@ -2495,6 +2702,32 @@ fn table_schema_sql(
                 .iter()
                 .map(|column| (column.name.as_str(), column))
                 .collect();
+
+            // Foreign keys are dropped before columns and re-added at the end: dropping a column
+            // that a foreign key still references fails, and adding one needs the new column first.
+            let original_foreign_keys: std::collections::HashMap<&str, &ForeignKeyDef> = original
+                .foreign_keys
+                .iter()
+                .filter(|foreign_key| !foreign_key.name.trim().is_empty())
+                .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
+                .collect();
+            let modified_foreign_keys: std::collections::HashMap<&str, &ForeignKeyDef> = modified
+                .foreign_keys
+                .iter()
+                .filter(|foreign_key| !foreign_key.name.trim().is_empty())
+                .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
+                .collect();
+            for foreign_key in &original.foreign_keys {
+                if foreign_key.name.trim().is_empty() {
+                    continue;
+                }
+                let unchanged = modified_foreign_keys
+                    .get(foreign_key.name.as_str())
+                    .is_some_and(|candidate| *candidate == foreign_key);
+                if !unchanged {
+                    statements.push(drop_constraint_statement(&qualified, &foreign_key.name));
+                }
+            }
 
             for column in &modified.columns {
                 if !original_columns.contains_key(column.name.as_str()) {
@@ -2553,12 +2786,18 @@ fn table_schema_sql(
                     continue;
                 }
                 match original_indexes.get(index.name.as_str()) {
-                    None => statements.extend(create_index_statements(
-                        &qualified,
-                        std::slice::from_ref(index),
-                    )),
+                    None => {
+                        statements.extend(create_index_statements(
+                            &qualified,
+                            std::slice::from_ref(index),
+                        ));
+                        if let Some(comment) = index_comment_statement(schema, table, index) {
+                            statements.push(comment);
+                        }
+                    }
                     // SQL Server cannot alter an index: a changed one is dropped and created again —
-                    // otherwise an edit (a new column, a `DESC`) would be silently lost.
+                    // otherwise an edit (a new column, a `DESC`) would be silently lost. Dropping the
+                    // index also drops its `MS_Description`, so the comment is written again.
                     Some(previous) if **previous != *index => {
                         statements.push(format!(
                             "DROP INDEX {} ON {qualified}",
@@ -2568,6 +2807,9 @@ fn table_schema_sql(
                             &qualified,
                             std::slice::from_ref(index),
                         ));
+                        if let Some(comment) = index_comment_statement(schema, table, index) {
+                            statements.push(comment);
+                        }
                     }
                     Some(_) => {}
                 }
@@ -2664,6 +2906,27 @@ fn table_schema_sql(
                 }
             }
 
+            // Re-add new and changed foreign keys (removed/changed ones were dropped above, before
+            // any column they reference could be dropped).
+            for foreign_key in &modified.foreign_keys {
+                if foreign_key.name.trim().is_empty()
+                    || foreign_key.columns.is_empty()
+                    || foreign_key.referenced_table.trim().is_empty()
+                {
+                    continue;
+                }
+                let unchanged = original_foreign_keys
+                    .get(foreign_key.name.as_str())
+                    .is_some_and(|previous| *previous == foreign_key);
+                if !unchanged {
+                    statements.push(format!(
+                        "ALTER TABLE {qualified} ADD {}",
+                        foreign_key_body(foreign_key)
+                    ));
+                }
+            }
+
+            statements.extend(comments);
             statements.join(";\n")
         }
     }
@@ -2748,6 +3011,51 @@ fn check_definitions(checks: &[CheckDef]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// The `FOREIGN KEY` constraint clauses of a `CREATE TABLE`.
+///
+/// SQL Server used to introspect foreign keys but never emit them in the designer's DDL, so editing
+/// the 外键 tab silently did nothing. They are now part of the create statement and reconciled by
+/// `table_schema_sql` on alter.
+fn foreign_key_definitions(foreign_keys: &[ForeignKeyDef]) -> Vec<String> {
+    foreign_keys
+        .iter()
+        .filter(|foreign_key| {
+            !foreign_key.columns.is_empty() && !foreign_key.referenced_table.trim().is_empty()
+        })
+        .map(foreign_key_body)
+        .collect()
+}
+
+/// One `[CONSTRAINT name] FOREIGN KEY (...) REFERENCES [schema].[table] (...)` clause.
+fn foreign_key_body(foreign_key: &ForeignKeyDef) -> String {
+    let mut body = String::new();
+    if !foreign_key.name.trim().is_empty() {
+        body.push_str("CONSTRAINT ");
+        body.push_str(&quote_identifier(&foreign_key.name));
+        body.push(' ');
+    }
+    body.push_str("FOREIGN KEY (");
+    body.push_str(&column_list(&foreign_key.columns));
+    body.push_str(") REFERENCES ");
+    if !foreign_key.referenced_schema.trim().is_empty() {
+        body.push_str(&quote_identifier(foreign_key.referenced_schema.trim()));
+        body.push('.');
+    }
+    body.push_str(&quote_identifier(&foreign_key.referenced_table));
+    body.push_str(" (");
+    body.push_str(&column_list(&foreign_key.referenced_columns));
+    body.push(')');
+    if !foreign_key.on_delete.trim().is_empty() {
+        body.push_str(" ON DELETE ");
+        body.push_str(foreign_key.on_delete.trim());
+    }
+    if !foreign_key.on_update.trim().is_empty() {
+        body.push_str(" ON UPDATE ");
+        body.push_str(foreign_key.on_update.trim());
+    }
+    body
 }
 
 /// Drop one named constraint (`DROP CONSTRAINT` covers unique, check, default and foreign keys).
@@ -2903,6 +3211,132 @@ mod tests {
         );
         assert!(
             sql.contains("ALTER TABLE dbo.[t] ADD CONSTRAINT [ck_positive] CHECK ([id]>=(0))"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn builds_full_trigger_diff() {
+        let original = TableSchema {
+            triggers: vec![TriggerDef {
+                name: "trg".to_string(),
+                statement: "CREATE TRIGGER [trg] ON [dbo].[t] AFTER INSERT AS SELECT 1".to_string(),
+                ..TriggerDef::default()
+            }],
+            ..TableSchema::default()
+        };
+        let mut modified = original.clone();
+        modified.triggers[0].statement =
+            "CREATE TRIGGER [trg] ON [dbo].[t] AFTER INSERT AS SELECT 2".to_string();
+
+        let sql = trigger_sql("dbo", Some(&original), &modified);
+        assert_eq!(sql[0], "DROP TRIGGER IF EXISTS [dbo].[trg]");
+        assert!(sql[1].contains("SELECT 2"), "{sql:?}");
+    }
+
+    #[test]
+    fn emits_index_comments_as_extended_properties() {
+        let mut schema = base_schema();
+        schema.indexes.push(IndexDef {
+            name: "ix_id".to_string(),
+            columns: vec![IndexColumnDef::new("id")],
+            unique: false,
+            primary: false,
+            index_type: "NONCLUSTERED".to_string(),
+            comment: "lookup".to_string(),
+        });
+
+        let sql = table_schema_sql("dbo", "t", None, &schema);
+        assert!(
+            sql.contains(
+                "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'lookup', \
+                 @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N't', \
+                 @level2type=N'INDEX', @level2name=N'ix_id'"
+            ),
+            "{sql}"
+        );
+
+        let mut modified = schema.clone();
+        modified.indexes[0].comment = "new lookup".to_string();
+        let sql = table_schema_sql("dbo", "t", Some(&schema), &modified);
+        assert!(sql.contains("DROP INDEX [ix_id] ON dbo.[t]"), "{sql}");
+        assert!(sql.contains("@value=N'new lookup'"), "{sql}");
+    }
+
+    #[test]
+    fn emits_table_and_column_comments_as_extended_properties() {
+        let mut schema = base_schema();
+        schema.options.comment = "people".to_string();
+        schema.columns[0].comment = "identifier".to_string();
+
+        let sql = table_schema_sql("dbo", "t", None, &schema);
+        assert!(
+            sql.contains(
+                "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'people', \
+                 @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N't'"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'identifier', \
+                 @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N't', \
+                 @level2type=N'COLUMN', @level2name=N'id'"
+            ),
+            "{sql}"
+        );
+
+        let mut modified = schema.clone();
+        modified.options.comment.clear();
+        modified.columns[0].comment = "new identifier".to_string();
+        let sql = table_schema_sql("dbo", "t", Some(&schema), &modified);
+        assert!(sql.contains("EXEC sp_dropextendedproperty"), "{sql}");
+        assert!(sql.contains("EXEC sp_updateextendedproperty"), "{sql}");
+    }
+
+    #[test]
+    fn creates_and_reconciles_foreign_keys() {
+        let mut schema = base_schema();
+        schema.columns.push(ColumnDef {
+            name: "parent_id".to_string(),
+            data_type: "int".to_string(),
+            nullable: false,
+            ..ColumnDef::default()
+        });
+        schema.foreign_keys.push(ForeignKeyDef {
+            name: "fk_parent".to_string(),
+            columns: vec!["parent_id".to_string()],
+            referenced_schema: "dbo".to_string(),
+            referenced_table: "parent".to_string(),
+            referenced_columns: vec!["id".to_string()],
+            on_delete: "CASCADE".to_string(),
+            on_update: String::new(),
+        });
+
+        // A new table carries the foreign key in its CREATE statement.
+        let sql = table_schema_sql("dbo", "t", None, &schema);
+        assert!(
+            sql.contains(
+                "CONSTRAINT [fk_parent] FOREIGN KEY ([parent_id]) REFERENCES [dbo].[parent] ([id]) ON DELETE CASCADE"
+            ),
+            "{sql}"
+        );
+
+        // A cross-schema reference is qualified; a changed reference is dropped before the columns
+        // and re-added at the end.
+        let mut modified = schema.clone();
+        modified.foreign_keys[0].referenced_schema = "audit".to_string();
+        let sql = table_schema_sql("dbo", "t", Some(&schema), &modified);
+        assert!(
+            sql.contains("ALTER TABLE dbo.[t] DROP CONSTRAINT [fk_parent]"),
+            "{sql}"
+        );
+        assert!(sql.contains("REFERENCES [audit].[parent]"), "{sql}");
+
+        // Removing it drops the constraint.
+        let sql = table_schema_sql("dbo", "t", Some(&schema), &base_schema());
+        assert!(
+            sql.contains("ALTER TABLE dbo.[t] DROP CONSTRAINT [fk_parent]"),
             "{sql}"
         );
     }

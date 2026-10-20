@@ -570,12 +570,38 @@ pub struct CheckDef {
 pub struct ForeignKeyDef {
     pub name: String,
     pub columns: Vec<String>,
+    /// The schema the referenced table lives in, when the engine has schemas. Empty means the
+    /// engine has no schema layer (MySQL/SQLite) or the table is in the current schema.
+    ///
+    /// The designer used to show the *current database* in the reference-schema column for every
+    /// engine, which made a cross-schema SQL Server/PostgreSQL/Oracle foreign key impossible to
+    /// describe. It is now the referenced table's own schema, and each driver qualifies the
+    /// reference with it in DDL.
+    pub referenced_schema: String,
     pub referenced_table: String,
     pub referenced_columns: Vec<String>,
     /// `CASCADE`, `SET NULL`, `RESTRICT`, `NO ACTION`, ... Empty means unspecified.
     pub on_delete: String,
     /// Same vocabulary as `on_delete`.
     pub on_update: String,
+}
+
+/// One PostgreSQL exclusion constraint.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExcludeDef {
+    pub name: String,
+    /// The constraint body returned by `pg_get_constraintdef`, e.g.
+    /// `EXCLUDE USING gist (room WITH =, during WITH &&)`.
+    pub definition: String,
+    pub comment: String,
+}
+
+/// One PostgreSQL rewrite rule.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuleDef {
+    pub name: String,
+    /// The complete `CREATE RULE` statement returned by `pg_get_ruledef`.
+    pub definition: String,
 }
 
 /// One trigger of a table.
@@ -607,8 +633,13 @@ pub struct TableSchema {
     pub indexes: Vec<IndexDef>,
     pub unique_keys: Vec<UniqueKeyDef>,
     pub checks: Vec<CheckDef>,
+    pub excludes: Vec<ExcludeDef>,
+    pub rules: Vec<RuleDef>,
     pub foreign_keys: Vec<ForeignKeyDef>,
     pub triggers: Vec<TriggerDef>,
+    /// MySQL/MariaDB's complete `PARTITION BY …` clause, empty when the table is not partitioned.
+    /// Kept as one string so the designer can preserve methods and options it does not model.
+    pub partitioning: String,
     pub options: TableOptions,
 }
 

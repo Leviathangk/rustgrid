@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use rustgrid_core::{
-    ColumnDef, ForeignKeyDef, IndexColumnDef, IndexDef, Result, TableOptions, TableSchema,
-    TriggerDef,
+    CheckDef, ColumnDef, ExcludeDef, ForeignKeyDef, IndexColumnDef, IndexDef, Result, RuleDef,
+    TableOptions, TableSchema, TriggerDef, UniqueKeyDef,
 };
 use sqlx::Row;
 
@@ -92,12 +92,31 @@ fn index_sql(schema: &str, table: &str, index: &IndexDef) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    // PostgreSQL's index method is its `USING` clause; an empty type means the server's default
+    // (`btree`), which the driver omits rather than spelling out.
+    let method = index.index_type.trim();
+    let using = if method.is_empty() {
+        String::new()
+    } else {
+        format!(" USING {}", quote_identifier(&method.to_ascii_lowercase()))
+    };
     format!(
-        "CREATE {}INDEX {} ON {} ({columns})",
+        "CREATE {}INDEX {} ON {}{using} ({columns})",
         if index.unique { "UNIQUE " } else { "" },
         quote_identifier(&index.name),
         qualify(schema, table)
     )
+}
+
+/// `COMMENT ON INDEX` for an index whose designer 注释 is non-empty.
+fn index_comment_sql(schema: &str, index: &IndexDef) -> Option<String> {
+    (!index.comment.trim().is_empty()).then(|| {
+        format!(
+            "COMMENT ON INDEX {} IS {}",
+            qualify(schema, &index.name),
+            quote_literal(index.comment.trim())
+        )
+    })
 }
 
 fn foreign_key_sql(foreign_key: &ForeignKeyDef) -> String {
@@ -113,7 +132,14 @@ fn foreign_key_sql(foreign_key: &ForeignKeyDef) -> String {
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let referenced_table = if foreign_key.referenced_table.contains('.') {
+    let referenced_table = if !foreign_key.referenced_schema.trim().is_empty() {
+        qualify(
+            foreign_key.referenced_schema.trim(),
+            &foreign_key.referenced_table,
+        )
+    } else if foreign_key.referenced_table.contains('.') {
+        // Compatibility with a schema loaded before `referenced_schema` existed: the qualified
+        // name used to be stored in `referenced_table` alone.
         let (schema, name) = foreign_key
             .referenced_table
             .split_once('.')
@@ -122,10 +148,13 @@ fn foreign_key_sql(foreign_key: &ForeignKeyDef) -> String {
     } else {
         quote_identifier(&foreign_key.referenced_table)
     };
-    let mut sql = format!(
-        "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({referenced})",
-        quote_identifier(&foreign_key.name),
-    );
+    let constraint = if foreign_key.name.trim().is_empty() {
+        String::new()
+    } else {
+        format!("CONSTRAINT {} ", quote_identifier(&foreign_key.name))
+    };
+    let mut sql =
+        format!("{constraint}FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({referenced})");
     if !foreign_key.on_delete.trim().is_empty() {
         sql.push_str(" ON DELETE ");
         sql.push_str(foreign_key.on_delete.trim());
@@ -135,6 +164,56 @@ fn foreign_key_sql(foreign_key: &ForeignKeyDef) -> String {
         sql.push_str(foreign_key.on_update.trim());
     }
     sql
+}
+
+fn unique_key_sql(key: &UniqueKeyDef) -> String {
+    let body = format!(
+        "UNIQUE ({})",
+        key.columns
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if key.name.trim().is_empty() {
+        body
+    } else {
+        format!("CONSTRAINT {} {body}", quote_identifier(&key.name))
+    }
+}
+
+fn check_sql(check: &CheckDef) -> String {
+    let body = format!("CHECK ({})", check.expression.trim());
+    if check.name.trim().is_empty() {
+        body
+    } else {
+        format!("CONSTRAINT {} {body}", quote_identifier(&check.name))
+    }
+}
+
+fn exclude_sql(exclude: &ExcludeDef) -> String {
+    let body = exclude.definition.trim();
+    if exclude.name.trim().is_empty() {
+        body.to_string()
+    } else {
+        format!("CONSTRAINT {} {body}", quote_identifier(&exclude.name))
+    }
+}
+
+fn exclude_comment_sql(schema_name: &str, table: &str, exclude: &ExcludeDef) -> Option<String> {
+    (!exclude.comment.trim().is_empty()).then(|| {
+        format!(
+            "COMMENT ON CONSTRAINT {} ON {} IS {}",
+            quote_identifier(&exclude.name),
+            qualify(schema_name, table),
+            quote_literal(exclude.comment.trim())
+        )
+    })
+}
+
+fn rule_statement(rule: &RuleDef) -> Option<String> {
+    let statement = rule.definition.trim().trim_end_matches(';').trim_end();
+    (!statement.is_empty()).then(|| statement.to_string())
 }
 
 pub(crate) async fn table_schema(
@@ -210,14 +289,18 @@ pub(crate) async fn table_schema(
 
     let index_rows = sqlx::query(
         "SELECT i.relname, ix.indisunique, ix.indisprimary, a.attname, \
-                (ix.indoption[k.ord - 1] & 1) = 1 AS descending \
+                (ix.indoption[k.ord - 1] & 1) = 1 AS descending, am.amname, \
+                obj_description(i.oid, 'pg_class') AS comment \
          FROM pg_index ix \
          JOIN pg_class i ON i.oid = ix.indexrelid \
          JOIN pg_class t ON t.oid = ix.indrelid \
          JOIN pg_namespace n ON n.oid = t.relnamespace \
+         LEFT JOIN pg_am am ON am.oid = i.relam \
          CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) \
          JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
          WHERE n.nspname = $1 AND t.relname = $2 \
+           AND NOT EXISTS (SELECT 1 FROM pg_constraint u \
+                           WHERE u.conindid = ix.indexrelid AND u.contype = 'u') \
          ORDER BY i.relname, k.ord",
     )
     .bind(&schema_name)
@@ -233,6 +316,8 @@ pub(crate) async fn table_schema(
         let column: String = row.try_get(3).unwrap_or_default();
         // PostgreSQL indexes have no prefix length (子部分 is MySQL's).
         let descending: bool = row.try_get(4).unwrap_or(false);
+        let method: String = row.try_get(5).unwrap_or_default();
+        let comment: String = row.try_get(6).unwrap_or(None).unwrap_or_default();
         let index_column = IndexColumnDef {
             name: column,
             descending,
@@ -245,8 +330,8 @@ pub(crate) async fn table_schema(
                 columns: vec![index_column],
                 unique,
                 primary,
-                index_type: String::new(),
-                comment: String::new(),
+                index_type: method,
+                comment,
             }),
         }
     }
@@ -286,12 +371,106 @@ pub(crate) async fn table_schema(
         foreign_keys.push(ForeignKeyDef {
             name,
             columns,
-            referenced_table: format!("{ref_schema}.{ref_table}"),
+            referenced_schema: ref_schema,
+            referenced_table: ref_table,
             referenced_columns: ref_columns,
             on_delete: normalize_action(&delete_type),
             on_update: normalize_action(&update_type),
         });
     }
+
+    let unique_rows = sqlx::query(
+        "SELECT con.conname, \
+                (SELECT array_agg(a.attname ORDER BY k.ord) \
+                 FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) \
+                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum) AS columns \
+         FROM pg_constraint con \
+         JOIN pg_class c ON c.oid = con.conrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'u' \
+         ORDER BY con.conname",
+    )
+    .bind(&schema_name)
+    .bind(&bare)
+    .fetch_all(&pool)
+    .await
+    .map_err(map_query_error)?;
+    let unique_keys = unique_rows
+        .iter()
+        .map(|row| UniqueKeyDef {
+            name: row.try_get(0).unwrap_or_default(),
+            columns: row.try_get(1).unwrap_or_default(),
+        })
+        .collect();
+
+    let check_rows = sqlx::query(
+        "SELECT con.conname, pg_get_constraintdef(con.oid, true) \
+         FROM pg_constraint con \
+         JOIN pg_class c ON c.oid = con.conrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'c' \
+         ORDER BY con.conname",
+    )
+    .bind(&schema_name)
+    .bind(&bare)
+    .fetch_all(&pool)
+    .await
+    .map_err(map_query_error)?;
+    let checks = check_rows
+        .iter()
+        .map(|row| CheckDef {
+            name: row.try_get(0).unwrap_or_default(),
+            expression: check_expression(&row.try_get::<String, _>(1).unwrap_or_default()),
+        })
+        .collect();
+
+    let exclude_rows = sqlx::query(
+        "SELECT con.conname, pg_get_constraintdef(con.oid, true), \
+                obj_description(con.oid, 'pg_constraint') \
+         FROM pg_constraint con \
+         JOIN pg_class c ON c.oid = con.conrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'x' \
+         ORDER BY con.conname",
+    )
+    .bind(&schema_name)
+    .bind(&bare)
+    .fetch_all(&pool)
+    .await
+    .map_err(map_query_error)?;
+    let excludes = exclude_rows
+        .iter()
+        .map(|row| ExcludeDef {
+            name: row.try_get(0).unwrap_or_default(),
+            definition: row.try_get(1).unwrap_or_default(),
+            comment: row
+                .try_get::<Option<String>, _>(2)
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    let rule_rows = sqlx::query(
+        "SELECT r.rulename, pg_get_ruledef(r.oid, true) \
+         FROM pg_rewrite r \
+         JOIN pg_class c ON c.oid = r.ev_class \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND r.rulename <> '_RETURN' \
+         ORDER BY r.rulename",
+    )
+    .bind(&schema_name)
+    .bind(&bare)
+    .fetch_all(&pool)
+    .await
+    .map_err(map_query_error)?;
+    let rules = rule_rows
+        .iter()
+        .map(|row| RuleDef {
+            name: row.try_get(0).unwrap_or_default(),
+            definition: row.try_get(1).unwrap_or_default(),
+        })
+        .collect();
 
     let trigger_rows = sqlx::query(
         "SELECT t.tgname, pg_get_triggerdef(t.oid) \
@@ -332,15 +511,59 @@ pub(crate) async fn table_schema(
     Ok(TableSchema {
         columns,
         indexes,
-        unique_keys: Vec::new(),
-        checks: Vec::new(),
+        unique_keys,
+        checks,
+        excludes,
+        rules,
         foreign_keys,
         triggers,
+        partitioning: String::new(),
         options: TableOptions {
             comment,
             ..Default::default()
         },
     })
+}
+
+/// Strip the `CHECK (...)` wrapper and one *matching* outer parenthesis pair. PostgreSQL returns
+/// `CHECK (((a > 0) AND (b > 0)))` for a compound check; a blind `[1..len-1]` would corrupt the
+/// inner `(a > 0)` and `(b > 0)`, so the pair is removed only when its opening paren closes at the
+/// very end.
+fn check_expression(definition: &str) -> String {
+    let definition = definition.trim();
+    let body = definition
+        .strip_prefix("CHECK (")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(definition)
+        .trim();
+    strip_matching_outer_parens(body).to_string()
+}
+
+fn strip_matching_outer_parens(text: &str) -> &str {
+    let text = text.trim();
+    if !text.starts_with('(') || !text.ends_with(')') {
+        return text;
+    }
+    let mut depth = 0usize;
+    let mut quoted = false;
+    for (position, character) in text.char_indices() {
+        match character {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return if position + character.len_utf8() == text.len() {
+                        text[1..text.len() - 1].trim()
+                    } else {
+                        text
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    text
 }
 
 fn normalize_action(code: &str) -> String {
@@ -389,6 +612,66 @@ fn comment_statements(schema_name: &str, table: &str, schema: &TableSchema) -> V
             ));
         }
     }
+    for exclude in &schema.excludes {
+        if let Some(statement) = exclude_comment_sql(schema_name, table, exclude) {
+            statements.push(statement);
+        }
+    }
+    statements
+}
+
+/// `DROP`/`CREATE TRIGGER` statements for PostgreSQL's complete trigger definitions.
+pub(crate) fn trigger_sql(
+    schema_name: &str,
+    table: &str,
+    original: Option<&TableSchema>,
+    modified: &TableSchema,
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    let original_triggers = original
+        .map(|schema| schema.triggers.as_slice())
+        .unwrap_or(&[]);
+    for trigger in original_triggers {
+        if trigger.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified
+            .triggers
+            .iter()
+            .find(|candidate| candidate.name == trigger.name)
+            .is_some_and(|candidate| candidate == trigger);
+        if !unchanged {
+            statements.push(format!(
+                "DROP TRIGGER IF EXISTS {} ON {}",
+                quote_identifier(&trigger.name),
+                qualify(schema_name, table)
+            ));
+        }
+    }
+    for trigger in &modified.triggers {
+        // A new full definition has no name until the designer reloads; the statement carries it.
+        if trigger.statement.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original
+            .map(|schema| schema.triggers.as_slice())
+            .is_some_and(|triggers| {
+                triggers
+                    .iter()
+                    .find(|candidate| candidate.name == trigger.name)
+                    .is_some_and(|candidate| candidate == trigger)
+            });
+        if !unchanged {
+            statements.push(
+                trigger
+                    .statement
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim_end()
+                    .to_string(),
+            );
+        }
+    }
     statements
 }
 
@@ -413,6 +696,21 @@ pub(crate) fn table_schema_sql(
                     .join(", ")
             ));
         }
+        for key in &modified.unique_keys {
+            if !key.columns.is_empty() {
+                definitions.push(unique_key_sql(key));
+            }
+        }
+        for check in &modified.checks {
+            if !check.expression.trim().is_empty() {
+                definitions.push(check_sql(check));
+            }
+        }
+        for exclude in &modified.excludes {
+            if !exclude.definition.trim().is_empty() {
+                definitions.push(exclude_sql(exclude));
+            }
+        }
         for foreign_key in &modified.foreign_keys {
             definitions.push(foreign_key_sql(foreign_key));
         }
@@ -422,8 +720,12 @@ pub(crate) fn table_schema_sql(
         )];
         for index in modified.indexes.iter().filter(|index| !index.primary) {
             statements.push(index_sql(schema_name, table, index));
+            if let Some(comment) = index_comment_sql(schema_name, index) {
+                statements.push(comment);
+            }
         }
         statements.extend(comment_statements(schema_name, table, modified));
+        statements.extend(modified.rules.iter().filter_map(rule_statement));
         return statements.join(";\n");
     };
 
@@ -438,6 +740,170 @@ pub(crate) fn table_schema_sql(
         .iter()
         .map(|column| (column.name.as_str(), column))
         .collect();
+
+    let original_indexes: HashMap<&str, &IndexDef> = original
+        .indexes
+        .iter()
+        .map(|index| (index.name.as_str(), index))
+        .collect();
+    let modified_indexes: HashMap<&str, &IndexDef> = modified
+        .indexes
+        .iter()
+        .map(|index| (index.name.as_str(), index))
+        .collect();
+    let original_fks: HashMap<&str, &ForeignKeyDef> = original
+        .foreign_keys
+        .iter()
+        .filter(|foreign_key| !foreign_key.name.trim().is_empty())
+        .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
+        .collect();
+    let modified_fks: HashMap<&str, &ForeignKeyDef> = modified
+        .foreign_keys
+        .iter()
+        .filter(|foreign_key| !foreign_key.name.trim().is_empty())
+        .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
+        .collect();
+    let original_uniques: HashMap<&str, &UniqueKeyDef> = original
+        .unique_keys
+        .iter()
+        .filter(|key| !key.name.trim().is_empty())
+        .map(|key| (key.name.as_str(), key))
+        .collect();
+    let modified_uniques: HashMap<&str, &UniqueKeyDef> = modified
+        .unique_keys
+        .iter()
+        .filter(|key| !key.name.trim().is_empty())
+        .map(|key| (key.name.as_str(), key))
+        .collect();
+    let original_checks: HashMap<&str, &CheckDef> = original
+        .checks
+        .iter()
+        .filter(|check| !check.name.trim().is_empty())
+        .map(|check| (check.name.as_str(), check))
+        .collect();
+    let modified_checks: HashMap<&str, &CheckDef> = modified
+        .checks
+        .iter()
+        .filter(|check| !check.name.trim().is_empty())
+        .map(|check| (check.name.as_str(), check))
+        .collect();
+    let original_excludes: HashMap<&str, &ExcludeDef> = original
+        .excludes
+        .iter()
+        .filter(|exclude| !exclude.name.trim().is_empty())
+        .map(|exclude| (exclude.name.as_str(), exclude))
+        .collect();
+    let modified_excludes: HashMap<&str, &ExcludeDef> = modified
+        .excludes
+        .iter()
+        .filter(|exclude| !exclude.name.trim().is_empty())
+        .map(|exclude| (exclude.name.as_str(), exclude))
+        .collect();
+    let original_rules: HashMap<&str, &RuleDef> = original
+        .rules
+        .iter()
+        .filter(|rule| !rule.name.trim().is_empty())
+        .map(|rule| (rule.name.as_str(), rule))
+        .collect();
+    let modified_rules: HashMap<&str, &RuleDef> = modified
+        .rules
+        .iter()
+        .filter(|rule| !rule.name.trim().is_empty())
+        .map(|rule| (rule.name.as_str(), rule))
+        .collect();
+
+    // Constraints and indexes are dropped before columns and re-added at the end: PostgreSQL
+    // refuses to drop a column a constraint still uses, and `DROP COLUMN` would already remove an
+    // index, making the later explicit `DROP INDEX` fail.
+    for foreign_key in &original.foreign_keys {
+        if foreign_key.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified_fks
+            .get(foreign_key.name.as_str())
+            .is_some_and(|candidate| *candidate == foreign_key);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                quote_identifier(&foreign_key.name)
+            ));
+        }
+    }
+    for key in &original.unique_keys {
+        if key.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified_uniques
+            .get(key.name.as_str())
+            .is_some_and(|candidate| *candidate == key);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                quote_identifier(&key.name)
+            ));
+        }
+    }
+    for check in &original.checks {
+        if check.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified_checks
+            .get(check.name.as_str())
+            .is_some_and(|candidate| *candidate == check);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                quote_identifier(&check.name)
+            ));
+        }
+    }
+    for exclude in &original.excludes {
+        if exclude.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified_excludes
+            .get(exclude.name.as_str())
+            .is_some_and(|candidate| *candidate == exclude);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                quote_identifier(&exclude.name)
+            ));
+        }
+    }
+    for rule in &original.rules {
+        if rule.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified_rules
+            .get(rule.name.as_str())
+            .is_some_and(|candidate| *candidate == rule);
+        if !unchanged {
+            statements.push(format!(
+                "DROP RULE IF EXISTS {} ON {qualified}",
+                quote_identifier(&rule.name)
+            ));
+        }
+    }
+
+    let original_primary = primary_columns(original);
+    let modified_primary = primary_columns(modified);
+    if original_primary != modified_primary
+        && let Some(name) = primary_index_name(original)
+    {
+        statements.push(format!(
+            "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+            quote_identifier(&name)
+        ));
+    }
+    for index in original.indexes.iter().filter(|index| !index.primary) {
+        let unchanged = modified_indexes
+            .get(index.name.as_str())
+            .is_some_and(|candidate| *candidate == index);
+        if !unchanged {
+            statements.push(format!("DROP INDEX {}", qualify(schema_name, &index.name)));
+        }
+    }
 
     for column in &modified.columns {
         match original_columns.get(column.name.as_str()) {
@@ -511,90 +977,109 @@ pub(crate) fn table_schema_sql(
         }
     }
 
-    let original_primary = primary_columns(original);
-    let modified_primary = primary_columns(modified);
-    if original_primary != modified_primary {
-        if let Some(name) = primary_index_name(original) {
-            statements.push(format!(
-                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
-                quote_identifier(&name)
-            ));
-        }
-        if !modified_primary.is_empty() {
-            statements.push(format!(
-                "ALTER TABLE {qualified} ADD PRIMARY KEY ({})",
-                modified_primary
-                    .iter()
-                    .map(|column| quote_identifier(column))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
+    if original_primary != modified_primary && !modified_primary.is_empty() {
+        statements.push(format!(
+            "ALTER TABLE {qualified} ADD PRIMARY KEY ({})",
+            modified_primary
+                .iter()
+                .map(|column| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
-    let original_indexes: HashMap<&str, &IndexDef> = original
-        .indexes
-        .iter()
-        .map(|index| (index.name.as_str(), index))
-        .collect();
-    let modified_indexes: HashMap<&str, &IndexDef> = modified
-        .indexes
-        .iter()
-        .map(|index| (index.name.as_str(), index))
-        .collect();
     for index in modified.indexes.iter().filter(|index| !index.primary) {
-        match original_indexes.get(index.name.as_str()) {
-            None => statements.push(index_sql(schema_name, table, index)),
-            // PostgreSQL cannot alter an index in place, so a changed one is dropped and created
-            // again — otherwise an edit (a new column, a `DESC`, uniqueness) would be silently lost.
-            Some(previous) if **previous != *index => {
-                statements.push(format!("DROP INDEX {}", qualify(schema_name, &index.name)));
-                statements.push(index_sql(schema_name, table, index));
+        let unchanged = original_indexes
+            .get(index.name.as_str())
+            .is_some_and(|candidate| *candidate == index);
+        if !unchanged {
+            statements.push(index_sql(schema_name, table, index));
+            if let Some(comment) = index_comment_sql(schema_name, index) {
+                statements.push(comment);
             }
-            Some(_) => {}
-        }
-    }
-    for index in original.indexes.iter().filter(|index| !index.primary) {
-        if !modified_indexes.contains_key(index.name.as_str()) {
-            statements.push(format!("DROP INDEX {}", qualify(schema_name, &index.name)));
         }
     }
 
-    let original_fks: HashMap<&str, &ForeignKeyDef> = original
-        .foreign_keys
-        .iter()
-        .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
-        .collect();
-    let modified_fks: HashMap<&str, &ForeignKeyDef> = modified
-        .foreign_keys
-        .iter()
-        .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
-        .collect();
+    for key in &modified.unique_keys {
+        if key.name.trim().is_empty() || key.columns.is_empty() {
+            continue;
+        }
+        let unchanged = original_uniques
+            .get(key.name.as_str())
+            .is_some_and(|candidate| *candidate == key);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} ADD {}",
+                unique_key_sql(key)
+            ));
+        }
+    }
+
+    for check in &modified.checks {
+        if check.name.trim().is_empty() || check.expression.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original_checks
+            .get(check.name.as_str())
+            .is_some_and(|candidate| *candidate == check);
+        if !unchanged {
+            statements.push(format!("ALTER TABLE {qualified} ADD {}", check_sql(check)));
+        }
+    }
+
+    for exclude in &modified.excludes {
+        if exclude.name.trim().is_empty() || exclude.definition.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original_excludes
+            .get(exclude.name.as_str())
+            .is_some_and(|candidate| *candidate == exclude);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} ADD {}",
+                exclude_sql(exclude)
+            ));
+        }
+        let comment_changed = !unchanged
+            || original_excludes
+                .get(exclude.name.as_str())
+                .is_none_or(|previous| previous.comment != exclude.comment);
+        if comment_changed {
+            statements.push(if exclude.comment.trim().is_empty() {
+                format!(
+                    "COMMENT ON CONSTRAINT {} ON {qualified} IS NULL",
+                    quote_identifier(&exclude.name)
+                )
+            } else {
+                exclude_comment_sql(schema_name, table, exclude).unwrap_or_default()
+            });
+        }
+    }
+
     for foreign_key in &modified.foreign_keys {
-        match original_fks.get(foreign_key.name.as_str()) {
-            None => statements.push(format!(
+        if foreign_key.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original_fks
+            .get(foreign_key.name.as_str())
+            .is_some_and(|candidate| *candidate == foreign_key);
+        if !unchanged {
+            statements.push(format!(
                 "ALTER TABLE {qualified} ADD {}",
                 foreign_key_sql(foreign_key)
-            )),
-            Some(existing) if *existing != foreign_key => {
-                statements.push(format!(
-                    "ALTER TABLE {qualified} DROP CONSTRAINT {}",
-                    quote_identifier(&foreign_key.name)
-                ));
-                statements.push(format!(
-                    "ALTER TABLE {qualified} ADD {}",
-                    foreign_key_sql(foreign_key)
-                ));
-            }
-            Some(_) => {}
+            ));
         }
     }
-    for foreign_key in &original.foreign_keys {
-        if !modified_fks.contains_key(foreign_key.name.as_str()) {
-            statements.push(format!(
-                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
-                quote_identifier(&foreign_key.name)
-            ));
+
+    for rule in &modified.rules {
+        if rule.definition.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original_rules
+            .get(rule.name.as_str())
+            .is_some_and(|candidate| *candidate == rule);
+        if !unchanged && let Some(statement) = rule_statement(rule) {
+            statements.push(statement);
         }
     }
 
@@ -650,6 +1135,204 @@ mod tests {
         assert_eq!(
             split_format_type("integer[]"),
             ("integer[]".to_string(), String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn builds_index_method_and_comment() {
+        let schema = TableSchema {
+            columns: vec![ColumnDef {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                nullable: false,
+                ..Default::default()
+            }],
+            indexes: vec![IndexDef {
+                name: "idx_id".to_string(),
+                columns: vec![IndexColumnDef {
+                    name: "id".to_string(),
+                    descending: true,
+                    prefix_length: String::new(),
+                }],
+                unique: true,
+                index_type: "hash".to_string(),
+                comment: "lookup".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let sql = table_schema_sql("public", "t", None, &schema);
+        assert!(
+            sql.contains(
+                "CREATE UNIQUE INDEX \"idx_id\" ON \"public\".\"t\" USING \"hash\" (\"id\" DESC)"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("COMMENT ON INDEX \"public\".\"idx_id\" IS 'lookup'"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn builds_full_trigger_diff() {
+        let original = TableSchema {
+            triggers: vec![TriggerDef {
+                name: "trg".to_string(),
+                statement:
+                    "CREATE TRIGGER trg AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f()"
+                        .to_string(),
+                ..TriggerDef::default()
+            }],
+            ..TableSchema::default()
+        };
+        let mut modified = original.clone();
+        modified.triggers[0].statement =
+            "CREATE TRIGGER trg AFTER UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION f()"
+                .to_string();
+
+        let sql = trigger_sql("public", "t", Some(&original), &modified);
+        assert_eq!(sql[0], "DROP TRIGGER IF EXISTS \"trg\" ON \"public\".\"t\"");
+        assert!(sql[1].contains("AFTER UPDATE"), "{sql:?}");
+    }
+
+    #[test]
+    fn builds_exclusion_constraints_and_rules() {
+        let mut schema = TableSchema {
+            columns: vec![ColumnDef {
+                name: "room".to_string(),
+                data_type: "integer".to_string(),
+                nullable: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        schema.excludes.push(ExcludeDef {
+            name: "ex_room".to_string(),
+            definition: "EXCLUDE USING gist (room WITH =)".to_string(),
+            comment: "one booking per room".to_string(),
+        });
+        schema.rules.push(RuleDef {
+            name: "r_ignore".to_string(),
+            definition: "CREATE RULE r_ignore AS ON INSERT TO public.t DO INSTEAD NOTHING;"
+                .to_string(),
+        });
+
+        let sql = table_schema_sql("public", "t", None, &schema);
+        assert!(
+            sql.contains("CONSTRAINT \"ex_room\" EXCLUDE USING gist (room WITH =)"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "COMMENT ON CONSTRAINT \"ex_room\" ON \"public\".\"t\" IS 'one booking per room'"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CREATE RULE r_ignore AS ON INSERT TO public.t DO INSTEAD NOTHING"),
+            "{sql}"
+        );
+
+        let original = schema.clone();
+        let mut modified = original.clone();
+        modified.excludes[0].definition =
+            "EXCLUDE USING gist (room WITH =, during WITH &&)".to_string();
+        modified.rules.clear();
+        let sql = table_schema_sql("public", "t", Some(&original), &modified);
+        assert!(
+            sql.contains("ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"ex_room\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ADD CONSTRAINT \"ex_room\" EXCLUDE USING gist (room WITH =, during WITH &&)"
+            ),
+            "{sql}"
+        );
+        // Dropping and recreating the constraint loses its comment, so the comment is re-applied.
+        assert!(
+            sql.contains(
+                "COMMENT ON CONSTRAINT \"ex_room\" ON \"public\".\"t\" IS 'one booking per room'"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("DROP RULE IF EXISTS \"r_ignore\" ON \"public\".\"t\""),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn builds_unique_and_check_constraints() {
+        let mut schema = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: "integer".to_string(),
+                    nullable: false,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "code".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: false,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        schema.unique_keys.push(UniqueKeyDef {
+            name: "uq_code".to_string(),
+            columns: vec!["code".to_string()],
+        });
+        schema.checks.push(CheckDef {
+            name: "ck_id".to_string(),
+            expression: "\"id\" > 0".to_string(),
+        });
+
+        let sql = table_schema_sql("public", "t", None, &schema);
+        assert!(
+            sql.contains("CONSTRAINT \"uq_code\" UNIQUE (\"code\")"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CONSTRAINT \"ck_id\" CHECK (\"id\" > 0)"),
+            "{sql}"
+        );
+
+        let mut modified = schema.clone();
+        modified.unique_keys[0].columns.push("id".to_string());
+        modified.checks[0].expression = "\"id\" >= 0".to_string();
+        let sql = table_schema_sql("public", "t", Some(&schema), &modified);
+        assert!(
+            sql.contains("ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"uq_code\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"uq_code\" UNIQUE (\"code\", \"id\")"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"ck_id\" CHECK (\"id\" >= 0)"
+            ),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn strips_the_check_wrapper_without_corrupting_inner_groups() {
+        assert_eq!(check_expression("CHECK ((age > 0))"), "age > 0".to_string());
+        assert_eq!(
+            check_expression("CHECK (((age > 0) AND (age < 100)))"),
+            "(age > 0) AND (age < 100)".to_string()
+        );
+        assert_eq!(
+            check_expression("CHECK ((a > 0) AND (b > 0))"),
+            "(a > 0) AND (b > 0)".to_string()
         );
     }
 

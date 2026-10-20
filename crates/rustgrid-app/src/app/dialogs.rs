@@ -1133,6 +1133,13 @@ impl AppView {
                     DesignDeleteKind::Checks => {
                         ("design.confirm_delete_check", "design.delete_check")
                     }
+                    DesignDeleteKind::Excludes => {
+                        ("design.confirm_delete_exclude", "design.delete_exclude")
+                    }
+                    DesignDeleteKind::Rules => ("design.confirm_delete_rule", "design.delete_rule"),
+                    DesignDeleteKind::Triggers => {
+                        ("design.confirm_delete_trigger", "design.trigger.delete")
+                    }
                 };
                 (
                     t!("design.delete_title").to_string(),

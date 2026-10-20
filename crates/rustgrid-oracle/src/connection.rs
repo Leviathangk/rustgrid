@@ -862,6 +862,17 @@ impl Connection for OracleConnection {
         crate::schema::table_schema_sql(&schema, &bare, original, modified)
     }
 
+    fn table_schema_trigger_sql(
+        &self,
+        _database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> Vec<String> {
+        let (schema, _) = self.resolve(table);
+        crate::schema::trigger_sql(&schema, original, modified)
+    }
+
     async fn close(&self) -> Result<()> {
         // `oracledb::Pool::close` needs `&mut self`, which an `async fn close(&self)` behind an
         // `Arc` cannot provide. Dropping the last `Arc` closes the pool (its `Drop` calls `close`),

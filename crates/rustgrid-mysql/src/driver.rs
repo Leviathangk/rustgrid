@@ -2,15 +2,31 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustgrid_core::{
-    Connection, ConnectionConfig, DatabaseEditorSpec, Driver, DriverCapabilities, DriverCapability,
-    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
-    TlsMode,
+    Connection, ConnectionConfig, DatabaseEditorSpec, DesignerTab, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TableDesignerSpec, TlsMode,
 };
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
 use crate::connection::MysqlConnection;
 use crate::engine::Engine;
 use rustgrid_tunnel::Tunnel;
+
+/// The MySQL-protocol designer shape: MySQL/MariaDB's default (indexes carry uniqueness, so no
+/// 唯一键 tab) plus the 检查 tab both engines support since MySQL 8.0.16 / MariaDB 10.2 and the
+/// 触发器 tab (the shared trigger model plus the MySQL `DROP`/`CREATE TRIGGER` diff).
+fn mysql_table_designer() -> TableDesignerSpec {
+    let mut spec = TableDesignerSpec::default();
+    let position = spec
+        .tabs
+        .iter()
+        .position(|tab| *tab == DesignerTab::Options)
+        .unwrap_or(spec.tabs.len());
+    spec.tabs.insert(position, DesignerTab::Checks);
+    spec.tabs.insert(position + 1, DesignerTab::Triggers);
+    spec.tabs.insert(position + 2, DesignerTab::Partition);
+    spec
+}
 
 /// The MySQL driver.
 #[derive(Debug, Default)]
@@ -46,9 +62,9 @@ impl Driver for MysqlDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
-            // MySQL's own shape is the designer's default: every tab (a unique index is an 索引,
-            // so there is no 唯一键 tab), 自动递增/无符号/填充零 and MySQL's field columns.
-            table_designer: TableDesignerSpec::default(),
+            // MySQL's own shape is the designer's default (a unique index is an 索引, so there is
+            // no 唯一键 tab), plus the 检查 tab MySQL 8.0.16+/MariaDB supports.
+            table_designer: mysql_table_designer(),
             id: DriverId::new("mysql"),
             display_name: "MySQL".to_string(),
             default_port: 3306,
@@ -110,7 +126,7 @@ impl Driver for MariaDbDriver {
 
     fn descriptor(&self) -> DriverDescriptor {
         DriverDescriptor {
-            table_designer: TableDesignerSpec::default(),
+            table_designer: mysql_table_designer(),
             id: DriverId::new("mariadb"),
             display_name: "MariaDB".to_string(),
             default_port: 3306,

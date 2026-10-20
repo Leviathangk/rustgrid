@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use rustgrid_core::{
-    ColumnDef, ForeignKeyDef, IndexColumnDef, IndexDef, Result, TableOptions, TableSchema,
-    TriggerDef,
+    CheckDef, ColumnDef, ForeignKeyDef, IndexColumnDef, IndexDef, Result, TableOptions,
+    TableSchema, TriggerDef, UniqueKeyDef,
 };
 
 use crate::connection::{OracleConnection, map_query_error};
@@ -92,6 +92,31 @@ fn index_sql(schema: &str, table: &str, index: &IndexDef) -> String {
     )
 }
 
+fn unique_key_clause(key: &UniqueKeyDef) -> String {
+    let body = format!(
+        "UNIQUE ({})",
+        key.columns
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if key.name.trim().is_empty() {
+        body
+    } else {
+        format!("CONSTRAINT {} {body}", quote_identifier(&key.name))
+    }
+}
+
+fn check_clause(check: &CheckDef) -> String {
+    let body = format!("CHECK ({})", check.expression.trim());
+    if check.name.trim().is_empty() {
+        body
+    } else {
+        format!("CONSTRAINT {} {body}", quote_identifier(&check.name))
+    }
+}
+
 fn foreign_key_clause(foreign_key: &ForeignKeyDef) -> String {
     let columns = foreign_key
         .columns
@@ -105,14 +130,25 @@ fn foreign_key_clause(foreign_key: &ForeignKeyDef) -> String {
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let referenced_table = match foreign_key.referenced_table.split_once('.') {
-        Some((schema, name)) => qualify(schema, name),
-        None => quote_identifier(&foreign_key.referenced_table),
+    let referenced_table = if !foreign_key.referenced_schema.trim().is_empty() {
+        qualify(
+            foreign_key.referenced_schema.trim(),
+            &foreign_key.referenced_table,
+        )
+    } else {
+        match foreign_key.referenced_table.split_once('.') {
+            // Compatibility with a schema loaded before `referenced_schema` existed.
+            Some((schema, name)) => qualify(schema, name),
+            None => quote_identifier(&foreign_key.referenced_table),
+        }
     };
-    let mut sql = format!(
-        "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({referenced})",
-        quote_identifier(&foreign_key.name),
-    );
+    let constraint = if foreign_key.name.trim().is_empty() {
+        String::new()
+    } else {
+        format!("CONSTRAINT {} ", quote_identifier(&foreign_key.name))
+    };
+    let mut sql =
+        format!("{constraint}FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({referenced})");
     if !foreign_key.on_delete.trim().is_empty() {
         sql.push_str(" ON DELETE ");
         sql.push_str(foreign_key.on_delete.trim());
@@ -199,11 +235,22 @@ pub(crate) async fn table_schema(
 
             let index_cursor = raw
                 .query(
-                    "SELECT i.index_name, i.uniqueness, i.index_type, c.column_name, c.descend \
+                    "SELECT i.index_name, i.uniqueness, i.index_type, c.column_name, c.descend, \
+                            CASE WHEN EXISTS (SELECT 1 FROM all_constraints k \
+                                              WHERE k.owner = i.table_owner \
+                                                AND k.table_name = i.table_name \
+                                                AND k.index_name = i.index_name \
+                                                AND k.constraint_type = 'P') \
+                                 THEN 1 ELSE 0 END AS is_primary \
                      FROM all_indexes i \
                      JOIN all_ind_columns c \
                        ON c.index_owner = i.owner AND c.index_name = i.index_name \
                      WHERE i.table_owner = :1 AND i.table_name = :2 \
+                       AND NOT EXISTS (SELECT 1 FROM all_constraints u \
+                                       WHERE u.owner = i.table_owner \
+                                         AND u.table_name = i.table_name \
+                                         AND u.index_name = i.index_name \
+                                         AND u.constraint_type = 'U') \
                      ORDER BY i.index_name, c.column_position",
                     &refs,
                 )
@@ -214,6 +261,7 @@ pub(crate) async fn table_schema(
                 let name = string_at(&row, 0);
                 let unique = string_at(&row, 1).eq_ignore_ascii_case("UNIQUE");
                 let index_type = string_at(&row, 2);
+                let primary = number_at(&row, 5).unwrap_or(0) == 1;
                 // Oracle indexes have no prefix length (子部分 is MySQL's).
                 let index_column = IndexColumnDef {
                     name: string_at(&row, 3),
@@ -226,7 +274,7 @@ pub(crate) async fn table_schema(
                         name,
                         columns: vec![index_column],
                         unique,
-                        primary: false,
+                        primary,
                         index_type,
                         comment: String::new(),
                     }),
@@ -269,11 +317,61 @@ pub(crate) async fn table_schema(
                     None => foreign_keys.push(ForeignKeyDef {
                         name,
                         columns: vec![column],
-                        referenced_table: format!("{ref_schema}.{ref_table}"),
+                        referenced_schema: ref_schema,
+                        referenced_table: ref_table,
                         referenced_columns: vec![ref_column],
                         on_delete: normalize_action(&delete_rule),
                         on_update: String::new(),
                     }),
+                }
+            }
+
+            let unique_cursor = raw
+                .query(
+                    "SELECT c.constraint_name, cc.column_name \
+                     FROM all_constraints c \
+                     JOIN all_cons_columns cc \
+                       ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name \
+                     WHERE c.constraint_type = 'U' AND c.owner = :1 AND c.table_name = :2 \
+                     ORDER BY c.constraint_name, cc.position",
+                    &refs,
+                )
+                .map_err(map_query_error)?;
+            let mut unique_keys: Vec<UniqueKeyDef> = Vec::new();
+            for row in unique_cursor {
+                let row = row.map_err(map_query_error)?;
+                let name = string_at(&row, 0);
+                let column = string_at(&row, 1);
+                match unique_keys.iter_mut().find(|key| key.name == name) {
+                    Some(existing) => existing.columns.push(column),
+                    None => unique_keys.push(UniqueKeyDef {
+                        name,
+                        columns: vec![column],
+                    }),
+                }
+            }
+
+            // Oracle reports NOT NULL constraints as type `C` too. A system-named `SYS_C…`
+            // constraint whose condition is `COL IS NOT NULL` is the implicit one, not a user
+            // check; user checks (named or not) keep their expression. `SEARCH_CONDITION_VC` is
+            // Oracle 12c+; on an older server the check query is skipped rather than failing the
+            // whole designer load.
+            let mut checks: Vec<CheckDef> = Vec::new();
+            if let Ok(check_cursor) = raw.query(
+                "SELECT c.constraint_name, c.search_condition_vc \
+                 FROM all_constraints c \
+                 WHERE c.constraint_type = 'C' AND c.owner = :1 AND c.table_name = :2 \
+                   AND NOT (c.constraint_name LIKE 'SYS_C%' \
+                            AND c.search_condition_vc LIKE '% IS NOT NULL') \
+                 ORDER BY c.constraint_name",
+                &refs,
+            ) {
+                for row in check_cursor {
+                    let Ok(row) = row else { continue };
+                    checks.push(CheckDef {
+                        name: string_at(&row, 0),
+                        expression: string_at(&row, 1).trim().to_string(),
+                    });
                 }
             }
 
@@ -287,8 +385,14 @@ pub(crate) async fn table_schema(
             let mut triggers = Vec::new();
             for row in trigger_cursor {
                 let row = row.map_err(map_query_error)?;
+                let name = string_at(&row, 0);
+                let statement = crate::connection::fetch_ddl(raw, "TRIGGER", &name, &schema)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
                 triggers.push(TriggerDef {
-                    name: string_at(&row, 0),
+                    name,
+                    statement,
                     ..Default::default()
                 });
             }
@@ -309,10 +413,13 @@ pub(crate) async fn table_schema(
             Ok(TableSchema {
                 columns,
                 indexes,
-                unique_keys: Vec::new(),
-                checks: Vec::new(),
+                unique_keys,
+                checks,
+                excludes: Vec::new(),
+                rules: Vec::new(),
                 foreign_keys,
                 triggers,
+                partitioning: String::new(),
                 options: TableOptions {
                     comment,
                     ..Default::default()
@@ -324,6 +431,61 @@ pub(crate) async fn table_schema(
 
 /// Build the DDL that turns `original` into `modified` (or creates the table when `original` is
 /// `None`).
+/// `DROP`/`CREATE` statements for Oracle's complete trigger definitions.
+pub(crate) fn trigger_sql(
+    schema_name: &str,
+    original: Option<&TableSchema>,
+    modified: &TableSchema,
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    let original_triggers = original
+        .map(|schema| schema.triggers.as_slice())
+        .unwrap_or(&[]);
+    for trigger in original_triggers {
+        if trigger.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified
+            .triggers
+            .iter()
+            .find(|candidate| candidate.name == trigger.name)
+            .is_some_and(|candidate| candidate == trigger);
+        if !unchanged {
+            statements.push(format!(
+                "DROP TRIGGER {}",
+                qualify(schema_name, &trigger.name)
+            ));
+        }
+    }
+    for trigger in &modified.triggers {
+        // A new full definition has no name until the designer reloads; the statement carries it.
+        if trigger.statement.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original
+            .map(|schema| schema.triggers.as_slice())
+            .is_some_and(|triggers| {
+                triggers
+                    .iter()
+                    .find(|candidate| candidate.name == trigger.name)
+                    .is_some_and(|candidate| candidate == trigger)
+            });
+        if !unchanged {
+            statements.push(
+                trigger
+                    .statement
+                    .trim()
+                    .trim_end_matches('/')
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim_end()
+                    .to_string(),
+            );
+        }
+    }
+    statements
+}
+
 pub(crate) fn table_schema_sql(
     schema: &str,
     table: &str,
@@ -346,6 +508,124 @@ pub(crate) fn table_schema_sql(
         .iter()
         .map(|column| (column.name.as_str(), column))
         .collect();
+    let original_uniques: HashMap<&str, &UniqueKeyDef> = original
+        .unique_keys
+        .iter()
+        .filter(|key| !key.name.trim().is_empty())
+        .map(|key| (key.name.as_str(), key))
+        .collect();
+    let modified_uniques: HashMap<&str, &UniqueKeyDef> = modified
+        .unique_keys
+        .iter()
+        .filter(|key| !key.name.trim().is_empty())
+        .map(|key| (key.name.as_str(), key))
+        .collect();
+    let original_checks: HashMap<&str, &CheckDef> = original
+        .checks
+        .iter()
+        .filter(|check| !check.name.trim().is_empty())
+        .map(|check| (check.name.as_str(), check))
+        .collect();
+    let modified_checks: HashMap<&str, &CheckDef> = modified
+        .checks
+        .iter()
+        .filter(|check| !check.name.trim().is_empty())
+        .map(|check| (check.name.as_str(), check))
+        .collect();
+
+    // Foreign keys go first: a unique key they reference cannot be dropped before them. Then
+    // unique/check constraints, before any column change: Oracle refuses to drop a column a
+    // constraint still uses. New/changed ones are re-added after the columns exist.
+    let original_fks: HashMap<&str, &ForeignKeyDef> = original
+        .foreign_keys
+        .iter()
+        .filter(|foreign_key| !foreign_key.name.trim().is_empty())
+        .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
+        .collect();
+    let modified_fks: HashMap<&str, &ForeignKeyDef> = modified
+        .foreign_keys
+        .iter()
+        .filter(|foreign_key| !foreign_key.name.trim().is_empty())
+        .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
+        .collect();
+    for foreign_key in &original.foreign_keys {
+        if foreign_key.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified_fks
+            .get(foreign_key.name.as_str())
+            .is_some_and(|candidate| *candidate == foreign_key);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                quote_identifier(&foreign_key.name)
+            ));
+        }
+    }
+
+    for key in &original.unique_keys {
+        if key.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified_uniques
+            .get(key.name.as_str())
+            .is_some_and(|candidate| *candidate == key);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                quote_identifier(&key.name)
+            ));
+        }
+    }
+    for check in &original.checks {
+        if check.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified_checks
+            .get(check.name.as_str())
+            .is_some_and(|candidate| *candidate == check);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
+                quote_identifier(&check.name)
+            ));
+        }
+    }
+
+    let original_primary: Vec<&str> = original
+        .columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .map(|column| column.name.as_str())
+        .collect();
+    let modified_primary: Vec<&str> = modified
+        .columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .map(|column| column.name.as_str())
+        .collect();
+    if original_primary != modified_primary && !original_primary.is_empty() {
+        statements.push(format!("ALTER TABLE {qualified} DROP PRIMARY KEY"));
+    }
+
+    let original_indexes: HashMap<&str, &IndexDef> = original
+        .indexes
+        .iter()
+        .map(|index| (index.name.as_str(), index))
+        .collect();
+    let modified_indexes: HashMap<&str, &IndexDef> = modified
+        .indexes
+        .iter()
+        .map(|index| (index.name.as_str(), index))
+        .collect();
+    for index in original.indexes.iter().filter(|index| !index.primary) {
+        let unchanged = modified_indexes
+            .get(index.name.as_str())
+            .is_some_and(|candidate| *candidate == index);
+        if !unchanged {
+            statements.push(format!("DROP INDEX {}", qualify(schema, &index.name)));
+        }
+    }
 
     for column in &modified.columns {
         match original_columns.get(column.name.as_str()) {
@@ -402,96 +682,66 @@ pub(crate) fn table_schema_sql(
         }
     }
 
-    let original_primary: Vec<&str> = original
-        .columns
-        .iter()
-        .filter(|column| column.primary_key)
-        .map(|column| column.name.as_str())
-        .collect();
-    let modified_primary: Vec<&str> = modified
-        .columns
-        .iter()
-        .filter(|column| column.primary_key)
-        .map(|column| column.name.as_str())
-        .collect();
-    if original_primary != modified_primary {
-        if !original_primary.is_empty() {
-            statements.push(format!("ALTER TABLE {qualified} DROP PRIMARY KEY"));
+    if original_primary != modified_primary && !modified_primary.is_empty() {
+        statements.push(format!(
+            "ALTER TABLE {qualified} ADD PRIMARY KEY ({})",
+            modified_primary
+                .iter()
+                .map(|column| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    for index in modified.indexes.iter().filter(|index| !index.primary) {
+        let unchanged = original_indexes
+            .get(index.name.as_str())
+            .is_some_and(|candidate| *candidate == index);
+        if !unchanged {
+            statements.push(index_sql(schema, table, index));
         }
-        if !modified_primary.is_empty() {
+    }
+
+    for key in &modified.unique_keys {
+        if key.name.trim().is_empty() || key.columns.is_empty() {
+            continue;
+        }
+        let unchanged = original_uniques
+            .get(key.name.as_str())
+            .is_some_and(|candidate| *candidate == key);
+        if !unchanged {
             statements.push(format!(
-                "ALTER TABLE {qualified} ADD PRIMARY KEY ({})",
-                modified_primary
-                    .iter()
-                    .map(|column| quote_identifier(column))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "ALTER TABLE {qualified} ADD {}",
+                unique_key_clause(key)
+            ));
+        }
+    }
+    for check in &modified.checks {
+        if check.name.trim().is_empty() || check.expression.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original_checks
+            .get(check.name.as_str())
+            .is_some_and(|candidate| *candidate == check);
+        if !unchanged {
+            statements.push(format!(
+                "ALTER TABLE {qualified} ADD {}",
+                check_clause(check)
             ));
         }
     }
 
-    let original_indexes: HashMap<&str, &IndexDef> = original
-        .indexes
-        .iter()
-        .map(|index| (index.name.as_str(), index))
-        .collect();
-    let modified_indexes: HashMap<&str, &IndexDef> = modified
-        .indexes
-        .iter()
-        .map(|index| (index.name.as_str(), index))
-        .collect();
-    for index in modified.indexes.iter().filter(|index| !index.primary) {
-        match original_indexes.get(index.name.as_str()) {
-            None => statements.push(index_sql(schema, table, index)),
-            // Oracle cannot alter an index in place, so a changed one is dropped and created again —
-            // otherwise an edit (a new column, a `DESC`) would be silently lost.
-            Some(previous) if **previous != *index => {
-                statements.push(format!("DROP INDEX {}", qualify(schema, &index.name)));
-                statements.push(index_sql(schema, table, index));
-            }
-            Some(_) => {}
-        }
-    }
-    for index in original.indexes.iter().filter(|index| !index.primary) {
-        if !modified_indexes.contains_key(index.name.as_str()) {
-            statements.push(format!("DROP INDEX {}", qualify(schema, &index.name)));
-        }
-    }
-
-    let original_fks: HashMap<&str, &ForeignKeyDef> = original
-        .foreign_keys
-        .iter()
-        .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
-        .collect();
-    let modified_fks: HashMap<&str, &ForeignKeyDef> = modified
-        .foreign_keys
-        .iter()
-        .map(|foreign_key| (foreign_key.name.as_str(), foreign_key))
-        .collect();
     for foreign_key in &modified.foreign_keys {
-        match original_fks.get(foreign_key.name.as_str()) {
-            None => statements.push(format!(
+        if foreign_key.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original_fks
+            .get(foreign_key.name.as_str())
+            .is_some_and(|candidate| *candidate == foreign_key);
+        if !unchanged {
+            statements.push(format!(
                 "ALTER TABLE {qualified} ADD {}",
                 foreign_key_clause(foreign_key)
-            )),
-            Some(existing) if *existing != foreign_key => {
-                statements.push(format!(
-                    "ALTER TABLE {qualified} DROP CONSTRAINT {}",
-                    quote_identifier(&foreign_key.name)
-                ));
-                statements.push(format!(
-                    "ALTER TABLE {qualified} ADD {}",
-                    foreign_key_clause(foreign_key)
-                ));
-            }
-            Some(_) => {}
-        }
-    }
-    for foreign_key in &original.foreign_keys {
-        if !modified_fks.contains_key(foreign_key.name.as_str()) {
-            statements.push(format!(
-                "ALTER TABLE {qualified} DROP CONSTRAINT {}",
-                quote_identifier(&foreign_key.name)
             ));
         }
     }
@@ -531,6 +781,16 @@ fn create_table_sql(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    for key in &schema_def.unique_keys {
+        if !key.columns.is_empty() {
+            definitions.push(unique_key_clause(key));
+        }
+    }
+    for check in &schema_def.checks {
+        if !check.expression.trim().is_empty() {
+            definitions.push(check_clause(check));
+        }
     }
     for foreign_key in &schema_def.foreign_keys {
         definitions.push(foreign_key_clause(foreign_key));
@@ -651,6 +911,84 @@ mod tests {
         assert!(sql.contains("\"ID\" NUMBER(10) GENERATED BY DEFAULT AS IDENTITY NOT NULL"));
         assert!(sql.contains("PRIMARY KEY (\"ID\")"));
         assert!(sql.contains("COMMENT ON TABLE \"APP\".\"T\" IS 't'"));
+    }
+
+    #[test]
+    fn builds_full_trigger_diff() {
+        let original = TableSchema {
+            triggers: vec![TriggerDef {
+                name: "TRG".to_string(),
+                statement: "CREATE OR REPLACE TRIGGER \"APP\".\"TRG\" BEFORE INSERT ON \"APP\".\"T\" BEGIN NULL; END;".to_string(),
+                ..TriggerDef::default()
+            }],
+            ..TableSchema::default()
+        };
+        let mut modified = original.clone();
+        modified.triggers[0].statement =
+            "CREATE OR REPLACE TRIGGER \"APP\".\"TRG\" AFTER INSERT ON \"APP\".\"T\" BEGIN NULL; END;"
+                .to_string();
+
+        let sql = trigger_sql("APP", Some(&original), &modified);
+        assert_eq!(sql[0], "DROP TRIGGER \"APP\".\"TRG\"");
+        assert!(sql[1].contains("AFTER INSERT"), "{sql:?}");
+        assert!(!sql[1].ends_with(';'), "{sql:?}");
+    }
+
+    #[test]
+    fn creates_and_reconciles_unique_and_check_constraints() {
+        let mut schema = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "ID".to_string(),
+                    data_type: "NUMBER".to_string(),
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "CODE".to_string(),
+                    data_type: "VARCHAR2".to_string(),
+                    length: "20".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        schema.unique_keys.push(UniqueKeyDef {
+            name: "UQ_CODE".to_string(),
+            columns: vec!["CODE".to_string()],
+        });
+        schema.checks.push(CheckDef {
+            name: "CK_ID".to_string(),
+            expression: "\"ID\">0".to_string(),
+        });
+
+        let sql = table_schema_sql("APP", "T", None, &schema);
+        assert!(
+            sql.contains("CONSTRAINT \"UQ_CODE\" UNIQUE (\"CODE\")"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CONSTRAINT \"CK_ID\" CHECK (\"ID\">0)"),
+            "{sql}"
+        );
+
+        let mut modified = schema.clone();
+        modified.unique_keys[0].columns.push("ID".to_string());
+        modified.checks[0].expression = "\"ID\">=0".to_string();
+        let sql = table_schema_sql("APP", "T", Some(&schema), &modified);
+        assert!(
+            sql.contains("ALTER TABLE \"APP\".\"T\" DROP CONSTRAINT \"UQ_CODE\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER TABLE \"APP\".\"T\" ADD CONSTRAINT \"UQ_CODE\" UNIQUE (\"CODE\", \"ID\")"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ALTER TABLE \"APP\".\"T\" ADD CONSTRAINT \"CK_ID\" CHECK (\"ID\">=0)"),
+            "{sql}"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use rustgrid_core::{
     DatabaseEditorSpec, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
     DesignerIndexKind, DesignerTab, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
     DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec, TlsMode,
-    UserEditorSpec,
+    TriggerDefinition, UserEditorSpec,
 };
 
 use crate::connection::OracleConnection;
@@ -111,6 +111,9 @@ impl Driver for OracleDriver {
                     DesignerTab::Fields,
                     DesignerTab::Indexes,
                     DesignerTab::ForeignKeys,
+                    DesignerTab::UniqueKeys,
+                    DesignerTab::Checks,
+                    DesignerTab::Triggers,
                     DesignerTab::Comment,
                     DesignerTab::Sql,
                 ],
@@ -153,6 +156,8 @@ impl Driver for OracleDriver {
                     },
                 ],
                 index_comment: false,
+                // `DBMS_METADATA.GET_DDL` is the complete `CREATE OR REPLACE TRIGGER` statement.
+                trigger_definition: TriggerDefinition::Full,
             },
             id: DriverId::new("oracle"),
             display_name: "Oracle".to_string(),
