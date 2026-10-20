@@ -1028,6 +1028,23 @@ impl TableDesignView {
         cx.notify();
     }
 
+    /// The engine's common default expressions that apply to `column`'s type. The list is filtered
+    /// per column, so a `varchar` column is not offered timestamp functions and a numeric column is
+    /// not offered an empty string.
+    pub(super) fn default_suggestions_for(
+        &self,
+        column: Option<&ColumnDef>,
+    ) -> Vec<&rustgrid_core::DefaultSuggestion> {
+        let data_type = column
+            .map(|column| column.data_type.as_str())
+            .unwrap_or_default();
+        self.designer
+            .default_suggestions
+            .iter()
+            .filter(|suggestion| suggestion.applies(data_type))
+            .collect()
+    }
+
     /// Take one of the engine's common default expressions from the 默认 suggestions.
     pub(super) fn select_default_suggestion(&mut self, value: &str, cx: &mut Context<'_, Self>) {
         if let Some(index) = self.selected_field
@@ -1321,6 +1338,7 @@ impl TableDesignView {
         }
         let value = self.field_value(row, column);
         let weak = self.self_weak.clone();
+        let submit = weak.clone();
         let theme = self.theme;
         let input = cx.new(move |cx| {
             TextInput::new(
@@ -1335,6 +1353,10 @@ impl TableDesignView {
             )
             .on_change(Rc::new(move |text, _window, cx| {
                 let _ = weak.update(cx, |view, cx| view.set_field_value(row, column, text, cx));
+            }))
+            // Enter commits and moves one row down, as it does in the table grid.
+            .on_submit(Rc::new(move |window, cx| {
+                let _ = submit.update(cx, |view, cx| view.move_designer_row(1, window, cx));
             }))
         });
         let focus = input.read(cx).focus_handle();
@@ -1462,6 +1484,111 @@ impl TableDesignView {
             return;
         };
         self.tab_field_cell(row, cell, shift, window, cx);
+    }
+
+    /// Arrow/Enter handling for the fields grid while the designer itself holds focus. Editing
+    /// keystrokes stay with the cell editor (see `move_designer_row` and the input binding).
+    pub(super) fn designer_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.tab != DesignerTab::Fields
+            || self.edit.is_some()
+            || self.type_combo.is_some()
+            || !self.focus.is_focused(window)
+            || event.keystroke.modifiers.control
+            || event.keystroke.modifiers.platform
+        {
+            return;
+        }
+        let Some((row, cell)) = self
+            .selected_cell
+            .or_else(|| self.selected_field.map(|row| (row, FieldCell::Name)))
+        else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "up" => {
+                self.move_designer_cell(row, cell, -1, 0, cx);
+                cx.stop_propagation();
+            }
+            "down" => {
+                self.move_designer_cell(row, cell, 1, 0, cx);
+                cx.stop_propagation();
+            }
+            "left" => {
+                self.move_designer_cell(row, cell, 0, -1, cx);
+                cx.stop_propagation();
+            }
+            "right" => {
+                self.move_designer_cell(row, cell, 0, 1, cx);
+                cx.stop_propagation();
+            }
+            "enter" | "f2" => {
+                self.open_field_cell(row, cell, window, cx);
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
+    }
+
+    /// Move the selected fields-grid cell one step, clamping at the grid edges. Vertical movement
+    /// keeps the cell kind, so a 长度 stays a 长度 when moving up/down.
+    fn move_designer_cell(
+        &mut self,
+        row: usize,
+        cell: FieldCell,
+        d_row: isize,
+        d_col: isize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let rows = self.schema.columns.len();
+        if rows == 0 {
+            return;
+        }
+        let mut target_row = row;
+        let mut target_cell = cell;
+        if d_row != 0 {
+            target_row = (row as isize + d_row).clamp(0, rows as isize - 1) as usize;
+        }
+        if d_col != 0 {
+            let chain = self.field_cell_chain();
+            if let Some(position) = chain.iter().position(|candidate| *candidate == cell) {
+                let position =
+                    (position as isize + d_col).clamp(0, chain.len() as isize - 1) as usize;
+                target_cell = chain[position];
+            }
+        }
+        self.selected_field = Some(target_row);
+        self.selected_cell = Some((target_row, target_cell));
+        self.field_rows.rows.clear();
+        self.field_rows.rows.insert(target_row);
+        self.field_rows.anchor = Some(target_row);
+        self.default_menu_open = false;
+        self.reveal_design_row(target_row);
+        self.sync_selected_input(cx);
+        cx.notify();
+    }
+
+    /// Up/Down from a designer cell editor: commit its text (already in the working copy through
+    /// `on_change`), close the editor, move the selection and hand focus back to the designer so
+    /// the next arrow key keeps navigating, exactly like the table grid.
+    pub(super) fn move_designer_row(
+        &mut self,
+        delta: isize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(edit) = self.edit.take() else {
+            return;
+        };
+        let (row, cell) = (edit.row, field_cell_of(edit.column));
+        self.edit_blur = None;
+        self.type_combo = None;
+        self.move_designer_cell(row, cell, delta, 0, cx);
+        window.focus(&self.focus, cx);
     }
 
     /// The fields-grid cell the caret is in, if any: the open type drop-down counts as 类型, and the
@@ -1622,6 +1749,10 @@ impl TableDesignView {
             }
         }
         self.type_combo = None;
+        self.selected_cell = Some((row, FieldCell::Type));
+        // The popup's search field goes away with the list; hand the keys back to the designer so
+        // the arrow keys keep moving the selected cell.
+        self.focus_pending = true;
         self.mark_dirty(cx);
     }
 

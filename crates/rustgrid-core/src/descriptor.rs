@@ -537,6 +537,55 @@ impl DesignerIndexKind {
     }
 }
 
+/// One common default expression offered beside the designer's 默认 field.
+///
+/// The designer filters the list by the selected column's type, so a `varchar` column is not
+/// offered `CURRENT_TIMESTAMP` and a `uuid` column is not offered `0`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultSuggestion {
+    /// The expression inserted after `DEFAULT`.
+    pub value: &'static str,
+    /// The base column types it applies to (`varchar`, `timestamp`, ...). Empty means every type.
+    pub types: Vec<&'static str>,
+}
+
+impl DefaultSuggestion {
+    /// A suggestion every column type can use (`NULL`).
+    pub fn every(value: &'static str) -> Self {
+        Self {
+            value,
+            types: Vec::new(),
+        }
+    }
+
+    /// A suggestion narrowed to the engine's own column types.
+    pub fn for_types(value: &'static str, types: &[&'static str]) -> Self {
+        Self {
+            value,
+            types: types.to_vec(),
+        }
+    }
+
+    /// Whether the suggestion applies to `data_type`. The comparison ignores a `(p[,s])` qualifier
+    /// and an array suffix, so `varchar(200)` and `integer[]` match `varchar` and `integer`.
+    pub fn applies(&self, data_type: &str) -> bool {
+        if self.types.is_empty() {
+            return true;
+        }
+        let base = base_column_type(data_type);
+        self.types
+            .iter()
+            .any(|kind| kind.eq_ignore_ascii_case(&base))
+    }
+}
+
+/// The base name of a column type (`character varying(50)` -> `character varying`,
+/// `integer[]` -> `integer`).
+fn base_column_type(data_type: &str) -> String {
+    let base = data_type.split('(').next().unwrap_or_default().trim();
+    base.strip_suffix("[]").unwrap_or(base).trim().to_string()
+}
+
 /// How the table designer presents one engine's tables.
 ///
 /// The designer is one view shared by every engine; this spec is what makes it engine-correct.
@@ -553,9 +602,9 @@ pub struct TableDesignerSpec {
     pub field_columns: Vec<DesignerFieldColumn>,
     /// The rows shown by the Options tab, in order.
     pub option_fields: Vec<DesignerOptionField>,
-    /// Common default expressions offered beside the 默认 field, in order. Empty when the engine
-    /// declares none, which leaves the field a plain text box.
-    pub default_suggestions: Vec<&'static str>,
+    /// Common default expressions offered beside the 默认 field, in order. The designer filters
+    /// them by the selected column's type; empty leaves the field a plain text box.
+    pub default_suggestions: Vec<DefaultSuggestion>,
     /// The per-column options the index field editor shows, in order.
     pub index_columns: Vec<DesignerIndexColumn>,
     /// The 索引类型 choices, in order: each engine's own index kinds.
@@ -662,7 +711,43 @@ impl Default for TableDesignerSpec {
                 DesignerOptionField::AutoIncrement,
                 DesignerOptionField::Comment,
             ],
-            default_suggestions: vec!["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "NULL"],
+            default_suggestions: vec![
+                DefaultSuggestion::for_types("CURRENT_TIMESTAMP", &["datetime", "timestamp"]),
+                DefaultSuggestion::for_types("CURRENT_DATE", &["date"]),
+                DefaultSuggestion::for_types("CURRENT_TIME", &["time"]),
+                DefaultSuggestion::for_types(
+                    "0",
+                    &[
+                        "tinyint",
+                        "smallint",
+                        "mediumint",
+                        "int",
+                        "integer",
+                        "bigint",
+                        "decimal",
+                        "numeric",
+                        "float",
+                        "double",
+                        "real",
+                    ],
+                ),
+                DefaultSuggestion::for_types(
+                    "''",
+                    &[
+                        "char",
+                        "varchar",
+                        "tinytext",
+                        "text",
+                        "mediumtext",
+                        "longtext",
+                        "enum",
+                        "set",
+                    ],
+                ),
+                DefaultSuggestion::for_types("true", &["boolean", "bool", "tinyint"]),
+                DefaultSuggestion::for_types("false", &["boolean", "bool", "tinyint"]),
+                DefaultSuggestion::every("NULL"),
+            ],
             // MySQL's `AUTO_INCREMENT` is a single integer column per table, changeable in place.
             auto_increment: AutoIncrementRule {
                 types: vec![
@@ -760,6 +845,29 @@ mod tests {
         assert!(rule.allows("nvarchar"));
         assert!(rule.one_per_table);
         assert!(rule.change_existing);
+    }
+
+    #[test]
+    fn default_suggestions_follow_the_column_type() {
+        let spec = TableDesignerSpec::default();
+        let values = |data_type: &str| {
+            spec.default_suggestions
+                .iter()
+                .filter(|suggestion| suggestion.applies(data_type))
+                .map(|suggestion| suggestion.value)
+                .collect::<Vec<_>>()
+        };
+        // A text column gets an empty string and the universal NULL, not timestamp functions.
+        assert_eq!(values("varchar(200)"), vec!["''", "NULL"]);
+        assert_eq!(values("text"), vec!["''", "NULL"]);
+        // Numeric types get 0 (tinyint also carries its boolean spellings).
+        assert_eq!(values("bigint"), vec!["0", "NULL"]);
+        assert_eq!(values("tinyint"), vec!["0", "true", "false", "NULL"]);
+        // The qualifier and an array suffix are ignored.
+        assert_eq!(values("integer(11)"), vec!["0", "NULL"]);
+        assert_eq!(values("integer[]"), vec!["0", "NULL"]);
+        // A timestamp gets the timestamp expression only.
+        assert_eq!(values("timestamp"), vec!["CURRENT_TIMESTAMP", "NULL"]);
     }
 
     #[test]

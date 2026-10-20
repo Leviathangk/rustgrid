@@ -57,6 +57,9 @@ impl TableDesignView {
             .on_action(cx.listener(|this, _: &PrevDesignerCell, window, cx| {
                 this.tab_designer_cell(true, window, cx)
             }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.designer_key(event, window, cx)
+            }))
             .bg(rgb(theme.editor_bg))
             .text_size(px(12.0))
             .text_color(rgb(theme.text))
@@ -522,9 +525,12 @@ impl TableDesignView {
                                     .cursor_pointer()
                                     .on_mouse_down(
                                         MouseButton::Left,
-                                        move |event: &MouseDownEvent, _window, cx| {
+                                        move |event: &MouseDownEvent, window, cx| {
                                             let _ = gutter_weak.update(cx, |view, cx| {
-                                                view.select_field_row(row, &event.modifiers, cx)
+                                                view.select_field_row(row, &event.modifiers, cx);
+                                                // The row surface, not an input, now owns the keys,
+                                                // so arrow navigation works straight away.
+                                                window.focus(&view.focus, cx);
                                             });
                                         },
                                     )
@@ -652,6 +658,7 @@ impl TableDesignView {
         let column = self
             .selected_field
             .and_then(|index| self.schema.columns.get(index));
+        let default_suggestions = self.default_suggestions_for(column);
         // Where the engine accepts an auto-increment: on a type of its list, and — for an engine
         // that cannot change a column the table already has (SQL Server's `IDENTITY`) — only on a
         // column the table does not have yet, or in a brand-new table.
@@ -719,7 +726,17 @@ impl TableDesignView {
                         .h(px(22.0))
                         .when(!enabled, |style| style.opacity(0.5));
                     let anchor = self.default_anchor.clone();
+                    // The input and the suggestions chevron share one row; without `flex_row` the
+                    // button wraps below the field (it looked like a stray control under it).
                     let mut field = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h(px(22.0));
+                    let input = div()
                         .flex_1()
                         .min_w(px(0.0))
                         .h(px(22.0))
@@ -730,7 +747,8 @@ impl TableDesignView {
                             }
                         })
                         .child(self.default_input.clone());
-                    if enabled && !self.designer.default_suggestions.is_empty() {
+                    field = field.child(input);
+                    if enabled && !default_suggestions.is_empty() {
                         field = field.child(self.render_default_suggestion_button());
                     }
                     control = control.child(field);
@@ -867,7 +885,11 @@ impl TableDesignView {
         const FIELD_HEIGHT: f32 = 22.0;
         let anchor_y: f32 = anchor.y.into();
         let view_height: f32 = bounds.size.height.into();
-        let desired = (self.designer.default_suggestions.len() as f32 * FIELD_HEIGHT).min(240.0);
+        let column = self
+            .selected_field
+            .and_then(|index| self.schema.columns.get(index));
+        let suggestions = self.default_suggestions_for(column);
+        let desired = (suggestions.len() as f32 * FIELD_HEIGHT).min(240.0);
         let below = view_height - anchor_y - FIELD_HEIGHT;
         let above = anchor_y - 2.0;
         let open_up = view_height > 0.0 && below < desired && above > below;
@@ -886,8 +908,8 @@ impl TableDesignView {
             .overflow_y_scroll()
             .flex()
             .flex_col();
-        for (position, value) in self.designer.default_suggestions.iter().enumerate() {
-            let selected = value.to_string();
+        for (position, suggestion) in suggestions.iter().enumerate() {
+            let value = suggestion.value;
             let choose = weak.clone();
             list = list.child(
                 div()
@@ -901,8 +923,8 @@ impl TableDesignView {
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
                     .on_click(move |_event, _window, cx| {
-                        let _ = choose
-                            .update(cx, |view, cx| view.select_default_suggestion(&selected, cx));
+                        let _ =
+                            choose.update(cx, |view, cx| view.select_default_suggestion(value, cx));
                     })
                     .child(value.to_string()),
             );
@@ -2870,7 +2892,18 @@ fn design_edit_cell(
     let cell = design_cell(id, width, theme, selected)
         .when(selected, |cell| cell.bg(rgb(theme.grid_selection_bg)));
     if let Some(editor) = editor {
+        let up_weak = weak.clone();
+        let down_weak = weak.clone();
         return cell
+            // The focused input's kit context is nested under this one, so `DesignerRowUp/Down`
+            // outrank the kit's own MoveUp/MoveDown.
+            .key_context(DESIGNER_CELL_CONTEXT)
+            .on_action(move |_: &DesignerRowUp, window, cx| {
+                let _ = up_weak.update(cx, |view, cx| view.move_designer_row(-1, window, cx));
+            })
+            .on_action(move |_: &DesignerRowDown, window, cx| {
+                let _ = down_weak.update(cx, |view, cx| view.move_designer_row(1, window, cx));
+            })
             .bg(rgb(theme.input_bg))
             // The selected-cell text color (white) must not leak into the editor, or its text is
             // invisible on the light input background.

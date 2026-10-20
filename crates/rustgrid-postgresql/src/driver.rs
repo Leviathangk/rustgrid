@@ -3,10 +3,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rustgrid_core::{
     AccountKind, AutoIncrementRule, Connection, ConnectionConfig, DatabaseEditorSpec,
-    DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind,
-    DesignerOptionField, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
-    DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec, TlsMode,
-    UserEditorSpec,
+    DefaultSuggestion, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
+    DesignerIndexKind, DesignerOptionField, Driver, DriverCapabilities, DriverCapability,
+    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
+    TlsMode, UserEditorSpec,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
@@ -106,14 +106,33 @@ impl Driver for PostgresDriver {
                 ],
                 option_fields: vec![DesignerOptionField::Comment],
                 default_suggestions: vec![
-                    "CURRENT_TIMESTAMP",
-                    "CURRENT_DATE",
-                    "CURRENT_TIME",
-                    "LOCALTIME",
-                    "LOCALTIMESTAMP",
-                    "now()",
-                    "gen_random_uuid()",
-                    "NULL",
+                    DefaultSuggestion::for_types(
+                        "CURRENT_TIMESTAMP",
+                        &["timestamp", "timestamptz"],
+                    ),
+                    DefaultSuggestion::for_types("CURRENT_DATE", &["date"]),
+                    DefaultSuggestion::for_types("CURRENT_TIME", &["time", "timetz"]),
+                    DefaultSuggestion::for_types("LOCALTIME", &["time", "timetz"]),
+                    DefaultSuggestion::for_types("LOCALTIMESTAMP", &["timestamp"]),
+                    DefaultSuggestion::for_types("now()", &["timestamp", "timestamptz"]),
+                    DefaultSuggestion::for_types("gen_random_uuid()", &["uuid"]),
+                    DefaultSuggestion::for_types(
+                        "0",
+                        &[
+                            "smallint",
+                            "integer",
+                            "bigint",
+                            "numeric",
+                            "real",
+                            "double precision",
+                            "money",
+                        ],
+                    ),
+                    DefaultSuggestion::for_types("''", &["text", "varchar", "char"]),
+                    DefaultSuggestion::for_types("true", &["boolean"]),
+                    DefaultSuggestion::for_types("false", &["boolean"]),
+                    DefaultSuggestion::for_types("'{}'", &["json", "jsonb"]),
+                    DefaultSuggestion::every("NULL"),
                 ],
                 // PostgreSQL's identity/serial is one numeric column per table.
                 auto_increment: AutoIncrementRule {

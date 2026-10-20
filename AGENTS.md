@@ -273,8 +273,10 @@ touching UI code.
   (`DesignerFieldColumn`, where `Length`/`Size`, `Decimals`/`Scale` and `Generated`/`Computed` are
   the same cells under different names), `option_fields` the rows of the 选项 page
   (`DesignerOptionField`) and `default_suggestions` the common expressions offered by the chevron
-  beside 默认. The default is MySQL's shape, so an engine opts in by declaring its own, and only a
-  control the engine's designer SQL actually honors is listed, so no driver shows a dead knob.
+  beside 默认, each narrowed to the column types it suits (`DefaultSuggestion::applies` filters them
+  against the selected column, so 长度/类型 changes change the list). The default is MySQL's shape,
+  so an engine opts in by declaring its own, and only a control the engine's designer SQL actually
+  honors is listed, so no driver shows a dead knob.
   MySQL/MariaDB keep 自动递增/无符号/填充零 and every tab; SQL Server declares 排序规则/稀疏,
   大小/比例/计算列, and the extra 唯一键/检查 tabs; SQLite has no 选项/注释 (it has neither) and
   Oracle no 选项, while PostgreSQL's 选项 keeps only 注释 and its column detail adds the identity
@@ -318,7 +320,14 @@ touching UI code.
   neighbouring row at the row's end (`field_cell_neighbor`) and handing the keystroke back to the
   window's focus chain (the detail panel below the grid) only past the grid's first/last cell. The
   engine's toggles (不是 null / 主键 / 虚拟 / 稀疏) are not Tab stops — they have no editor to focus.
-  Tab must be claimed by a key binding rather than an element's `on_key_down` (`ui::TextInput::on_tab`
+  Arrow keys work like the table grid too: while the designer root holds focus, Left/Right/Up/Down
+  move `selected_cell` (clamped at the grid edges, keeping the cell kind vertically) and Enter/F2
+  open that cell's editor. Inside a cell editor Up/Down (`DesignerRowUp`/`DesignerRowDown`, bound at
+  `TableDesignerCell > Input`) commit and move one row and Left/Right stay with the caret; Enter
+  commits and moves down. Focus returns to the designer root after the move, so the next arrow keeps
+  navigating. A gutter click is row mode (`field_rows` paints the name cells); a cell click is cell
+  mode (`selected_cell` paints only that cell). Tab must be claimed by a key binding rather than an
+  element's `on_key_down` (`ui::TextInput::on_tab`
   never fires for it: gpui dispatches a keystroke a binding matches as an action, and `Root` binds
   `tab`). The 类型 drop-down is driven from the keyboard: `type_highlight` marks a row, Up/Down
   (`ui::TextInput::on_arrow`) move it and `keep_type_highlight_visible` scrolls it in, Enter takes

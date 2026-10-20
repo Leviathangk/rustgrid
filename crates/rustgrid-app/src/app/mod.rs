@@ -169,7 +169,16 @@ gpui::actions!(gridstatus, [CopyStatusSql, SelectAllStatusSql]);
 // The table designer's own actions: 保存 from Ctrl+S, and Tab / Shift+Tab walking the fields grid's
 // cells (`Root` binds `tab` to `focus_next`, and a bound keystroke never reaches an element's own
 // `on_key_down`, so the grid claims it the same way the data grid does).
-gpui::actions!(designer, [SaveDesign, NextDesignerCell, PrevDesignerCell]);
+gpui::actions!(
+    designer,
+    [
+        SaveDesign,
+        NextDesignerCell,
+        PrevDesignerCell,
+        DesignerRowUp,
+        DesignerRowDown
+    ]
+);
 
 // Connection-tree keyboard navigation (see `sidebar.rs`). They are keymap commands, so every key is
 // rebindable; typing a name to jump to it stays on the tree's `on_key_down`.
@@ -225,6 +234,13 @@ const NAV_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 /// Key context applied to the table designer, so Ctrl+S saves it and Tab walks its cells while the
 /// designer (or one of its cell editors) holds focus.
 const DESIGNER_CONTEXT: &str = "TableDesigner";
+
+/// Key context applied to a designer cell that owns the in-place editor.
+const DESIGNER_CELL_CONTEXT: &str = "TableDesignerCell";
+
+/// The designer cell editor's own `Input` context, for bindings that must outrank the kit's
+/// text-input `MoveUp`/`MoveDown` (up/down move the selected row, like the table grid).
+const DESIGNER_CELL_INPUT_CONTEXT: &str = "TableDesignerCell > Input";
 
 /// Key context applied to the cell that owns the in-place editor.
 const GRID_CELL_CONTEXT: &str = "GridCell";
@@ -2713,6 +2729,11 @@ impl AppView {
             // Tab / Shift+Tab walking the table designer's fields grid.
             KeyBinding::new("tab", NextDesignerCell, Some(DESIGNER_CONTEXT)),
             KeyBinding::new("shift-tab", PrevDesignerCell, Some(DESIGNER_CONTEXT)),
+            // Up/Down in a designer cell editor commit and move the selected row, like the grid's
+            // cell editor. They are bound at the input context because the kit's own MoveUp/MoveDown
+            // consumes those keys for a single-line field.
+            KeyBinding::new("up", DesignerRowUp, Some(DESIGNER_CELL_INPUT_CONTEXT)),
+            KeyBinding::new("down", DesignerRowDown, Some(DESIGNER_CELL_INPUT_CONTEXT)),
             // Tab confirms the highlighted completion item exactly like Enter does. gpui-kit only
             // handles Enter (its completion menu checks `input::Enter`), so this binding ties with
             // the kit's `Tab -> IndentInline` at the same context depth and, being registered

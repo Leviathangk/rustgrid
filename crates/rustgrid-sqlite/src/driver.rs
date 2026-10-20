@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use rustgrid_core::{
     AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig, ConnectionFieldLabel,
     ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
-    DatabaseEditorSpec, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
-    DesignerIndexKind, DesignerTab, Driver, DriverCapabilities, DriverDescriptor, DriverDialect,
-    DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
+    DatabaseEditorSpec, DefaultSuggestion, DesignerColumnOption, DesignerFieldColumn,
+    DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver, DriverCapabilities,
+    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -80,10 +80,23 @@ impl Driver for SqliteDriver {
                 ],
                 option_fields: Vec::new(),
                 default_suggestions: vec![
-                    "CURRENT_TIMESTAMP",
-                    "CURRENT_DATE",
-                    "CURRENT_TIME",
-                    "NULL",
+                    DefaultSuggestion::for_types(
+                        "CURRENT_TIMESTAMP",
+                        &["date", "datetime", "timestamp", "text"],
+                    ),
+                    DefaultSuggestion::for_types("CURRENT_DATE", &["date", "text"]),
+                    DefaultSuggestion::for_types("CURRENT_TIME", &["time", "text"]),
+                    DefaultSuggestion::for_types(
+                        "0",
+                        &[
+                            "integer", "int", "smallint", "bigint", "real", "double", "float",
+                            "numeric", "decimal",
+                        ],
+                    ),
+                    DefaultSuggestion::for_types("''", &["text", "varchar", "char", "clob"]),
+                    DefaultSuggestion::for_types("true", &["boolean", "bool", "integer", "int"]),
+                    DefaultSuggestion::for_types("false", &["boolean", "bool", "integer", "int"]),
+                    DefaultSuggestion::every("NULL"),
                 ],
                 // `AUTOINCREMENT` only exists on an `INTEGER PRIMARY KEY`.
                 auto_increment: AutoIncrementRule {

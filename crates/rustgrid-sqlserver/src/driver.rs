@@ -5,10 +5,10 @@ use rustgrid_core::{
     AccountKind, AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig,
     ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
     ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
-    DatabaseEditorSpec, DatabaseEditorTab, DesignerColumnOption, DesignerFieldColumn,
-    DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver, DriverCapabilities,
-    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
-    TableDesignerSpec, TlsMode, UserEditorSpec,
+    DatabaseEditorSpec, DatabaseEditorTab, DefaultSuggestion, DesignerColumnOption,
+    DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver,
+    DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
+    DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -156,11 +156,43 @@ impl Driver for SqlServerDriver {
                 ],
                 option_fields: Vec::new(),
                 default_suggestions: vec![
-                    "GETDATE()",
-                    "SYSDATETIME()",
-                    "CURRENT_TIMESTAMP",
-                    "NEWID()",
-                    "NULL",
+                    DefaultSuggestion::for_types(
+                        "GETDATE()",
+                        &["datetime", "datetime2", "smalldatetime", "date", "time"],
+                    ),
+                    DefaultSuggestion::for_types(
+                        "SYSDATETIME()",
+                        &["datetime2", "datetimeoffset", "date", "time"],
+                    ),
+                    DefaultSuggestion::for_types(
+                        "CURRENT_TIMESTAMP",
+                        &["datetime", "datetime2", "smalldatetime"],
+                    ),
+                    DefaultSuggestion::for_types("NEWID()", &["uniqueidentifier"]),
+                    DefaultSuggestion::for_types(
+                        "0",
+                        &[
+                            "tinyint",
+                            "smallint",
+                            "int",
+                            "bigint",
+                            "decimal",
+                            "numeric",
+                            "money",
+                            "smallmoney",
+                            "float",
+                            "real",
+                            "bit",
+                        ],
+                    ),
+                    DefaultSuggestion::for_types(
+                        "''",
+                        &[
+                            "char", "varchar", "nchar", "nvarchar", "text", "ntext", "sysname",
+                        ],
+                    ),
+                    DefaultSuggestion::for_types("1", &["bit"]),
+                    DefaultSuggestion::every("NULL"),
                 ],
                 // SQL Server has at most one `IDENTITY` column per table, only a numeric one, and
                 // `ALTER COLUMN` cannot give an existing column an `IDENTITY`: it is offered on a

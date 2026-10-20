@@ -7,10 +7,10 @@ use rustgrid_core::{
     AccountKind, AdvancedFields, AutoIncrementRule, Connection, ConnectionConfig,
     ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
     ConnectionFormSpec, ConnectionHomePage, ConnectionPage, ConnectionStandardField,
-    DatabaseEditorSpec, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
-    DesignerIndexKind, DesignerTab, Driver, DriverCapabilities, DriverCapability, DriverDescriptor,
-    DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec, TlsMode,
-    UserEditorSpec,
+    DatabaseEditorSpec, DefaultSuggestion, DesignerColumnOption, DesignerFieldColumn,
+    DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TableDesignerSpec, TlsMode, UserEditorSpec,
 };
 
 use crate::connection::OracleConnection;
@@ -127,11 +127,39 @@ impl Driver for OracleDriver {
                 ],
                 option_fields: Vec::new(),
                 default_suggestions: vec![
-                    "SYSDATE",
-                    "SYSTIMESTAMP",
-                    "CURRENT_DATE",
-                    "CURRENT_TIMESTAMP",
-                    "NULL",
+                    DefaultSuggestion::for_types("SYSDATE", &["date"]),
+                    DefaultSuggestion::for_types(
+                        "SYSTIMESTAMP",
+                        &[
+                            "timestamp",
+                            "timestamp with time zone",
+                            "timestamp with local time zone",
+                        ],
+                    ),
+                    DefaultSuggestion::for_types("CURRENT_DATE", &["date"]),
+                    DefaultSuggestion::for_types(
+                        "CURRENT_TIMESTAMP",
+                        &[
+                            "timestamp",
+                            "timestamp with time zone",
+                            "timestamp with local time zone",
+                        ],
+                    ),
+                    DefaultSuggestion::for_types(
+                        "0",
+                        &[
+                            "number",
+                            "numeric",
+                            "decimal",
+                            "integer",
+                            "int",
+                            "float",
+                            "binary_float",
+                            "binary_double",
+                        ],
+                    ),
+                    DefaultSuggestion::for_types("SYS_GUID()", &["raw"]),
+                    DefaultSuggestion::every("NULL"),
                 ],
                 // Oracle allows one `GENERATED … AS IDENTITY` column per table, on a numeric type.
                 auto_increment: AutoIncrementRule {
