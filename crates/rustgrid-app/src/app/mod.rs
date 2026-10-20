@@ -3191,7 +3191,9 @@ impl AppView {
         }
         self.theme_setting = setting;
         self.persist_settings();
-        self.notify_object_pane(cx);
+        // The resolved palette needs the window's appearance, so it is computed at the next render;
+        // that render pushes it into the cached children (see `sync_input_themes`). Notifying the
+        // object pane here would send it the *old* palette for one frame.
         cx.notify();
     }
 
@@ -4176,6 +4178,8 @@ impl Render for AppView {
             self.sync_input_themes(cx);
             // Cached grids/designers don't see a parent re-render, so push the new theme to them.
             self.notify_grids(cx);
+            // The object list draws from its own palette; repaint it with the freshly resolved one.
+            self.notify_object_pane(cx);
             // The editor's syntax colors and line-number gutter are owned by gpui-kit's highlight
             // theme, so install the app's palette over the kit default (see the helper).
             install_editor_highlight_theme(self.theme, cx);

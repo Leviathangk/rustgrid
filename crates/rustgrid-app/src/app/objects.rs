@@ -2313,6 +2313,10 @@ impl Render for ObjectPane {
                 return div().into_any_element();
             };
             let app = app.read(cx);
+            // The pane is a cached child: AppView pushes the theme on a change, but reading it here
+            // as well means a pane that is repainted for any other reason can never keep painting
+            // with a stale palette (e.g. the washed-out list right after a light/dark switch).
+            self.theme = app.theme;
             let database = app
                 .connections
                 .get(self.connection_index)
