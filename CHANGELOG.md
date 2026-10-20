@@ -13,6 +13,8 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 
 ### Added
 
+- The Transfer main tab (after Backup): compare a source database with a target and apply the
+  difference — structure, data, both, or a full transfer — with per-table status and a run log.
 - The detail lists sort: click a column header to order by it, click again to reverse — on Tables,
   Views, Functions, Users, Backup and the saved queries.
 - Options → Editor: "Ctrl + mouse wheel resizes the font", on by default — hold Ctrl and scroll over

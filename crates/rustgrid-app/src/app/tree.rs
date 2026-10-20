@@ -791,7 +791,11 @@ impl AppView {
         }
 
         if just_opened {
-            if supports_schemas {
+            if self.main_tab == MainTab::Sync {
+                // Opening a database on the 传输 page picks it as the source side; the object list
+                // would be hidden behind the workbench.
+                self.sync_pick_source(connection_index, database_index, cx);
+            } else if supports_schemas {
                 // A schema-qualified engine shows objects only once a schema is opened: opening
                 // the database just reveals its schemas in the tree and clears the content pane.
                 self.object_pane = None;
@@ -887,6 +891,12 @@ impl AppView {
         schema: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
+        // On the 传输 page a tree selection picks the source side instead of opening an object
+        // list (that list would be hidden behind the sync workbench anyway).
+        if self.main_tab == MainTab::Sync {
+            self.sync_pick_source(connection_index, database_index, cx);
+            return;
+        }
         let mut category = match self.main_tab {
             MainTab::Tables => Category::Tables,
             MainTab::Views => Category::Views,
@@ -1039,7 +1049,7 @@ impl AppView {
         self.active_query = None;
         self.active_design = None;
         match category {
-            Category::Tables => self.main_tab = MainTab::Tables,
+            Category::Tables if self.main_tab != MainTab::Sync => self.main_tab = MainTab::Tables,
             Category::Views => self.main_tab = MainTab::Views,
             Category::Functions => self.main_tab = MainTab::Functions,
             Category::Queries => self.main_tab = MainTab::Queries,
@@ -1164,6 +1174,10 @@ impl AppView {
             );
         }
 
+        if self.main_tab == MainTab::Sync {
+            self.sync_pick_source(connection_index, database_index, cx);
+            return;
+        }
         let category = match self.main_tab {
             MainTab::Views => Category::Views,
             MainTab::Functions if supports_routines => Category::Functions,

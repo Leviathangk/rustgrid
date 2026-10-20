@@ -409,6 +409,7 @@ impl AppView {
                 | MainTab::Users
                 | MainTab::Queries
                 | MainTab::Backups
+                | MainTab::Sync
         ) && self.main_tab_usable(tab, cx);
         let button = self.main_button(
             SharedString::from(format!("main-tab-{}", tab as usize)),
@@ -528,7 +529,7 @@ impl AppView {
     /// selection, if it points at a database row or one of its children. Falls back to the open
     /// object pane's coordinates so the tree still follows the main tabs when the selection is a
     /// connection row.
-    fn tree_selection_scope(&self, cx: &App) -> Option<(usize, usize)> {
+    pub(super) fn tree_selection_scope(&self, cx: &App) -> Option<(usize, usize)> {
         if let Some(pair) = self
             .tree_pane
             .read(cx)
@@ -590,6 +591,9 @@ impl AppView {
 
     pub(super) fn select_main_tab(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
         self.main_tab = tab;
+        // The sync page's 选项 popover and the New Connection menu are page-scoped.
+        self.sync.options_open = false;
+        self.connect_menu_open = false;
         if tab == MainTab::Users {
             self.refresh_users(cx);
             self.active_grid = None;
@@ -604,6 +608,17 @@ impl AppView {
         if tab == MainTab::Backups {
             self.select_tree_category(Category::Backups, cx);
             self.refresh_backups(cx);
+            self.active_grid = None;
+            self.active_query = None;
+            self.active_design = None;
+            self.saved_query_selected = None;
+            self.query_selection.clear();
+            self.clear_object_list_state(cx);
+            cx.notify();
+            return;
+        }
+        if tab == MainTab::Sync {
+            self.sync_default_scope(cx);
             self.active_grid = None;
             self.active_query = None;
             self.active_design = None;

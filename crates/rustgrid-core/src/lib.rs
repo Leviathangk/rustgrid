@@ -8,6 +8,7 @@ pub mod options;
 pub mod registry;
 pub mod routine;
 pub mod split;
+pub mod sync;
 pub mod user;
 pub mod view;
 
@@ -35,6 +36,10 @@ pub use model::{
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use registry::{BuiltinDriverSource, DriverRegistry, DriverSource};
 pub use routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
+pub use sync::{
+    CellChange, DataDiff, RowChange, RowChangeKind, SchemaChange, SchemaChangeKind,
+    column_type_text, diff_columns, diff_rows, render_change_sql, render_literal,
+};
 pub use user::{
     AccountKind, DefaultObjectType, DefaultPrivilege, DefaultPrivilegeInfo, ObjectGrant,
     ObjectPrivilegeRow, PrivilegeCatalog, PrivilegeGroup, PrivilegeId, PrivilegeInfo,

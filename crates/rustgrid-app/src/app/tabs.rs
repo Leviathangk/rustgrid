@@ -63,6 +63,8 @@ impl AppView {
                     .into_any_element()
             } else if self.main_tab == MainTab::Backups {
                 self.render_backups(cx).into_any_element()
+            } else if self.main_tab == MainTab::Sync {
+                self.render_sync(cx)
             } else if matches!(self.main_tab, MainTab::Functions | MainTab::Views)
                 && self.object_pane.is_none()
             {

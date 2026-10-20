@@ -249,6 +249,11 @@ impl AppView {
     /// Compute what the info pane should describe from the current selection. The Backup and
     /// Queries main tabs own their own selections; otherwise the connection tree decides.
     fn info_target(&self, cx: &App) -> InfoTarget {
+        if self.main_tab == MainTab::Sync {
+            // The sync page owns its own inspector; the tree selection must not describe a table
+            // that the page is not showing.
+            return InfoTarget::None;
+        }
         if self.main_tab == MainTab::Backups {
             match self.backup_selected {
                 Some(BackupSelection::File(index)) if index < self.backup_files.len() => {

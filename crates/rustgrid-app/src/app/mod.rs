@@ -1881,15 +1881,17 @@ enum MainTab {
     Users,
     Queries,
     Backups,
+    Sync,
 }
 
-const MAIN_TABS: [(MainTab, &str, &str); 6] = [
+const MAIN_TABS: [(MainTab, &str, &str); 7] = [
     (MainTab::Tables, "icons/tables.svg", "main.tables"),
     (MainTab::Views, "icons/views.svg", "main.views"),
     (MainTab::Functions, "icons/functions.svg", "main.functions"),
     (MainTab::Users, "icons/user.svg", "main.users"),
     (MainTab::Queries, "icons/queries.svg", "main.queries"),
     (MainTab::Backups, "icons/backups.svg", "main.backups"),
+    (MainTab::Sync, "icons/sync.svg", "main.sync"),
 ];
 
 /// Default and clamp widths of the drag-resizable side panes.
@@ -2033,6 +2035,8 @@ pub struct AppView {
     backup_configs: Vec<SavedBackup>,
     /// Backup files found under the config dir's `backups/` tree.
     backup_files: Vec<BackupFileInfo>,
+    /// The 数据传输/同步 page's state.
+    sync: sync::SyncState,
     /// The backup-list entry highlighted in the Backup main tab.
     backup_selected: Option<BackupSelection>,
     /// The open "new backup" dialog, if any.
@@ -2586,6 +2590,7 @@ mod runsql;
 mod sidebar;
 mod sql_completion;
 pub(crate) mod sql_lex;
+mod sync;
 mod tabs;
 mod toolbar;
 mod transfer;
@@ -2798,6 +2803,7 @@ impl AppView {
             query_grid: ColumnGrid::default(),
             backup_configs,
             backup_files: Vec::new(),
+            sync: sync::SyncState::new(cx),
             backup_selected: None,
             new_backup_dialog: None,
             restore_dialog: None,
@@ -3770,6 +3776,9 @@ impl AppView {
             .update(cx, |input, cx| input.set_theme(theme, cx));
         self.backup_search_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
+        self.sync
+            .search_input
+            .update(cx, |input, cx| input.set_theme(theme, cx));
         self.routine_find_input
             .update(cx, |input, cx| input.set_theme(theme, cx));
         if let Some(input) = self.db_name_input.as_ref() {
@@ -3833,6 +3842,10 @@ impl AppView {
             self.save_connection_combo.as_ref(),
             self.save_database_combo.as_ref(),
             self.language_combo.as_ref(),
+            self.sync.source_combo.as_ref(),
+            self.sync.source_database_combo.as_ref(),
+            self.sync.target_combo.as_ref(),
+            self.sync.target_database_combo.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -3902,6 +3915,26 @@ impl AppView {
                 .flex_1()
                 .min_w(px(0.0))
                 .child(self.render_users_status())
+                .into_any_element()
+        } else if self.main_tab == MainTab::Sync {
+            let checked = self.sync.checked_indices().len();
+            let text = if self.sync.comparing {
+                t!(
+                    "sync.status_bar_comparing",
+                    done = self.sync.compared,
+                    total = self.sync.compare_total
+                )
+                .to_string()
+            } else {
+                t!("sync.status_bar", count = checked).to_string()
+            };
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .px_2()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text))
+                .child(text)
                 .into_any_element()
         } else if self.active_grid.is_none()
             && self.active_query.is_none()
@@ -4159,6 +4192,8 @@ impl Render for AppView {
         self.sync_save_dialog_combos(cx);
         self.sync_language_combo(cx);
         self.sync_editor_combos(cx);
+        self.ensure_sync_combos(cx);
+        self.sync_sync_combos(cx);
         self.sync_info(cx);
         self.sync_users(cx);
         // Check for a newer release once per launch. The result only becomes visible if there is
@@ -4370,6 +4405,10 @@ impl Render for AppView {
 
         if self.connect_menu_open {
             root = root.child(self.render_connect_menu(cx));
+        }
+
+        if self.sync.options_open {
+            root = root.child(self.render_sync_options(cx));
         }
 
         if let Some(menu) = self.context_menu.as_ref() {
