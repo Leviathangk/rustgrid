@@ -573,6 +573,9 @@ pub(super) struct TableDesignView {
     pub(super) original: Option<TableSchema>,
     pub(super) tab: DesignerTab,
     pub(super) selected_field: Option<usize>,
+    /// The one field cell the user last clicked (or tabbed into), painted selected like the table
+    /// grid's cell. `None` means row selection: the gutter's `field_rows` highlight the name cells.
+    pub(super) selected_cell: Option<(usize, FieldCell)>,
     pub(super) selected_index: Option<usize>,
     /// Multi-row selections from each grid's left gutter.
     pub(super) field_rows: RowSelection,
@@ -647,7 +650,8 @@ pub(super) struct TableDesignView {
     pub(super) default_input: Entity<TextInput>,
     /// The list of common default expressions, opened from the chevron beside 默认.
     pub(super) default_menu_open: bool,
-    /// The 默认 field's bottom-left in window coordinates, where its suggestions open.
+    /// The 默认 field's top-left in window coordinates, so its suggestions can open above it when
+    /// the detail panel sits at the bottom of the designer.
     pub(super) default_anchor: Rc<RefCell<Option<Point<Pixels>>>>,
     /// The identity controls shown under 自动递增 (PostgreSQL).
     pub(super) identity_generation_combo: Entity<ComboBox>,
@@ -822,6 +826,7 @@ impl TableDesignView {
             original: None,
             tab: DesignerTab::Fields,
             selected_field: None,
+            selected_cell: None,
             selected_index: None,
             field_rows: RowSelection::default(),
             index_rows: RowSelection::default(),
@@ -928,6 +933,7 @@ impl TableDesignView {
                         } else {
                             Some(0)
                         };
+                        view.selected_cell = view.selected_field.map(|row| (row, FieldCell::Name));
                         view.sync_selected_input(cx);
                         view.sync_option_inputs(cx);
                     }
@@ -1230,6 +1236,9 @@ impl TableDesignView {
 
     pub(super) fn select_field(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         self.selected_field = Some(index);
+        // Row mode: a gutter click (or a field-level action) highlights the name cells. A cell
+        // click immediately replaces this with `selected_cell` (see `begin_edit`/`open_type_combo`).
+        self.selected_cell = None;
         self.field_rows.rows.clear();
         self.field_rows.rows.insert(index);
         self.field_rows.anchor = Some(index);
@@ -1249,6 +1258,7 @@ impl TableDesignView {
         self.edit_blur = None;
         self.type_combo = None;
         self.default_menu_open = false;
+        self.selected_cell = None;
         apply_row_selection(
             &mut self.field_rows,
             &mut self.selected_field,
@@ -1333,6 +1343,7 @@ impl TableDesignView {
         self.edit = None;
         self.edit_blur = None;
         self.select_field(row, cx);
+        self.selected_cell = Some((row, field_cell_of(column)));
         self.edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| this.finish_edit(cx)));
         self.edit = Some(FieldEdit { row, column, input });
         window.focus(&focus, cx);
@@ -1354,6 +1365,7 @@ impl TableDesignView {
         self.edit = None;
         self.edit_blur = None;
         self.select_field(row, cx);
+        self.selected_cell = Some((row, FieldCell::Type));
         if self.type_combo == Some(row) {
             self.type_combo = None;
             cx.notify();
@@ -2072,6 +2084,7 @@ impl TableDesignView {
         let index = index.min(self.schema.columns.len());
         self.schema.columns.insert(index, column);
         self.selected_field = Some(index);
+        self.selected_cell = Some((index, FieldCell::Name));
         self.field_rows.rows.clear();
         self.field_rows.rows.insert(index);
         self.field_rows.anchor = Some(index);
@@ -2114,6 +2127,7 @@ impl TableDesignView {
         } else {
             Some(first.min(self.schema.columns.len() - 1))
         };
+        self.selected_cell = self.selected_field.map(|row| (row, FieldCell::Name));
         self.field_rows.rows.clear();
         if let Some(active) = self.selected_field {
             self.field_rows.rows.insert(active);
@@ -2151,6 +2165,15 @@ impl TableDesignView {
         let target = target as usize;
         self.schema.columns.swap(index, target);
         self.selected_field = Some(target);
+        self.field_rows.rows.clear();
+        self.field_rows.rows.insert(target);
+        self.field_rows.anchor = Some(target);
+        // Move the selected cell with its row, keeping the edited column (a length stays a length).
+        if let Some((row, cell)) = self.selected_cell
+            && row == index
+        {
+            self.selected_cell = Some((target, cell));
+        }
         self.mark_dirty(cx);
     }
 

@@ -456,6 +456,9 @@ impl TableDesignView {
 
         let columns = self.schema.columns.clone();
         let selected = self.selected_field;
+        // The cell last clicked/tabbed into wins over the row selection, exactly like the table
+        // grid: editing 长度 must not paint the 列名 cell as if that was what was selected.
+        let selected_cell = self.selected_cell;
         let field_rows = self.field_rows.clone();
         let edit = self
             .edit
@@ -481,7 +484,9 @@ impl TableDesignView {
                             );
                         }
                         let column = &columns[row];
-                        let row_selected = field_rows.contains(row);
+                        // Row mode (a gutter selection) highlights the name cells; cell mode
+                        // highlights only the cell the user is working in.
+                        let row_selected = selected_cell.is_none() && field_rows.contains(row);
                         let row_active = selected == Some(row);
                         let row_background = if row % 2 == 1 {
                             theme.row_alt_bg
@@ -539,7 +544,7 @@ impl TableDesignView {
                                 FIELD_NAME_WIDTH,
                                 column.name.clone(),
                                 theme,
-                                row_selected,
+                                row_selected || selected_cell == Some((row, FieldCell::Name)),
                                 &weak,
                                 row,
                                 FieldColumn::Name,
@@ -550,18 +555,22 @@ impl TableDesignView {
                                 FIELD_TYPE_WIDTH,
                                 column.data_type.clone(),
                                 theme,
-                                false,
+                                selected_cell == Some((row, FieldCell::Type)),
                                 &weak,
                                 row,
                                 combo_anchor.clone(),
                             ));
                         for kind in &spec_columns {
+                            let cell_selected = field_column_text(*kind).is_some_and(|cell| {
+                                selected_cell == Some((row, FieldCell::Text(cell)))
+                            });
                             row_element = row_element.child(design_field_column_cell(
                                 *kind,
                                 row,
                                 column,
                                 field_column_width(*kind),
                                 theme,
+                                cell_selected,
                                 &weak,
                                 field_column_text(*kind).and_then(editor_for),
                             ));
@@ -716,10 +725,8 @@ impl TableDesignView {
                         .h(px(22.0))
                         .on_children_prepainted(move |bounds, _window, _cx| {
                             if let Some(first) = bounds.first() {
-                                *anchor.borrow_mut() = Some(Point::new(
-                                    first.origin.x,
-                                    first.origin.y + first.size.height,
-                                ));
+                                *anchor.borrow_mut() =
+                                    Some(Point::new(first.origin.x, first.origin.y));
                             }
                         })
                         .child(self.default_input.clone());
@@ -844,19 +851,38 @@ impl TableDesignView {
             .into_any_element()
     }
 
-    /// The 默认 suggestions popup, anchored under the default field.
+    /// The 默认 suggestions popup, anchored under the default field and flipped above it when the
+    /// detail panel at the bottom of the designer leaves no room below.
     fn render_default_suggestions(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let origin = self.root_bounds.borrow().origin;
+        let bounds = *self.root_bounds.borrow();
+        let origin = bounds.origin;
         let anchor = self
             .default_anchor
             .borrow()
             .map(|anchor| Point::new(anchor.x - origin.x, anchor.y - origin.y))
             .unwrap_or_default();
+        // The 默认 field is 22px high; the list opens under it, or above it when the detail panel
+        // sits at the bottom of the view (which is where it always is).
+        const FIELD_HEIGHT: f32 = 22.0;
+        let anchor_y: f32 = anchor.y.into();
+        let view_height: f32 = bounds.size.height.into();
+        let desired = (self.designer.default_suggestions.len() as f32 * FIELD_HEIGHT).min(240.0);
+        let below = view_height - anchor_y - FIELD_HEIGHT;
+        let above = anchor_y - 2.0;
+        let open_up = view_height > 0.0 && below < desired && above > below;
+        let height = desired
+            .min(if open_up { above } else { below })
+            .max(FIELD_HEIGHT);
+        let top = if open_up {
+            anchor.y - px(height + 2.0)
+        } else {
+            anchor.y + px(FIELD_HEIGHT + 2.0)
+        };
         let weak = self.self_weak.clone();
         let mut list = div()
             .id("design-default-options")
-            .max_h(px(240.0))
+            .max_h(px(height))
             .overflow_y_scroll()
             .flex()
             .flex_col();
@@ -884,7 +910,7 @@ impl TableDesignView {
         let popup = ui::popup_panel(theme)
             .id("design-default-list")
             .left(anchor.x)
-            .top(anchor.y)
+            .top(top)
             .w(px(240.0))
             .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
                 this.default_menu_open = false;
@@ -3042,7 +3068,9 @@ fn design_type_cell(
         .border_b_1()
         .border_color(rgb(theme.grid_line))
         .when(selected, |style| {
-            style.text_color(rgb(theme.grid_selection_text))
+            style
+                .bg(rgb(theme.grid_selection_bg))
+                .text_color(rgb(theme.grid_selection_text))
         })
         .pl(px(DESIGN_CELL_INSET))
         .pr(px(4.0))
@@ -3065,7 +3093,11 @@ fn design_type_cell(
                 .w(px(10.0))
                 .h(px(10.0))
                 .flex_none()
-                .text_color(rgb(theme.text_muted)),
+                .text_color(rgb(if selected {
+                    theme.grid_selection_text
+                } else {
+                    theme.text_muted
+                })),
         )
         .into_any_element()
 }
@@ -3120,6 +3152,7 @@ fn design_field_column_cell(
     column: &ColumnDef,
     width: f32,
     theme: Theme,
+    selected: bool,
     weak: &WeakEntity<TableDesignView>,
     editor: Option<Entity<TextInput>>,
 ) -> AnyElement {
@@ -3130,7 +3163,7 @@ fn design_field_column_cell(
             width,
             field_column_value(column, text_column),
             theme,
-            false,
+            selected,
             weak,
             row,
             text_column,
