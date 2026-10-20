@@ -8,7 +8,7 @@ use rustgrid_core::{
     DatabaseEditorSpec, DatabaseEditorTab, DefaultSuggestion, DesignerColumnOption,
     DesignerFieldColumn, DesignerIndexColumn, DesignerIndexKind, DesignerTab, Driver,
     DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
-    DriverId, Error, Result, TableDesignerSpec, TlsMode, UserEditorSpec,
+    DriverId, Error, Result, TableDesignerSpec, TlsMode, TriggerDefinition, UserEditorSpec,
 };
 use tiberius::{AuthMethod, Config};
 
@@ -136,6 +136,8 @@ impl Driver for SqlServerDriver {
                     DesignerTab::ForeignKeys,
                     DesignerTab::UniqueKeys,
                     DesignerTab::Checks,
+                    DesignerTab::Triggers,
+                    DesignerTab::Comment,
                     DesignerTab::Sql,
                 ],
                 column_options: vec![
@@ -228,7 +230,10 @@ impl Driver for SqlServerDriver {
                         types: Some(&["CLUSTERED"]),
                     },
                 ],
-                index_comment: false,
+                // `MS_Description` on the index's `sys.extended_properties` row.
+                index_comment: true,
+                // `sys.sql_modules.definition` is the complete `CREATE TRIGGER` statement.
+                trigger_definition: TriggerDefinition::Full,
             },
             id: DriverId::new("sqlserver"),
             display_name: "SQL Server".to_string(),

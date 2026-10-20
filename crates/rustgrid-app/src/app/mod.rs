@@ -1817,8 +1817,14 @@ enum DesignDeleteKind {
     ForeignKeys,
     /// SQL Server's 唯一键 grid.
     UniqueKeys,
-    /// SQL Server's 检查 grid.
+    /// The check-constraint grid.
     Checks,
+    /// PostgreSQL's exclusion-constraint grid.
+    Excludes,
+    /// PostgreSQL's rewrite-rule grid.
+    Rules,
+    /// The trigger grid.
+    Triggers,
 }
 
 #[derive(Clone, Copy)]

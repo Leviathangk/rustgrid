@@ -2,12 +2,13 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use futures_util::TryStreamExt;
 use rustgrid_core::{
-    BackupObjectKind, CellValue, ColumnDef, ColumnInfo, Connection, DatabaseInfo, DatabaseOptions,
-    DriverId, Error, FilterCondition, FilterConjunction, FilterNode, FilterOperator, ForeignKeyDef,
-    IndexColumnDef, IndexDef, ObjectDump, ObjectKind, ObjectPrivilegeRow, PageRequest,
-    PrivilegeCatalog, QueryResult, Result, RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind,
-    RowInsert, RowUpdate, ScriptSession, TableInfo, TableOptions, TablePage, TableSchema,
-    TableStatus, TriggerDef, UserAccount, UserDetails, UserEdit, ViewDetails, ViewEdit,
+    BackupObjectKind, CellValue, CheckDef, ColumnDef, ColumnInfo, Connection, DatabaseInfo,
+    DatabaseOptions, DriverId, Error, FilterCondition, FilterConjunction, FilterNode,
+    FilterOperator, ForeignKeyDef, IndexColumnDef, IndexDef, ObjectDump, ObjectKind,
+    ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, QueryResult, Result, RoutineDetails,
+    RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, ScriptSession, TableInfo,
+    TableOptions, TablePage, TableSchema, TableStatus, TriggerDef, UserAccount, UserDetails,
+    UserEdit, ViewDetails, ViewEdit,
 };
 use sqlx::mysql::{MySqlColumn, MySqlRow};
 use sqlx::{AssertSqlSafe, Column, Either, Executor, Row, SqlSafeStr, Statement, ValueRef};
@@ -973,8 +974,9 @@ impl Connection for MysqlConnection {
         }
 
         let fk_rows = sqlx::query(
-            "SELECT k.constraint_name, k.column_name, k.referenced_table_name, \
-                    k.referenced_column_name, r.update_rule, r.delete_rule \
+            "SELECT k.constraint_name, k.column_name, k.referenced_table_schema, \
+                    k.referenced_table_name, k.referenced_column_name, r.update_rule, \
+                    r.delete_rule \
              FROM information_schema.key_column_usage AS k \
              JOIN information_schema.referential_constraints AS r \
                ON r.constraint_schema = k.constraint_schema \
@@ -993,10 +995,11 @@ impl Connection for MysqlConnection {
         for row in &fk_rows {
             let name: String = row.try_get(0).map_err(map_query_error)?;
             let column: Option<String> = row.try_get(1).unwrap_or(None);
-            let ref_table: Option<String> = row.try_get(2).unwrap_or(None);
-            let ref_column: Option<String> = row.try_get(3).unwrap_or(None);
-            let update_rule: String = row.try_get(4).unwrap_or_default();
-            let delete_rule: String = row.try_get(5).unwrap_or_default();
+            let ref_schema: Option<String> = row.try_get(2).unwrap_or(None);
+            let ref_table: Option<String> = row.try_get(3).unwrap_or(None);
+            let ref_column: Option<String> = row.try_get(4).unwrap_or(None);
+            let update_rule: String = row.try_get(5).unwrap_or_default();
+            let delete_rule: String = row.try_get(6).unwrap_or_default();
             if let Some(existing) = foreign_keys.iter_mut().find(|fk| fk.name == name) {
                 if let Some(column) = column {
                     existing.columns.push(column);
@@ -1008,6 +1011,11 @@ impl Connection for MysqlConnection {
                 foreign_keys.push(ForeignKeyDef {
                     name,
                     columns: column.into_iter().collect(),
+                    // A same-database reference stays bare (the database is MySQL's schema);
+                    // a cross-database one keeps its database name so the DDL can qualify it.
+                    referenced_schema: ref_schema
+                        .filter(|schema| !schema.eq_ignore_ascii_case(database))
+                        .unwrap_or_default(),
                     referenced_table: ref_table.unwrap_or_default(),
                     referenced_columns: ref_column.into_iter().collect(),
                     on_delete: normalize_rule(&delete_rule),
@@ -1071,13 +1079,57 @@ impl Connection for MysqlConnection {
             None => TableOptions::default(),
         };
 
+        // MySQL 8.0.16+/MariaDB report CHECK constraints in `information_schema`; an older server
+        // (or one without the view) simply has none, so the query failure is treated as an empty
+        // list rather than failing the whole designer load.
+        let check_rows = sqlx::query(
+            "SELECT tc.constraint_name, cc.check_clause \
+             FROM information_schema.table_constraints AS tc \
+             JOIN information_schema.check_constraints AS cc \
+               ON cc.constraint_schema = tc.constraint_schema \
+              AND cc.constraint_name = tc.constraint_name \
+             WHERE tc.table_schema = ? AND tc.table_name = ? \
+               AND tc.constraint_type = 'CHECK' \
+             ORDER BY tc.constraint_name",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        let checks = check_rows
+            .iter()
+            .map(|row| CheckDef {
+                name: row.try_get(0).unwrap_or_default(),
+                expression: row.try_get(1).unwrap_or_default(),
+            })
+            .collect();
+
+        let partition_rows = sqlx::query(
+            "SELECT partition_name, partition_method, partition_expression, \
+                    partition_description, subpartition_name, subpartition_method, \
+                    subpartition_expression \
+             FROM information_schema.partitions \
+             WHERE table_schema = ? AND table_name = ? AND partition_name IS NOT NULL \
+             ORDER BY partition_ordinal_position, subpartition_ordinal_position",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        let partitioning = partition_clause(&partition_rows);
+
         Ok(TableSchema {
             columns,
             indexes,
             unique_keys: Vec::new(),
-            checks: Vec::new(),
+            checks,
+            excludes: Vec::new(),
+            rules: Vec::new(),
             foreign_keys,
             triggers,
+            partitioning,
             options,
         })
     }
@@ -1089,7 +1141,17 @@ impl Connection for MysqlConnection {
         original: Option<&TableSchema>,
         modified: &TableSchema,
     ) -> String {
-        schema_sql(database, table, original, modified)
+        schema_sql(self.engine, database, table, original, modified)
+    }
+
+    fn table_schema_trigger_sql(
+        &self,
+        database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> Vec<String> {
+        trigger_sql(database, table, original, modified)
     }
 
     async fn close(&self) -> Result<()> {
@@ -1234,9 +1296,143 @@ impl Connection for MysqlConnection {
     }
 }
 
+/// The `DROP`/`CREATE TRIGGER` statements that turn `original.triggers` into `modified.triggers`.
+///
+/// MySQL has no `ALTER TRIGGER`: a changed trigger is dropped and created again. The statements are
+/// kept separate from the table DDL because a trigger body may contain semicolons and must be sent
+/// to the server as one query.
+fn trigger_sql(
+    database: &str,
+    table: &str,
+    original: Option<&TableSchema>,
+    modified: &TableSchema,
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    let original_triggers = original
+        .map(|schema| schema.triggers.as_slice())
+        .unwrap_or(&[]);
+    for trigger in original_triggers {
+        if trigger.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified
+            .triggers
+            .iter()
+            .find(|candidate| candidate.name == trigger.name)
+            .is_some_and(|candidate| candidate == trigger);
+        if !unchanged {
+            statements.push(format!(
+                "DROP TRIGGER IF EXISTS {}.{}",
+                quote_identifier(database),
+                quote_identifier(&trigger.name)
+            ));
+        }
+    }
+    for trigger in &modified.triggers {
+        if trigger.name.trim().is_empty() || trigger.statement.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original
+            .map(|schema| &schema.triggers)
+            .is_some_and(|triggers| {
+                triggers
+                    .iter()
+                    .find(|candidate| candidate.name == trigger.name)
+                    .is_some_and(|candidate| candidate == trigger)
+            });
+        if unchanged {
+            continue;
+        }
+        let timing = trigger.timing.trim().to_ascii_uppercase();
+        let event = trigger.event.trim().to_ascii_uppercase();
+        if timing.is_empty() || event.is_empty() {
+            continue;
+        }
+        let body = trigger.statement.trim().trim_end_matches(';').trim_end();
+        statements.push(format!(
+            "CREATE TRIGGER {}.{} {timing} {event} ON {}.{} FOR EACH ROW {body}",
+            quote_identifier(database),
+            quote_identifier(&trigger.name),
+            quote_identifier(database),
+            quote_identifier(table),
+        ));
+    }
+    statements
+}
+
+/// Rebuild the `PARTITION BY …` clause from `information_schema.partitions`.
+///
+/// Subpartitioned tables are deliberately left as an empty clause: the top-level rows alone cannot
+/// describe the subpartition values, and writing a partial clause would repartition (and could lose)
+/// the table when some unrelated property is saved. An empty clause means "leave partitioning
+/// alone" — an existing partitioned table keeps its partitioning under a normal `ALTER TABLE`.
+fn partition_clause(rows: &[MySqlRow]) -> String {
+    let mut method = String::new();
+    let mut expression = String::new();
+    let mut subpartitioned = false;
+    let mut partitions: Vec<(String, String)> = Vec::new();
+    for row in rows {
+        let name: Option<String> = row.try_get(0).unwrap_or(None);
+        let Some(name) = name else { continue };
+        if method.is_empty() {
+            method = row
+                .try_get::<Option<String>, _>(1)
+                .unwrap_or(None)
+                .unwrap_or_default();
+            expression = row
+                .try_get::<Option<String>, _>(2)
+                .unwrap_or(None)
+                .unwrap_or_default();
+        }
+        if row
+            .try_get::<Option<String>, _>(4)
+            .unwrap_or(None)
+            .is_some()
+        {
+            subpartitioned = true;
+        }
+        if !partitions.iter().any(|(candidate, _)| candidate == &name) {
+            let description: Option<String> = row.try_get(3).unwrap_or(None);
+            partitions.push((name, description.unwrap_or_default()));
+        }
+    }
+    if method.is_empty() || subpartitioned {
+        return String::new();
+    }
+    let mut clause = format!("PARTITION BY {method} ({})", expression.trim());
+    if method.contains("RANGE") || method.contains("LIST") {
+        let definitions = partitions
+            .iter()
+            .map(|(name, description)| {
+                let values = if method.contains("LIST") {
+                    format!("IN ({description})")
+                } else {
+                    format!("LESS THAN ({description})")
+                };
+                format!("PARTITION {} VALUES {values}", quote_identifier(name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        clause.push_str(&format!(" ({definitions})"));
+    } else {
+        clause.push_str(&format!(" PARTITIONS {}", partitions.len()));
+    }
+    clause
+}
+
+fn partition_by_sql(clause: &str) -> String {
+    let clause = clause.trim().trim_end_matches(';').trim();
+    if clause.to_ascii_uppercase().starts_with("PARTITION BY") {
+        clause.to_string()
+    } else {
+        format!("PARTITION BY {clause}")
+    }
+}
+
 /// Build the DDL that turns `original` into `modified`; exposed free so it can be unit tested
 /// without a live pool.
 fn schema_sql(
+    engine: Engine,
     database: &str,
     table: &str,
     original: Option<&TableSchema>,
@@ -1258,6 +1454,11 @@ fn schema_sql(
         for index in modified.indexes.iter().filter(|index| !index.primary) {
             parts.push(index_sql(index));
         }
+        for check in &modified.checks {
+            if !check.expression.trim().is_empty() {
+                parts.push(check_sql(check));
+            }
+        }
         for foreign_key in &modified.foreign_keys {
             parts.push(foreign_key_sql(foreign_key));
         }
@@ -1267,11 +1468,62 @@ fn schema_sql(
             sql.push(' ');
             sql.push_str(&options);
         }
+        if !modified.partitioning.trim().is_empty() {
+            sql.push(' ');
+            sql.push_str(&partition_by_sql(&modified.partitioning));
+        }
         sql.push(';');
         return sql;
     };
 
     let mut clauses: Vec<String> = Vec::new();
+
+    // Constraints are dropped before any column: MySQL refuses to drop a column a foreign key or
+    // check still references. New/changed ones are re-added at the end, after the columns exist.
+    for foreign_key in &original.foreign_keys {
+        let unchanged = modified
+            .foreign_keys
+            .iter()
+            .find(|candidate| candidate.name == foreign_key.name)
+            .is_some_and(|candidate| candidate == foreign_key);
+        if !unchanged {
+            clauses.push(format!(
+                "DROP FOREIGN KEY {}",
+                quote_identifier(&foreign_key.name)
+            ));
+        }
+    }
+    for check in &original.checks {
+        if check.name.trim().is_empty() {
+            continue;
+        }
+        let unchanged = modified
+            .checks
+            .iter()
+            .find(|candidate| candidate.name == check.name)
+            .is_some_and(|candidate| candidate == check);
+        if !unchanged {
+            clauses.push(drop_check_sql(engine, &check.name));
+        }
+    }
+
+    let original_primary = primary_columns(original);
+    let modified_primary = primary_columns(modified);
+    if original_primary != modified_primary && !original_primary.is_empty() {
+        clauses.push("DROP PRIMARY KEY".to_string());
+    }
+    // An index that disappears or changes is dropped before its columns; otherwise MySQL may have
+    // already removed it with `DROP COLUMN` and the explicit `DROP INDEX` would fail.
+    for index in original.indexes.iter().filter(|index| !index.primary) {
+        let unchanged = modified
+            .indexes
+            .iter()
+            .find(|candidate| candidate.name == index.name && !candidate.primary)
+            .is_some_and(|candidate| candidate == index);
+        if !unchanged {
+            clauses.push(format!("DROP INDEX {}", quote_identifier(&index.name)));
+        }
+    }
 
     for (position, column) in modified.columns.iter().enumerate() {
         let existing = original
@@ -1299,73 +1551,48 @@ fn schema_sql(
         }
     }
 
-    let original_primary = primary_columns(original);
-    let modified_primary = primary_columns(modified);
-    if original_primary != modified_primary {
-        if !original_primary.is_empty() {
-            clauses.push("DROP PRIMARY KEY".to_string());
-        }
-        if !modified_primary.is_empty() {
-            let columns = modified_primary
-                .iter()
-                .map(|column| quote_identifier(column))
-                .collect::<Vec<_>>()
-                .join(", ");
-            clauses.push(format!("ADD PRIMARY KEY ({columns})"));
-        }
+    if original_primary != modified_primary && !modified_primary.is_empty() {
+        let columns = modified_primary
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        clauses.push(format!("ADD PRIMARY KEY ({columns})"));
     }
 
     for index in modified.indexes.iter().filter(|index| !index.primary) {
-        match original
+        let unchanged = original
             .indexes
             .iter()
             .find(|candidate| candidate.name == index.name && !candidate.primary)
-        {
-            None => clauses.push(format!("ADD {}", index_sql(index))),
-            Some(existing) if existing != index => {
-                clauses.push(format!("DROP INDEX {}", quote_identifier(&index.name)));
-                clauses.push(format!("ADD {}", index_sql(index)));
-            }
-            Some(_) => {}
-        }
-    }
-    for index in original.indexes.iter().filter(|index| !index.primary) {
-        if !modified
-            .indexes
-            .iter()
-            .any(|candidate| candidate.name == index.name && !candidate.primary)
-        {
-            clauses.push(format!("DROP INDEX {}", quote_identifier(&index.name)));
+            .is_some_and(|candidate| candidate == index);
+        if !unchanged {
+            clauses.push(format!("ADD {}", index_sql(index)));
         }
     }
 
     for foreign_key in &modified.foreign_keys {
-        match original
+        let unchanged = original
             .foreign_keys
             .iter()
             .find(|candidate| candidate.name == foreign_key.name)
-        {
-            None => clauses.push(format!("ADD {}", foreign_key_sql(foreign_key))),
-            Some(existing) if existing != foreign_key => {
-                clauses.push(format!(
-                    "DROP FOREIGN KEY {}",
-                    quote_identifier(&foreign_key.name)
-                ));
-                clauses.push(format!("ADD {}", foreign_key_sql(foreign_key)));
-            }
-            Some(_) => {}
+            .is_some_and(|candidate| candidate == foreign_key);
+        if !unchanged {
+            clauses.push(format!("ADD {}", foreign_key_sql(foreign_key)));
         }
     }
-    for foreign_key in &original.foreign_keys {
-        if !modified
-            .foreign_keys
+
+    for check in &modified.checks {
+        if check.name.trim().is_empty() || check.expression.trim().is_empty() {
+            continue;
+        }
+        let unchanged = original
+            .checks
             .iter()
-            .any(|candidate| candidate.name == foreign_key.name)
-        {
-            clauses.push(format!(
-                "DROP FOREIGN KEY {}",
-                quote_identifier(&foreign_key.name)
-            ));
+            .find(|candidate| candidate.name == check.name)
+            .is_some_and(|candidate| candidate == check);
+        if !unchanged {
+            clauses.push(format!("ADD {}", check_sql(check)));
         }
     }
 
@@ -1373,6 +1600,14 @@ fn schema_sql(
         let options = table_options_sql(&modified.options);
         if !options.is_empty() {
             clauses.push(options);
+        }
+    }
+
+    if original.partitioning != modified.partitioning {
+        if modified.partitioning.trim().is_empty() {
+            clauses.push("REMOVE PARTITIONING".to_string());
+        } else {
+            clauses.push(partition_by_sql(&modified.partitioning));
         }
     }
 
@@ -1595,6 +1830,25 @@ fn index_sql(index: &IndexDef) -> String {
     sql
 }
 
+/// One `[CONSTRAINT name] CHECK (...)` clause of a `CREATE TABLE`.
+fn check_sql(check: &CheckDef) -> String {
+    let body = format!("CHECK ({})", check.expression.trim());
+    if check.name.trim().is_empty() {
+        body
+    } else {
+        format!("CONSTRAINT {} {body}", quote_identifier(&check.name))
+    }
+}
+
+/// Drop a named check. MySQL spells it `DROP CHECK`; MariaDB spells it `DROP CONSTRAINT`.
+fn drop_check_sql(engine: Engine, name: &str) -> String {
+    let verb = match engine {
+        Engine::MySql => "DROP CHECK",
+        Engine::MariaDb => "DROP CONSTRAINT",
+    };
+    format!("{verb} {}", quote_identifier(name))
+}
+
 fn foreign_key_sql(foreign_key: &ForeignKeyDef) -> String {
     let columns = foreign_key
         .columns
@@ -1608,11 +1862,22 @@ fn foreign_key_sql(foreign_key: &ForeignKeyDef) -> String {
         .map(|column| quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut sql = format!(
-        "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced})",
-        quote_identifier(&foreign_key.name),
-        quote_identifier(&foreign_key.referenced_table),
-    );
+    let referenced_table = if foreign_key.referenced_schema.trim().is_empty() {
+        quote_identifier(&foreign_key.referenced_table)
+    } else {
+        format!(
+            "{}.{}",
+            quote_identifier(foreign_key.referenced_schema.trim()),
+            quote_identifier(&foreign_key.referenced_table)
+        )
+    };
+    let constraint = if foreign_key.name.trim().is_empty() {
+        String::new()
+    } else {
+        format!("CONSTRAINT {} ", quote_identifier(&foreign_key.name))
+    };
+    let mut sql =
+        format!("{constraint}FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({referenced})");
     if !foreign_key.on_delete.trim().is_empty() {
         sql.push_str(" ON DELETE ");
         sql.push_str(foreign_key.on_delete.trim());
@@ -2460,12 +2725,12 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
 #[cfg(test)]
 mod tests {
     use super::{
-        column_sql, filter_clause, format_default, index_sql, order_clause, returns_result_set,
-        schema_sql, split_statements,
+        Engine, column_sql, filter_clause, format_default, index_sql, order_clause,
+        returns_result_set, schema_sql, split_statements, trigger_sql,
     };
     use rustgrid_core::{
-        ColumnDef, FilterCondition, FilterConjunction, FilterGroup, FilterNode, FilterOperator,
-        IndexColumnDef, IndexDef, PageRequest, SortColumn, TableSchema,
+        CheckDef, ColumnDef, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
+        FilterOperator, IndexColumnDef, IndexDef, PageRequest, SortColumn, TableSchema, TriggerDef,
     };
 
     #[test]
@@ -2546,7 +2811,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let sql = schema_sql("db", "t", None, &schema);
+        let sql = schema_sql(Engine::MySql, "db", "t", None, &schema);
         assert!(sql.starts_with("CREATE TABLE `db`.`t`"));
         assert!(sql.contains("`id` int NOT NULL"));
         assert!(sql.contains("PRIMARY KEY (`id`)"));
@@ -2582,10 +2847,116 @@ mod tests {
             ..Default::default()
         });
 
-        let sql = schema_sql("db", "t", Some(&original), &modified);
+        let sql = schema_sql(Engine::MySql, "db", "t", Some(&original), &modified);
         assert!(sql.starts_with("ALTER TABLE `db`.`t`"));
         assert!(sql.contains("MODIFY COLUMN `name` varchar(100) NULL AFTER `id`"));
         assert!(sql.contains("ADD COLUMN `age` int NULL AFTER `name`"));
+    }
+
+    #[test]
+    fn builds_trigger_diff() {
+        let original = TableSchema {
+            triggers: vec![TriggerDef {
+                name: "trg".to_string(),
+                timing: "BEFORE".to_string(),
+                event: "INSERT".to_string(),
+                statement: "SET @x = 1".to_string(),
+            }],
+            ..Default::default()
+        };
+        let mut modified = original.clone();
+        modified.triggers[0].statement = "SET @x = 2".to_string();
+
+        let sql = trigger_sql("db", "t", Some(&original), &modified);
+        assert_eq!(sql[0], "DROP TRIGGER IF EXISTS `db`.`trg`");
+        assert!(
+            sql[1].starts_with(
+                "CREATE TRIGGER `db`.`trg` BEFORE INSERT ON `db`.`t` FOR EACH ROW SET @x = 2"
+            ),
+            "{sql:?}"
+        );
+
+        // A new trigger is created without a preceding drop.
+        let added = trigger_sql("db", "t", None, &modified);
+        assert_eq!(added.len(), 1);
+        assert!(added[0].starts_with("CREATE TRIGGER"));
+    }
+
+    #[test]
+    fn creates_alters_and_removes_partitioning() {
+        let mut schema = TableSchema {
+            columns: vec![ColumnDef {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        schema.partitioning =
+            "PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (10))".to_string();
+
+        let sql = schema_sql(Engine::MySql, "db", "t", None, &schema);
+        assert!(
+            sql.contains("PARTITION BY RANGE (`id`) (PARTITION p0 VALUES LESS THAN (10))"),
+            "{sql}"
+        );
+
+        let original = schema.clone();
+        let mut modified = original.clone();
+        modified.partitioning = "PARTITION BY HASH (`id`) PARTITIONS 4".to_string();
+        let sql = schema_sql(Engine::MySql, "db", "t", Some(&original), &modified);
+        assert!(
+            sql.contains("PARTITION BY HASH (`id`) PARTITIONS 4"),
+            "{sql}"
+        );
+
+        modified.partitioning.clear();
+        let sql = schema_sql(Engine::MySql, "db", "t", Some(&original), &modified);
+        assert!(sql.contains("REMOVE PARTITIONING"), "{sql}");
+
+        // A clause typed without the leading PARTITION BY still renders correctly.
+        modified.partitioning = "HASH (`id`) PARTITIONS 2".to_string();
+        let sql = schema_sql(Engine::MySql, "db", "t", Some(&original), &modified);
+        assert!(
+            sql.contains("PARTITION BY HASH (`id`) PARTITIONS 2"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn creates_and_alters_check_constraints() {
+        let mut schema = TableSchema {
+            columns: vec![ColumnDef {
+                name: "age".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                ..Default::default()
+            }],
+            checks: vec![CheckDef {
+                name: "ck_age".to_string(),
+                expression: "`age` >= 0".to_string(),
+            }],
+            ..Default::default()
+        };
+        let sql = schema_sql(Engine::MySql, "db", "t", None, &schema);
+        assert!(
+            sql.contains("CONSTRAINT `ck_age` CHECK (`age` >= 0)"),
+            "{sql}"
+        );
+
+        let original = schema.clone();
+        schema.checks[0].expression = "`age` > 0".to_string();
+        let sql = schema_sql(Engine::MySql, "db", "t", Some(&original), &schema);
+        assert!(sql.contains("DROP CHECK `ck_age`"), "{sql}");
+        assert!(
+            sql.contains("ADD CONSTRAINT `ck_age` CHECK (`age` > 0)"),
+            "{sql}"
+        );
+
+        // MariaDB uses `DROP CONSTRAINT` for the same operation.
+        let sql = schema_sql(Engine::MariaDb, "db", "t", Some(&original), &schema);
+        assert!(sql.contains("DROP CONSTRAINT `ck_age`"), "{sql}");
     }
 
     #[test]
@@ -2599,7 +2970,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(schema_sql("db", "t", Some(&schema), &schema).is_empty());
+        assert!(schema_sql(Engine::MySql, "db", "t", Some(&schema), &schema).is_empty());
     }
 
     fn condition(column: &str, operator: FilterOperator, value: &str) -> FilterCondition {

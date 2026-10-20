@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use rustgrid_core::{
     AccountKind, AutoIncrementRule, Connection, ConnectionConfig, DatabaseEditorSpec,
     DefaultSuggestion, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
-    DesignerIndexKind, DesignerOptionField, Driver, DriverCapabilities, DriverCapability,
-    DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result, TableDesignerSpec,
-    TlsMode, UserEditorSpec,
+    DesignerIndexKind, DesignerOptionField, DesignerTab, Driver, DriverCapabilities,
+    DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle, DriverId, Error, Result,
+    TableDesignerSpec, TlsMode, TriggerDefinition, UserEditorSpec,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
@@ -89,7 +89,19 @@ impl Driver for PostgresDriver {
             // identity sequence's generation mode, start and increment (serial is read into the
             // same flag without an identity).
             table_designer: TableDesignerSpec {
-                tabs: TableDesignerSpec::standard_tabs(),
+                tabs: vec![
+                    DesignerTab::Fields,
+                    DesignerTab::Indexes,
+                    DesignerTab::ForeignKeys,
+                    DesignerTab::UniqueKeys,
+                    DesignerTab::Checks,
+                    DesignerTab::Excludes,
+                    DesignerTab::Rules,
+                    DesignerTab::Triggers,
+                    DesignerTab::Options,
+                    DesignerTab::Comment,
+                    DesignerTab::Sql,
+                ],
                 column_options: vec![
                     DesignerColumnOption::Default,
                     DesignerColumnOption::AutoIncrement,
@@ -148,21 +160,24 @@ impl Driver for PostgresDriver {
                 },
                 // PostgreSQL indexes sort per column; 子部分 is MySQL's.
                 index_columns: vec![DesignerIndexColumn::Sort],
-                // The designer writes `CREATE [UNIQUE] INDEX` only, so a PostgreSQL index has no
-                // type of its own — the two kinds differ by uniqueness alone — and no comment.
+                // PostgreSQL's index method is its `USING` clause; both kinds share the same list
+                // and uniqueness tells them apart.
                 index_kinds: vec![
                     DesignerIndexKind {
                         label: "NORMAL",
                         unique: false,
-                        types: None,
+                        types: Some(&["BTREE", "HASH", "GIST", "SPGIST", "GIN", "BRIN"]),
                     },
                     DesignerIndexKind {
                         label: "UNIQUE",
                         unique: true,
-                        types: None,
+                        types: Some(&["BTREE", "HASH", "GIST", "SPGIST", "GIN", "BRIN"]),
                     },
                 ],
-                index_comment: false,
+                // `COMMENT ON INDEX` is PostgreSQL's own; the designer's 注释 column edits it.
+                index_comment: true,
+                // `pg_get_triggerdef` is the complete `CREATE TRIGGER` statement.
+                trigger_definition: TriggerDefinition::Full,
             },
             id: DriverId::new("postgresql"),
             display_name: "PostgreSQL".to_string(),

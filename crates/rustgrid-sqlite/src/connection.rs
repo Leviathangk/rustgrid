@@ -754,6 +754,9 @@ impl Connection for SqliteConnection {
                 foreign_keys.push(ForeignKeyDef {
                     name: format!("fk_{id}"),
                     columns: Vec::new(),
+                    // SQLite has no schema layer for foreign keys; attached databases are not part
+                    // of SQLite's `REFERENCES` syntax.
+                    referenced_schema: String::new(),
                     referenced_table: referenced_table.clone(),
                     referenced_columns: Vec::new(),
                     on_delete: on_delete.clone(),
@@ -793,8 +796,11 @@ impl Connection for SqliteConnection {
             indexes,
             unique_keys: Vec::new(),
             checks: Vec::new(),
+            excludes: Vec::new(),
+            rules: Vec::new(),
             foreign_keys,
             triggers,
+            partitioning: String::new(),
             options: TableOptions {
                 engine: "SQLite".to_string(),
                 charset: "UTF-8".to_string(),

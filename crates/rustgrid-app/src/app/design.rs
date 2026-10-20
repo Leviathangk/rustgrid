@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use gpui_kit::component::Size;
 use rustgrid_core::{
     CheckDef, ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn,
-    DesignerOptionField, DesignerTab, ForeignKeyDef, IndexColumnDef, IndexDef, TableDesignerSpec,
-    TableSchema, UniqueKeyDef,
+    DesignerOptionField, DesignerTab, ExcludeDef, ForeignKeyDef, IndexColumnDef, IndexDef, RuleDef,
+    TableDesignerSpec, TableSchema, TriggerDef, UniqueKeyDef,
 };
 
 /// A row of the field grid, shared by the header and every row.
@@ -46,6 +46,18 @@ pub(super) const UQ_FIELDS_WIDTH: f32 = 420.0;
 // The check-constraint grid's columns.
 pub(super) const CHECK_NAME_WIDTH: f32 = 240.0;
 pub(super) const CHECK_EXPRESSION_WIDTH: f32 = 520.0;
+
+// The trigger grid's columns.
+pub(super) const TRIGGER_NAME_WIDTH: f32 = 240.0;
+pub(super) const TRIGGER_TIMING_WIDTH: f32 = 110.0;
+pub(super) const TRIGGER_EVENT_WIDTH: f32 = 110.0;
+
+// The PostgreSQL exclusion-constraint and rule grids' columns.
+pub(super) const EXCLUDE_NAME_WIDTH: f32 = 220.0;
+pub(super) const EXCLUDE_DEFINITION_WIDTH: f32 = 560.0;
+pub(super) const EXCLUDE_COMMENT_WIDTH: f32 = 200.0;
+pub(super) const RULE_NAME_WIDTH: f32 = 220.0;
+pub(super) const RULE_DEFINITION_WIDTH: f32 = 760.0;
 
 // The index grid's columns.
 pub(super) const INDEX_NAME_WIDTH: f32 = 200.0;
@@ -276,6 +288,36 @@ pub(super) enum CheckColumn {
 pub(super) struct CheckEdit {
     pub(super) row: usize,
     pub(super) column: CheckColumn,
+    pub(super) input: Entity<TextInput>,
+}
+
+/// The editable text columns of the trigger grid.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum TriggerColumn {
+    Name,
+    Timing,
+    Event,
+}
+
+/// A live in-place editor over one text cell of the trigger grid.
+pub(super) struct TriggerEdit {
+    pub(super) row: usize,
+    pub(super) column: TriggerColumn,
+    pub(super) input: Entity<TextInput>,
+}
+
+/// The editable text columns of the PostgreSQL exclusion-constraint grid.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExcludeColumn {
+    Name,
+    Definition,
+    Comment,
+}
+
+/// A live in-place editor over one text cell of the exclusion-constraint grid.
+pub(super) struct ExcludeEdit {
+    pub(super) row: usize,
+    pub(super) column: ExcludeColumn,
     pub(super) input: Entity<TextInput>,
 }
 
@@ -520,6 +562,7 @@ pub(super) struct IndexEdit {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FkColumn {
     Name,
+    ReferencedSchema,
     ReferencedTable,
 }
 
@@ -610,6 +653,27 @@ pub(super) struct TableDesignView {
     pub(super) check_rows: RowSelection,
     pub(super) check_edit: Option<CheckEdit>,
     check_edit_blur: Option<Subscription>,
+    /// PostgreSQL exclusion constraints: selection and in-place name/definition/comment editors.
+    pub(super) selected_exclude: Option<usize>,
+    pub(super) exclude_rows: RowSelection,
+    pub(super) exclude_edit: Option<ExcludeEdit>,
+    exclude_edit_blur: Option<Subscription>,
+    /// PostgreSQL rewrite rules: selection and the shared definition editor of the selected row.
+    pub(super) selected_rule: Option<usize>,
+    pub(super) rule_rows: RowSelection,
+    pub(super) rule_editor: Option<Entity<ui::SqlEditor>>,
+    pub(super) rule_editor_row: Option<usize>,
+    /// The trigger grid and its body editor. The body editor is one shared SQL editor that shows
+    /// the selected trigger; `trigger_editor_row` remembers which trigger it currently holds, so a
+    /// render does not reset the caret while the user types.
+    pub(super) selected_trigger: Option<usize>,
+    pub(super) trigger_rows: RowSelection,
+    pub(super) trigger_edit: Option<TriggerEdit>,
+    trigger_edit_blur: Option<Subscription>,
+    pub(super) trigger_editor: Option<Entity<ui::SqlEditor>>,
+    pub(super) trigger_editor_row: Option<usize>,
+    /// The MySQL/MariaDB partition clause editor. Recreated after a schema reload.
+    pub(super) partition_editor: Option<Entity<ui::SqlEditor>>,
     pub(super) selected_fk: Option<usize>,
     pub(super) fk_edit: Option<FkEdit>,
     fk_edit_blur: Option<Subscription>,
@@ -851,6 +915,21 @@ impl TableDesignView {
             check_rows: RowSelection::default(),
             check_edit: None,
             check_edit_blur: None,
+            selected_exclude: None,
+            exclude_rows: RowSelection::default(),
+            exclude_edit: None,
+            exclude_edit_blur: None,
+            selected_rule: None,
+            rule_rows: RowSelection::default(),
+            rule_editor: None,
+            rule_editor_row: None,
+            selected_trigger: None,
+            trigger_rows: RowSelection::default(),
+            trigger_edit: None,
+            trigger_edit_blur: None,
+            trigger_editor: None,
+            trigger_editor_row: None,
+            partition_editor: None,
             selected_fk: None,
             fk_edit: None,
             fk_edit_blur: None,
@@ -928,6 +1007,9 @@ impl TableDesignView {
                         view.original = Some(schema);
                         view.is_new = false;
                         view.dirty = false;
+                        view.partition_editor = None;
+                        view.rule_editor_row = None;
+                        view.trigger_editor_row = None;
                         view.selected_field = if view.schema.columns.is_empty() {
                             None
                         } else {
@@ -1132,6 +1214,14 @@ impl TableDesignView {
             .update(cx, |input, cx| input.set_text(options.comment, cx));
     }
 
+    pub(super) fn set_partition_clause(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        if self.schema.partitioning != text {
+            self.schema.partitioning = text.to_string();
+            self.dirty = true;
+            cx.notify();
+        }
+    }
+
     /// Load the Options tab's character-set/collation catalogues (storage engines are static).
     pub(super) fn load_option_catalogs(&mut self, cx: &mut Context<'_, Self>) {
         let connection = self.connection.clone();
@@ -1303,6 +1393,12 @@ impl TableDesignView {
         self.unique_key_fields_row = None;
         self.check_edit = None;
         self.check_edit_blur = None;
+        self.exclude_edit = None;
+        self.exclude_edit_blur = None;
+        self.rule_editor_row = None;
+        self.trigger_edit = None;
+        self.trigger_edit_blur = None;
+        self.trigger_editor_row = None;
         self.fk_edit = None;
         self.fk_edit_blur = None;
         self.fk_combo = None;
@@ -2185,12 +2281,399 @@ impl TableDesignView {
         }
     }
 
+    // -- PostgreSQL exclusion constraints -------------------------------------------------------
+
+    pub(super) fn add_exclude(&mut self, cx: &mut Context<'_, Self>) {
+        self.schema.excludes.push(ExcludeDef::default());
+        let row = self.schema.excludes.len() - 1;
+        self.selected_exclude = Some(row);
+        self.exclude_rows.rows.clear();
+        self.exclude_rows.rows.insert(row);
+        self.exclude_rows.anchor = Some(row);
+        self.reveal_design_row(row);
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn begin_empty_exclude(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let row = self.schema.excludes.len();
+        self.add_exclude(cx);
+        self.begin_exclude_edit(row, ExcludeColumn::Name, window, cx);
+    }
+
+    pub(super) fn delete_exclude(&mut self, cx: &mut Context<'_, Self>) {
+        let mut targets: BTreeSet<usize> = self.exclude_rows.rows.clone();
+        if let Some(active) = self.selected_exclude {
+            targets.insert(active);
+        }
+        targets.retain(|row| *row < self.schema.excludes.len());
+        if targets.is_empty() {
+            return;
+        }
+        let first = *targets.iter().next().unwrap();
+        for row in targets.iter().rev() {
+            self.schema.excludes.remove(*row);
+        }
+        self.selected_exclude = if self.schema.excludes.is_empty() {
+            None
+        } else {
+            Some(first.min(self.schema.excludes.len() - 1))
+        };
+        self.exclude_rows.rows.clear();
+        if let Some(active) = self.selected_exclude {
+            self.exclude_rows.rows.insert(active);
+            self.exclude_rows.anchor = Some(active);
+        }
+        self.exclude_edit = None;
+        self.exclude_edit_blur = None;
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn select_exclude(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        self.selected_exclude = Some(row);
+        self.exclude_rows.rows.clear();
+        self.exclude_rows.rows.insert(row);
+        self.exclude_rows.anchor = Some(row);
+        cx.notify();
+    }
+
+    pub(super) fn select_exclude_row(
+        &mut self,
+        row: usize,
+        modifiers: &Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.exclude_edit = None;
+        self.exclude_edit_blur = None;
+        apply_row_selection(
+            &mut self.exclude_rows,
+            &mut self.selected_exclude,
+            row,
+            modifiers,
+        );
+        cx.notify();
+    }
+
+    fn set_exclude_value(
+        &mut self,
+        row: usize,
+        column: ExcludeColumn,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(exclude) = self.schema.excludes.get_mut(row) {
+            match column {
+                ExcludeColumn::Name => exclude.name = text.to_string(),
+                ExcludeColumn::Definition => exclude.definition = text.to_string(),
+                ExcludeColumn::Comment => exclude.comment = text.to_string(),
+            }
+            self.dirty = true;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn begin_exclude_edit(
+        &mut self,
+        row: usize,
+        column: ExcludeColumn,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(exclude) = self.schema.excludes.get(row) else {
+            return;
+        };
+        let value = match column {
+            ExcludeColumn::Name => exclude.name.clone(),
+            ExcludeColumn::Definition => exclude.definition.clone(),
+            ExcludeColumn::Comment => exclude.comment.clone(),
+        };
+        let weak = self.self_weak.clone();
+        let theme = self.theme;
+        let input = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                value,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.0),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |view, cx| view.set_exclude_value(row, column, text, cx));
+            }))
+        });
+        let focus = input.read(cx).focus_handle();
+        input.update(cx, |input, cx| input.set_padding_left(0.0, cx));
+        self.exclude_edit = None;
+        self.exclude_edit_blur = None;
+        self.select_exclude(row, cx);
+        self.exclude_edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| {
+            this.finish_exclude_edit(cx)
+        }));
+        self.exclude_edit = Some(ExcludeEdit { row, column, input });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn finish_exclude_edit(&mut self, cx: &mut Context<'_, Self>) {
+        if self.exclude_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    // -- PostgreSQL rewrite rules ---------------------------------------------------------------
+
+    pub(super) fn add_rule(&mut self, cx: &mut Context<'_, Self>) {
+        self.schema.rules.push(RuleDef::default());
+        let row = self.schema.rules.len() - 1;
+        self.selected_rule = Some(row);
+        self.rule_rows.rows.clear();
+        self.rule_rows.rows.insert(row);
+        self.rule_rows.anchor = Some(row);
+        self.reveal_design_row(row);
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn begin_empty_rule(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.add_rule(cx);
+    }
+
+    pub(super) fn delete_rule(&mut self, cx: &mut Context<'_, Self>) {
+        let mut targets: BTreeSet<usize> = self.rule_rows.rows.clone();
+        if let Some(active) = self.selected_rule {
+            targets.insert(active);
+        }
+        targets.retain(|row| *row < self.schema.rules.len());
+        if targets.is_empty() {
+            return;
+        }
+        let first = *targets.iter().next().unwrap();
+        for row in targets.iter().rev() {
+            self.schema.rules.remove(*row);
+        }
+        self.selected_rule = if self.schema.rules.is_empty() {
+            None
+        } else {
+            Some(first.min(self.schema.rules.len() - 1))
+        };
+        self.rule_rows.rows.clear();
+        if let Some(active) = self.selected_rule {
+            self.rule_rows.rows.insert(active);
+            self.rule_rows.anchor = Some(active);
+        }
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn select_rule(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        self.selected_rule = Some(row);
+        self.rule_rows.rows.clear();
+        self.rule_rows.rows.insert(row);
+        self.rule_rows.anchor = Some(row);
+        cx.notify();
+    }
+
+    pub(super) fn select_rule_row(
+        &mut self,
+        row: usize,
+        modifiers: &Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        apply_row_selection(&mut self.rule_rows, &mut self.selected_rule, row, modifiers);
+        cx.notify();
+    }
+
+    pub(super) fn set_rule_definition(
+        &mut self,
+        row: usize,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(rule) = self.schema.rules.get_mut(row)
+            && rule.definition != text
+        {
+            rule.definition = text.to_string();
+            self.dirty = true;
+        }
+        cx.notify();
+    }
+
+    /// The rule editor is reused as the selection moves, so its callback must resolve the row when
+    /// the text arrives rather than capturing the row it was created for.
+    pub(super) fn set_selected_rule_definition(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        if let Some(row) = self.selected_rule {
+            self.set_rule_definition(row, text, cx);
+        }
+    }
+
     /// Append a check constraint (toolbar's 添加检查 or the grid's blank placeholder row), then edit
     /// its name.
     pub(super) fn begin_empty_check(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let row = self.schema.checks.len();
         self.add_check(cx);
         self.begin_check_edit(row, CheckColumn::Name, window, cx);
+    }
+
+    pub(super) fn add_trigger(&mut self, cx: &mut Context<'_, Self>) {
+        self.schema.triggers.push(TriggerDef {
+            timing: "BEFORE".to_string(),
+            event: "INSERT".to_string(),
+            ..TriggerDef::default()
+        });
+        let row = self.schema.triggers.len() - 1;
+        self.selected_trigger = Some(row);
+        self.trigger_rows.rows.clear();
+        self.trigger_rows.rows.insert(row);
+        self.trigger_rows.anchor = Some(row);
+        self.trigger_editor_row = None;
+        self.reveal_design_row(row);
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn delete_trigger(&mut self, cx: &mut Context<'_, Self>) {
+        let mut targets: BTreeSet<usize> = self.trigger_rows.rows.clone();
+        if let Some(active) = self.selected_trigger {
+            targets.insert(active);
+        }
+        targets.retain(|row| *row < self.schema.triggers.len());
+        if targets.is_empty() {
+            return;
+        }
+        let first = *targets.iter().next().unwrap();
+        for row in targets.iter().rev() {
+            self.schema.triggers.remove(*row);
+        }
+        self.selected_trigger = if self.schema.triggers.is_empty() {
+            None
+        } else {
+            Some(first.min(self.schema.triggers.len() - 1))
+        };
+        self.trigger_rows.rows.clear();
+        if let Some(active) = self.selected_trigger {
+            self.trigger_rows.rows.insert(active);
+            self.trigger_rows.anchor = Some(active);
+        }
+        self.trigger_edit = None;
+        self.trigger_edit_blur = None;
+        self.trigger_editor_row = None;
+        self.mark_dirty(cx);
+    }
+
+    pub(super) fn select_trigger(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        self.selected_trigger = Some(row);
+        self.trigger_rows.rows.clear();
+        self.trigger_rows.rows.insert(row);
+        self.trigger_rows.anchor = Some(row);
+        self.trigger_edit = None;
+        self.trigger_edit_blur = None;
+        cx.notify();
+    }
+
+    pub(super) fn select_trigger_row(
+        &mut self,
+        row: usize,
+        modifiers: &Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.trigger_edit = None;
+        self.trigger_edit_blur = None;
+        apply_row_selection(
+            &mut self.trigger_rows,
+            &mut self.selected_trigger,
+            row,
+            modifiers,
+        );
+        self.trigger_editor_row = None;
+        cx.notify();
+    }
+
+    fn set_trigger_value(
+        &mut self,
+        row: usize,
+        column: TriggerColumn,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(trigger) = self.schema.triggers.get_mut(row) {
+            match column {
+                TriggerColumn::Name => trigger.name = text.to_string(),
+                TriggerColumn::Timing => trigger.timing = text.to_string(),
+                TriggerColumn::Event => trigger.event = text.to_string(),
+            }
+            self.dirty = true;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn begin_trigger_edit(
+        &mut self,
+        row: usize,
+        column: TriggerColumn,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(trigger) = self.schema.triggers.get(row) else {
+            return;
+        };
+        let value = match column {
+            TriggerColumn::Name => trigger.name.clone(),
+            TriggerColumn::Timing => trigger.timing.clone(),
+            TriggerColumn::Event => trigger.event.clone(),
+        };
+        let weak = self.self_weak.clone();
+        let theme = self.theme;
+        let input = cx.new(move |cx| {
+            TextInput::new(
+                theme,
+                value,
+                TextInputOptions {
+                    bare: true,
+                    text_size: Some(12.0),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = weak.update(cx, |view, cx| view.set_trigger_value(row, column, text, cx));
+            }))
+        });
+        let focus = input.read(cx).focus_handle();
+        input.update(cx, |input, cx| input.set_padding_left(0.0, cx));
+        self.trigger_edit = None;
+        self.trigger_edit_blur = None;
+        self.select_trigger(row, cx);
+        self.trigger_edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| {
+            this.finish_trigger_edit(cx)
+        }));
+        self.trigger_edit = Some(TriggerEdit { row, column, input });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn finish_trigger_edit(&mut self, cx: &mut Context<'_, Self>) {
+        if self.trigger_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn begin_empty_trigger(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let row = self.schema.triggers.len();
+        self.add_trigger(cx);
+        self.begin_trigger_edit(row, TriggerColumn::Name, window, cx);
+    }
+
+    pub(super) fn set_trigger_body(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        let Some(row) = self.selected_trigger else {
+            return;
+        };
+        let Some(trigger) = self.schema.triggers.get_mut(row) else {
+            return;
+        };
+        if trigger.statement != text {
+            trigger.statement = text.to_string();
+            self.dirty = true;
+            cx.notify();
+        }
     }
 
     fn insert_field_at(&mut self, index: usize, cx: &mut Context<'_, Self>) {
@@ -2250,9 +2733,62 @@ impl TableDesignView {
             return;
         }
         let first = *targets.iter().next().unwrap();
+        let removed: Vec<String> = targets
+            .iter()
+            .filter_map(|row| self.schema.columns.get(*row))
+            .map(|column| column.name.clone())
+            .collect();
         for row in targets.iter().rev() {
             self.schema.columns.remove(*row);
         }
+
+        // A deleted field must not leave an index, unique key or foreign key pointing at a column
+        // that no longer exists: the DDL diff would otherwise emit a broken `ADD CONSTRAINT` (or
+        // fail on the column drop). Remove the field from each object and drop an object left with
+        // no columns. Check expressions are free-form SQL and are left to the user.
+        for index in &mut self.schema.indexes {
+            index
+                .columns
+                .retain(|column| !removed.iter().any(|name| name == &column.name));
+        }
+        self.schema
+            .indexes
+            .retain(|index| index.primary || !index.columns.is_empty());
+        for key in &mut self.schema.unique_keys {
+            key.columns.retain(|column| !removed.contains(column));
+        }
+        self.schema
+            .unique_keys
+            .retain(|key| !key.columns.is_empty());
+        for foreign_key in &mut self.schema.foreign_keys {
+            foreign_key
+                .columns
+                .retain(|column| !removed.contains(column));
+        }
+        self.schema
+            .foreign_keys
+            .retain(|foreign_key| !foreign_key.columns.is_empty());
+
+        // The objects above may have lost rows; clear the selections/editors that pointed at them.
+        self.selected_index = None;
+        self.index_rows.rows.clear();
+        self.index_edit = None;
+        self.index_edit_blur = None;
+        self.index_fields_draft = None;
+        self.index_combo = None;
+        self.selected_unique_key = None;
+        self.unique_key_rows.rows.clear();
+        self.unique_key_edit = None;
+        self.unique_key_edit_blur = None;
+        self.unique_key_fields_row = None;
+        self.selected_fk = None;
+        self.fk_rows.rows.clear();
+        self.fk_edit = None;
+        self.fk_edit_blur = None;
+        self.fk_combo = None;
+        self.fk_fields_open = false;
+        self.fk_ref_open = false;
+
         self.selected_field = if self.schema.columns.is_empty() {
             None
         } else {
@@ -2848,6 +3384,14 @@ impl TableDesignView {
         if let Some(foreign_key) = self.schema.foreign_keys.get_mut(row) {
             match column {
                 FkColumn::Name => foreign_key.name = text.to_string(),
+                FkColumn::ReferencedSchema => {
+                    if foreign_key.referenced_schema != text {
+                        // A table in another schema is a different table; its column list no
+                        // longer applies.
+                        foreign_key.referenced_columns.clear();
+                    }
+                    foreign_key.referenced_schema = text.to_string();
+                }
                 FkColumn::ReferencedTable => {
                     if foreign_key.referenced_table != text {
                         // The old column list no longer applies to the new table.
@@ -2873,6 +3417,7 @@ impl TableDesignView {
         };
         let value = match column {
             FkColumn::Name => foreign_key.name.clone(),
+            FkColumn::ReferencedSchema => foreign_key.referenced_schema.clone(),
             FkColumn::ReferencedTable => foreign_key.referenced_table.clone(),
         };
         let weak = self.self_weak.clone();
@@ -2983,6 +3528,17 @@ impl TableDesignView {
             return;
         };
         let table = foreign_key.referenced_table.clone();
+        let schema = foreign_key.referenced_schema.trim().to_string();
+        let reference = if table.is_empty() {
+            String::new()
+        } else if schema.is_empty() {
+            table
+        } else {
+            // SQL Server/PostgreSQL/Oracle resolve a schema-qualified object name; a same-database
+            // MySQL reference stays bare (its database is the schema), while a cross-database one
+            // is qualified as well.
+            format!("{schema}.{table}")
+        };
         self.fk_edit = None;
         self.fk_edit_blur = None;
         self.fk_combo = None;
@@ -2990,7 +3546,7 @@ impl TableDesignView {
         self.select_fk(row, cx);
         self.fk_ref_open = true;
         self.fk_ref_columns.clear();
-        if table.is_empty() {
+        if reference.is_empty() {
             cx.notify();
             return;
         }
@@ -3000,7 +3556,7 @@ impl TableDesignView {
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let result = match runtime
-                .spawn(async move { connection.columns(&database, &table).await })
+                .spawn(async move { connection.columns(&database, &reference).await })
                 .await
             {
                 Ok(inner) => inner,
@@ -3072,6 +3628,15 @@ impl TableDesignView {
             DesignDeleteKind::Checks => {
                 !self.check_rows.rows.is_empty() || self.selected_check.is_some()
             }
+            DesignDeleteKind::Excludes => {
+                !self.exclude_rows.rows.is_empty() || self.selected_exclude.is_some()
+            }
+            DesignDeleteKind::Rules => {
+                !self.rule_rows.rows.is_empty() || self.selected_rule.is_some()
+            }
+            DesignDeleteKind::Triggers => {
+                !self.trigger_rows.rows.is_empty() || self.selected_trigger.is_some()
+            }
         };
         if !deletable {
             return;
@@ -3093,6 +3658,9 @@ impl TableDesignView {
             DesignDeleteKind::ForeignKeys => self.delete_foreign_key(cx),
             DesignDeleteKind::UniqueKeys => self.delete_unique_key(cx),
             DesignDeleteKind::Checks => self.delete_check(cx),
+            DesignDeleteKind::Excludes => self.delete_exclude(cx),
+            DesignDeleteKind::Rules => self.delete_rule(cx),
+            DesignDeleteKind::Triggers => self.delete_trigger(cx),
         }
     }
 
@@ -3135,7 +3703,7 @@ impl TableDesignView {
         } else {
             self.table.as_str()
         };
-        self.connection.table_schema_sql(
+        self.connection.table_schema_script(
             &self.database,
             table,
             self.original.as_ref(),
@@ -3163,7 +3731,7 @@ impl TableDesignView {
         let Some(original) = self.original.clone() else {
             return;
         };
-        let sql = self.connection.table_schema_sql(
+        let sql = self.connection.table_schema_script(
             &self.database,
             &self.table,
             Some(&original),

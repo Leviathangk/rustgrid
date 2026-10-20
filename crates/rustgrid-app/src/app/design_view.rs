@@ -4,7 +4,7 @@ use super::*;
 use gpui::HitboxBehavior;
 use rustgrid_core::{
     ColumnDef, DesignerColumnOption, DesignerFieldColumn, DesignerIndexColumn, DesignerOptionField,
-    DesignerTab,
+    DesignerTab, TriggerDefinition,
 };
 
 impl TableDesignView {
@@ -128,6 +128,8 @@ impl TableDesignView {
         let foreign_keys = self.tab == DesignerTab::ForeignKeys && !self.loading;
         let unique_keys = self.tab == DesignerTab::UniqueKeys && !self.loading;
         let checks = self.tab == DesignerTab::Checks && !self.loading;
+        let excludes = self.tab == DesignerTab::Excludes && !self.loading;
+        let rules = self.tab == DesignerTab::Rules && !self.loading;
         let selected = self.selected_field.is_some();
         let can_up = self.selected_field.map(|index| index > 0).unwrap_or(false);
         let can_down = self
@@ -300,6 +302,69 @@ impl TableDesignView {
                         this.request_delete(DesignDeleteKind::Checks, cx)
                     }),
                 ));
+        } else if excludes {
+            let can_delete = self.selected_exclude.is_some();
+            bar = bar
+                .child(ui::toolbar_item(
+                    "design-add-exclude",
+                    "icons/add_field.svg",
+                    t!("design.add_exclude").to_string(),
+                    excludes,
+                    theme,
+                    cx.listener(|this, _event, window, cx| this.begin_empty_exclude(window, cx)),
+                ))
+                .child(ui::toolbar_item(
+                    "design-delete-exclude",
+                    "icons/delete_field.svg",
+                    t!("design.delete_exclude").to_string(),
+                    excludes && can_delete,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.request_delete(DesignDeleteKind::Excludes, cx)
+                    }),
+                ));
+        } else if rules {
+            let can_delete = self.selected_rule.is_some();
+            bar = bar
+                .child(ui::toolbar_item(
+                    "design-add-rule",
+                    "icons/add_field.svg",
+                    t!("design.add_rule").to_string(),
+                    rules,
+                    theme,
+                    cx.listener(|this, _event, window, cx| this.begin_empty_rule(window, cx)),
+                ))
+                .child(ui::toolbar_item(
+                    "design-delete-rule",
+                    "icons/delete_field.svg",
+                    t!("design.delete_rule").to_string(),
+                    rules && can_delete,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.request_delete(DesignDeleteKind::Rules, cx)
+                    }),
+                ));
+        } else if self.tab == DesignerTab::Triggers && !self.loading {
+            let can_delete = self.selected_trigger.is_some();
+            bar = bar
+                .child(ui::toolbar_item(
+                    "design-add-trigger",
+                    "icons/add_field.svg",
+                    t!("design.trigger.add").to_string(),
+                    true,
+                    theme,
+                    cx.listener(|this, _event, window, cx| this.begin_empty_trigger(window, cx)),
+                ))
+                .child(ui::toolbar_item(
+                    "design-delete-trigger",
+                    "icons/delete_field.svg",
+                    t!("design.trigger.delete").to_string(),
+                    can_delete,
+                    theme,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.request_delete(DesignDeleteKind::Triggers, cx)
+                    }),
+                ));
         }
 
         bar
@@ -375,7 +440,11 @@ impl TableDesignView {
                 DesignerTab::ForeignKeys => self.render_foreign_keys(cx),
                 DesignerTab::UniqueKeys => self.render_unique_keys(cx),
                 DesignerTab::Checks => self.render_checks(cx),
+                DesignerTab::Excludes => self.render_excludes(cx),
+                DesignerTab::Rules => self.render_rules(cx),
+                DesignerTab::Triggers => self.render_triggers(cx),
                 DesignerTab::Options => self.render_options(cx),
+                DesignerTab::Partition => self.render_partition(cx),
                 DesignerTab::Comment => self.render_comment(),
                 DesignerTab::Sql => self.render_sql(cx),
             }
@@ -1167,7 +1236,6 @@ impl TableDesignView {
         ];
         let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
         let foreign_keys = self.schema.foreign_keys.clone();
-        let database = self.database.clone();
         let selected = self.selected_fk;
         let fk_rows = self.fk_rows.clone();
         let edit = self
@@ -1268,16 +1336,17 @@ impl TableDesignView {
                                 row,
                                 fields_anchor.clone(),
                             ))
-                            .child(
-                                design_cell(
-                                    SharedString::from(format!("fk-schema-{row}")),
-                                    FK_SCHEMA_WIDTH,
-                                    theme,
-                                    false,
-                                )
-                                .px(px(DESIGN_CELL_INSET))
-                                .child(database.clone()),
-                            )
+                            .child(fk_edit_cell(
+                                SharedString::from(format!("fk-schema-{row}")),
+                                FK_SCHEMA_WIDTH,
+                                foreign_key.referenced_schema.clone(),
+                                theme,
+                                row_selected,
+                                &weak,
+                                row,
+                                FkColumn::ReferencedSchema,
+                                editor_for(FkColumn::ReferencedSchema),
+                            ))
                             .child(fk_edit_cell(
                                 SharedString::from(format!("fk-ref-table-{row}")),
                                 FK_REF_TABLE_WIDTH,
@@ -1616,6 +1685,566 @@ impl TableDesignView {
         self.render_grid_scaffold(cx, header, list, content_width)
     }
 
+    /// PostgreSQL exclusion constraints: name, the complete `EXCLUDE …` body and its comment.
+    fn render_excludes(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let widths = [
+            EXCLUDE_NAME_WIDTH,
+            EXCLUDE_DEFINITION_WIDTH,
+            EXCLUDE_COMMENT_WIDTH,
+        ];
+        let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
+        let excludes = self.schema.excludes.clone();
+        let selected = self.selected_exclude;
+        let rows = self.exclude_rows.clone();
+        let edit = self
+            .exclude_edit
+            .as_ref()
+            .map(|editor| (editor.row, editor.column, editor.input.clone()));
+        let weak = self.self_weak.clone();
+
+        let list = uniform_list(
+            SharedString::from(format!("design-excludes-{}", self.id)),
+            excludes.len().max(1),
+            move |range, _window, _cx| {
+                range
+                    .map(|row| {
+                        if row >= excludes.len() {
+                            return placeholder_row(
+                                PlaceholderKind::Exclude,
+                                &widths,
+                                theme,
+                                &weak,
+                            );
+                        }
+                        let exclude = &excludes[row];
+                        let row_selected = rows.contains(row);
+                        let row_active = selected == Some(row);
+                        let row_background = if row % 2 == 1 {
+                            theme.row_alt_bg
+                        } else {
+                            theme.editor_bg
+                        };
+                        let editor_for = |target: ExcludeColumn| {
+                            edit.as_ref()
+                                .filter(|(row_index, column_kind, _)| {
+                                    *row_index == row && *column_kind == target
+                                })
+                                .map(|(_, _, input)| input.clone())
+                        };
+                        let gutter_weak = weak.clone();
+
+                        div()
+                            .flex()
+                            .flex_row()
+                            .h(px(DESIGN_ROW_HEIGHT))
+                            .bg(rgb(row_background))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("exclude-gutter-{row}")))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(DESIGN_ROW_HEIGHT))
+                                    .w(px(DESIGN_GUTTER_WIDTH))
+                                    .flex_none()
+                                    .border_r_1()
+                                    .border_color(rgb(theme.grid_line))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |event: &MouseDownEvent, _window, cx| {
+                                            let _ = gutter_weak.update(cx, |view, cx| {
+                                                view.select_exclude_row(row, &event.modifiers, cx)
+                                            });
+                                        },
+                                    )
+                                    .when(row_active, |gutter| {
+                                        gutter.child(
+                                            svg()
+                                                .path("icons/row_marker.svg")
+                                                .w(px(7.0))
+                                                .h(px(7.0))
+                                                .flex_none()
+                                                .text_color(rgb(theme.primary)),
+                                        )
+                                    }),
+                            )
+                            .child(exclude_edit_cell(
+                                SharedString::from(format!("exclude-name-{row}")),
+                                EXCLUDE_NAME_WIDTH,
+                                exclude.name.clone(),
+                                theme,
+                                row_selected,
+                                &weak,
+                                row,
+                                ExcludeColumn::Name,
+                                editor_for(ExcludeColumn::Name),
+                            ))
+                            .child(exclude_edit_cell(
+                                SharedString::from(format!("exclude-definition-{row}")),
+                                EXCLUDE_DEFINITION_WIDTH,
+                                exclude.definition.clone(),
+                                theme,
+                                false,
+                                &weak,
+                                row,
+                                ExcludeColumn::Definition,
+                                editor_for(ExcludeColumn::Definition),
+                            ))
+                            .child(exclude_edit_cell(
+                                SharedString::from(format!("exclude-comment-{row}")),
+                                EXCLUDE_COMMENT_WIDTH,
+                                exclude.comment.clone(),
+                                theme,
+                                false,
+                                &weak,
+                                row,
+                                ExcludeColumn::Comment,
+                                editor_for(ExcludeColumn::Comment),
+                            ))
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.list_scroll)
+        .flex_1()
+        .min_h(px(0.0));
+
+        let header = design_grid_header(
+            theme,
+            &[
+                "design.exclude.name",
+                "design.exclude.definition",
+                "design.exclude.comment",
+            ],
+            &widths,
+        );
+
+        self.render_grid_scaffold(cx, header, list, content_width)
+    }
+
+    /// PostgreSQL rewrite rules. The name is read-only because the complete `CREATE RULE` statement
+    /// carries it; the SQL editor below the grid edits that definition.
+    fn render_rules(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let widths = [RULE_NAME_WIDTH, RULE_DEFINITION_WIDTH];
+        let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
+        let rules = self.schema.rules.clone();
+        let list_rules = rules.clone();
+        let selected = self.selected_rule;
+        let rows = self.rule_rows.clone();
+        let weak = self.self_weak.clone();
+
+        let list = uniform_list(
+            SharedString::from(format!("design-rules-{}", self.id)),
+            list_rules.len().max(1),
+            move |range, _window, _cx| {
+                range
+                    .map(|row| {
+                        if row >= list_rules.len() {
+                            return placeholder_row(PlaceholderKind::Rule, &widths, theme, &weak);
+                        }
+                        let rule = &list_rules[row];
+                        let row_selected = rows.contains(row);
+                        let row_active = selected == Some(row);
+                        let row_background = if row % 2 == 1 {
+                            theme.row_alt_bg
+                        } else {
+                            theme.editor_bg
+                        };
+                        let gutter_weak = weak.clone();
+
+                        div()
+                            .flex()
+                            .flex_row()
+                            .h(px(DESIGN_ROW_HEIGHT))
+                            .bg(rgb(row_background))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("rule-gutter-{row}")))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(DESIGN_ROW_HEIGHT))
+                                    .w(px(DESIGN_GUTTER_WIDTH))
+                                    .flex_none()
+                                    .border_r_1()
+                                    .border_color(rgb(theme.grid_line))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |event: &MouseDownEvent, _window, cx| {
+                                            let _ = gutter_weak.update(cx, |view, cx| {
+                                                view.select_rule_row(row, &event.modifiers, cx)
+                                            });
+                                        },
+                                    )
+                                    .when(row_active, |gutter| {
+                                        gutter.child(
+                                            svg()
+                                                .path("icons/row_marker.svg")
+                                                .w(px(7.0))
+                                                .h(px(7.0))
+                                                .flex_none()
+                                                .text_color(rgb(theme.primary)),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                design_cell(
+                                    SharedString::from(format!("rule-name-{row}")),
+                                    RULE_NAME_WIDTH,
+                                    theme,
+                                    row_selected,
+                                )
+                                .pl(px(DESIGN_CELL_INSET))
+                                .child(rule.name.clone()),
+                            )
+                            .child(
+                                design_cell(
+                                    SharedString::from(format!("rule-definition-{row}")),
+                                    RULE_DEFINITION_WIDTH,
+                                    theme,
+                                    false,
+                                )
+                                .pl(px(DESIGN_CELL_INSET))
+                                .pr(px(4.0))
+                                .child(rule.definition.clone()),
+                            )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.list_scroll)
+        .flex_1()
+        .min_h(px(0.0));
+
+        let header = design_grid_header(
+            theme,
+            &["design.rule.name", "design.rule.definition"],
+            &widths,
+        );
+        let grid = self.render_grid_scaffold(cx, header, list, content_width);
+
+        let body_editor = if let Some(row) = selected {
+            let definition = rules
+                .get(row)
+                .map(|rule| rule.definition.clone())
+                .unwrap_or_default();
+            let editor = if let Some(editor) = &self.rule_editor {
+                editor.clone()
+            } else {
+                let weak_editor = self.self_weak.clone();
+                let editor = cx.new(|cx| {
+                    ui::SqlEditor::new(cx)
+                        .options(ui::SqlEditorOptions {
+                            language: "sql".into(),
+                            font_family: "Consolas".into(),
+                            font_size: 12.0,
+                            line_number: true,
+                            readonly: false,
+                        })
+                        .on_change(Rc::new(move |text, cx| {
+                            let _ = weak_editor
+                                .update(cx, |view, cx| view.set_selected_rule_definition(text, cx));
+                        }))
+                });
+                self.rule_editor = Some(editor.clone());
+                editor
+            };
+            if self.rule_editor_row != Some(row) {
+                editor.update(cx, |editor, cx| editor.set_text(definition, cx));
+                self.rule_editor_row = Some(row);
+            }
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .h(px(180.0))
+                .border_t_1()
+                .border_color(rgb(theme.border))
+                .child(
+                    div()
+                        .h(px(24.0))
+                        .flex_none()
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(t!("design.rule.definition").to_string()),
+                )
+                .child(editor)
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_none()
+                .h(px(180.0))
+                .border_t_1()
+                .border_color(rgb(theme.border))
+                .p_3()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("design.rule.no_selection").to_string())
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(grid)
+            .child(body_editor)
+            .into_any_element()
+    }
+
+    /// The trigger grid plus the shared body editor. The metadata cells are edited in place; the
+    /// body editor follows the selected row and writes back on every change, so a trigger is one
+    /// model row like a check constraint.
+    fn render_triggers(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let full = self.designer.trigger_definition == TriggerDefinition::Full;
+        let widths: Vec<f32> = if full {
+            vec![TRIGGER_NAME_WIDTH]
+        } else {
+            vec![
+                TRIGGER_NAME_WIDTH,
+                TRIGGER_TIMING_WIDTH,
+                TRIGGER_EVENT_WIDTH,
+            ]
+        };
+        let widths_for_list = widths.clone();
+        let content_width: f32 = DESIGN_GUTTER_WIDTH + widths.iter().sum::<f32>();
+        let triggers = self.schema.triggers.clone();
+        let list_triggers = triggers.clone();
+        let selected = self.selected_trigger;
+        let rows = self.trigger_rows.clone();
+        let edit = self
+            .trigger_edit
+            .as_ref()
+            .map(|editor| (editor.row, editor.column, editor.input.clone()));
+        let weak = self.self_weak.clone();
+
+        let list = uniform_list(
+            SharedString::from(format!("design-triggers-{}", self.id)),
+            list_triggers.len().max(1),
+            move |range, _window, _cx| {
+                range
+                    .map(|row| {
+                        if row >= list_triggers.len() {
+                            return placeholder_row(
+                                PlaceholderKind::Trigger,
+                                &widths_for_list,
+                                theme,
+                                &weak,
+                            );
+                        }
+                        let trigger = &list_triggers[row];
+                        let row_selected = rows.contains(row);
+                        let row_active = selected == Some(row);
+                        let row_background = if row % 2 == 1 {
+                            theme.row_alt_bg
+                        } else {
+                            theme.editor_bg
+                        };
+                        let editor_for = |target: TriggerColumn| {
+                            edit.as_ref()
+                                .filter(|(row_index, column_kind, _)| {
+                                    *row_index == row && *column_kind == target
+                                })
+                                .map(|(_, _, input)| input.clone())
+                        };
+                        let gutter_weak = weak.clone();
+
+                        let trigger_row = div()
+                            .flex()
+                            .flex_row()
+                            .h(px(DESIGN_ROW_HEIGHT))
+                            .bg(rgb(row_background))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("trigger-gutter-{row}")))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(DESIGN_ROW_HEIGHT))
+                                    .w(px(DESIGN_GUTTER_WIDTH))
+                                    .flex_none()
+                                    .border_r_1()
+                                    .border_color(rgb(theme.grid_line))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |event: &MouseDownEvent, _window, cx| {
+                                            let _ = gutter_weak.update(cx, |view, cx| {
+                                                view.select_trigger_row(row, &event.modifiers, cx)
+                                            });
+                                        },
+                                    )
+                                    .when(row_active, |gutter| {
+                                        gutter.child(
+                                            svg()
+                                                .path("icons/row_marker.svg")
+                                                .w(px(7.0))
+                                                .h(px(7.0))
+                                                .flex_none()
+                                                .text_color(rgb(theme.primary)),
+                                        )
+                                    }),
+                            )
+                            .child(if full {
+                                design_cell(
+                                    SharedString::from(format!("trigger-name-{row}")),
+                                    TRIGGER_NAME_WIDTH,
+                                    theme,
+                                    row_selected,
+                                )
+                                .pl(px(DESIGN_CELL_INSET))
+                                .child(trigger.name.clone())
+                                .into_any_element()
+                            } else {
+                                trigger_edit_cell(
+                                    SharedString::from(format!("trigger-name-{row}")),
+                                    TRIGGER_NAME_WIDTH,
+                                    trigger.name.clone(),
+                                    theme,
+                                    row_selected,
+                                    &weak,
+                                    row,
+                                    TriggerColumn::Name,
+                                    editor_for(TriggerColumn::Name),
+                                )
+                            });
+                        if full {
+                            trigger_row
+                        } else {
+                            trigger_row
+                                .child(trigger_edit_cell(
+                                    SharedString::from(format!("trigger-timing-{row}")),
+                                    TRIGGER_TIMING_WIDTH,
+                                    trigger.timing.clone(),
+                                    theme,
+                                    false,
+                                    &weak,
+                                    row,
+                                    TriggerColumn::Timing,
+                                    editor_for(TriggerColumn::Timing),
+                                ))
+                                .child(trigger_edit_cell(
+                                    SharedString::from(format!("trigger-event-{row}")),
+                                    TRIGGER_EVENT_WIDTH,
+                                    trigger.event.clone(),
+                                    theme,
+                                    false,
+                                    &weak,
+                                    row,
+                                    TriggerColumn::Event,
+                                    editor_for(TriggerColumn::Event),
+                                ))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.list_scroll)
+        .flex_1()
+        .min_h(px(0.0));
+
+        let labels: Vec<&'static str> = if full {
+            vec!["design.trigger.name"]
+        } else {
+            vec![
+                "design.trigger.name",
+                "design.trigger.timing",
+                "design.trigger.event",
+            ]
+        };
+        let header = design_grid_header(theme, &labels, &widths);
+        let grid = self.render_grid_scaffold(cx, header, list, content_width);
+
+        // The body editor is shared across rows; `trigger_editor_row` keeps its caret stable while
+        // the user types and only replaces the text when the selection moves to another trigger.
+        let body_editor = if let Some(row) = selected {
+            let statement = triggers
+                .get(row)
+                .map(|trigger| trigger.statement.clone())
+                .unwrap_or_default();
+            let editor = if let Some(editor) = &self.trigger_editor {
+                editor.clone()
+            } else {
+                let weak_editor = self.self_weak.clone();
+                let editor = cx.new(|cx| {
+                    ui::SqlEditor::new(cx)
+                        .options(ui::SqlEditorOptions {
+                            language: "sql".into(),
+                            font_family: "Consolas".into(),
+                            font_size: 12.0,
+                            line_number: true,
+                            readonly: false,
+                        })
+                        .on_change(Rc::new(move |text, cx| {
+                            let _ =
+                                weak_editor.update(cx, |view, cx| view.set_trigger_body(text, cx));
+                        }))
+                });
+                self.trigger_editor = Some(editor.clone());
+                editor
+            };
+            if self.trigger_editor_row != Some(row) {
+                editor.update(cx, |editor, cx| editor.set_text(statement, cx));
+                self.trigger_editor_row = Some(row);
+            }
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .h(px(180.0))
+                .border_t_1()
+                .border_color(rgb(theme.border))
+                .child(
+                    div()
+                        .h(px(24.0))
+                        .flex_none()
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme.text_muted))
+                        .child(if full {
+                            t!("design.trigger.definition").to_string()
+                        } else {
+                            t!("design.trigger.body").to_string()
+                        }),
+                )
+                .child(editor)
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_none()
+                .h(px(180.0))
+                .border_t_1()
+                .border_color(rgb(theme.border))
+                .p_3()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child(t!("design.trigger.no_selection").to_string())
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(grid)
+            .child(body_editor)
+            .into_any_element()
+    }
+
     /// The scroll container a designer grid lives in: the header and list scroll horizontally with
     /// the view's own scrollbars, and the wheel drives both axes.
     ///
@@ -1714,6 +2343,73 @@ impl TableDesignView {
 
     /// The table's storage options. The rows come from the engine's
     /// [`TableDesignerSpec::option_fields`], so an engine only shows what its designer SQL honors.
+    /// MySQL/MariaDB partitioning, edited as the complete `PARTITION BY …` clause. A table without
+    /// partitioning has an empty clause; Save then leaves partitioning untouched.
+    fn render_partition(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let clause = self.schema.partitioning.clone();
+        let editor = if let Some(editor) = &self.partition_editor {
+            editor.clone()
+        } else {
+            let weak_editor = self.self_weak.clone();
+            let editor = cx.new(|cx| {
+                ui::SqlEditor::new(cx)
+                    .options(ui::SqlEditorOptions {
+                        language: "sql".into(),
+                        font_family: "Consolas".into(),
+                        font_size: 12.0,
+                        line_number: true,
+                        readonly: false,
+                    })
+                    .on_change(Rc::new(move |text, cx| {
+                        let _ =
+                            weak_editor.update(cx, |view, cx| view.set_partition_clause(text, cx));
+                    }))
+            });
+            editor.update(cx, |editor, cx| editor.set_text(clause, cx));
+            self.partition_editor = Some(editor.clone());
+            editor
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .p_3()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text))
+                            .child(t!("design.partition.clause").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("design.partition.hint").to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .rounded(px(4.0))
+                    .overflow_hidden()
+                    .child(editor),
+            )
+            .into_any_element()
+    }
+
     fn render_options(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         self.sync_option_combos(cx);
@@ -2646,7 +3342,13 @@ impl TableDesignView {
             DesignerTab::ForeignKeys => self.selected_fk,
             DesignerTab::UniqueKeys => self.selected_unique_key,
             DesignerTab::Checks => self.selected_check,
-            DesignerTab::Options | DesignerTab::Comment | DesignerTab::Sql => None,
+            DesignerTab::Excludes => self.selected_exclude,
+            DesignerTab::Rules => self.selected_rule,
+            DesignerTab::Triggers => self.selected_trigger,
+            DesignerTab::Options
+            | DesignerTab::Partition
+            | DesignerTab::Comment
+            | DesignerTab::Sql => None,
         }
     }
 
@@ -2658,7 +3360,13 @@ impl TableDesignView {
             DesignerTab::ForeignKeys => self.select_fk(row, cx),
             DesignerTab::UniqueKeys => self.select_unique_key(row, cx),
             DesignerTab::Checks => self.select_check(row, cx),
-            DesignerTab::Options | DesignerTab::Comment | DesignerTab::Sql => {}
+            DesignerTab::Excludes => self.select_exclude(row, cx),
+            DesignerTab::Rules => self.select_rule(row, cx),
+            DesignerTab::Triggers => self.select_trigger(row, cx),
+            DesignerTab::Options
+            | DesignerTab::Partition
+            | DesignerTab::Comment
+            | DesignerTab::Sql => {}
         }
     }
 
@@ -2705,7 +3413,13 @@ impl TableDesignView {
             DesignerTab::ForeignKeys => self.schema.foreign_keys.len(),
             DesignerTab::UniqueKeys => self.schema.unique_keys.len(),
             DesignerTab::Checks => self.schema.checks.len(),
-            DesignerTab::Options | DesignerTab::Comment | DesignerTab::Sql => 0,
+            DesignerTab::Excludes => self.schema.excludes.len(),
+            DesignerTab::Rules => self.schema.rules.len(),
+            DesignerTab::Triggers => self.schema.triggers.len(),
+            DesignerTab::Options
+            | DesignerTab::Partition
+            | DesignerTab::Comment
+            | DesignerTab::Sql => 0,
         }
     }
 
@@ -2805,6 +3519,9 @@ enum PlaceholderKind {
     ForeignKey,
     UniqueKey,
     Check,
+    Exclude,
+    Rule,
+    Trigger,
 }
 
 /// A blank editable row shown below the header when a designer grid is empty. Clicking any cell
@@ -2821,6 +3538,9 @@ fn placeholder_row(
         PlaceholderKind::ForeignKey => "design-fk",
         PlaceholderKind::UniqueKey => "design-uq",
         PlaceholderKind::Check => "design-check",
+        PlaceholderKind::Exclude => "design-exclude",
+        PlaceholderKind::Rule => "design-rule",
+        PlaceholderKind::Trigger => "design-trigger",
     };
     let mut row = div()
         .flex()
@@ -2852,6 +3572,9 @@ fn placeholder_row(
                     PlaceholderKind::ForeignKey => view.begin_empty_foreign_key(window, vcx),
                     PlaceholderKind::UniqueKey => view.begin_empty_unique_key(window, vcx),
                     PlaceholderKind::Check => view.begin_empty_check(window, vcx),
+                    PlaceholderKind::Exclude => view.begin_empty_exclude(window, vcx),
+                    PlaceholderKind::Rule => view.begin_empty_rule(window, vcx),
+                    PlaceholderKind::Trigger => view.begin_empty_trigger(window, vcx),
                 });
             }),
         );
@@ -3430,6 +4153,88 @@ fn check_edit_cell(
         .on_click(move |_event, window, cx| {
             let _ = weak.update(cx, |view, cx| {
                 view.begin_check_edit(row, column, window, cx)
+            });
+        })
+        .child(text)
+        .into_any_element()
+}
+
+/// A live-editable text cell of the exclusion-constraint grid.
+#[allow(clippy::too_many_arguments)]
+fn exclude_edit_cell(
+    id: SharedString,
+    width: f32,
+    text: String,
+    theme: Theme,
+    selected: bool,
+    weak: &WeakEntity<TableDesignView>,
+    row: usize,
+    column: ExcludeColumn,
+    editor: Option<Entity<TextInput>>,
+) -> AnyElement {
+    let cell = design_cell(id, width, theme, selected)
+        .when(selected, |cell| cell.bg(rgb(theme.grid_selection_bg)));
+    if let Some(editor) = editor {
+        return cell
+            .bg(rgb(theme.input_bg))
+            .text_color(rgb(theme.text))
+            .pl(px(DESIGN_CELL_INSET))
+            .child(
+                div()
+                    .w(px(width - DESIGN_CELL_INSET))
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .child(editor),
+            )
+            .into_any_element();
+    }
+    let weak = weak.clone();
+    cell.pl(px(DESIGN_CELL_INSET))
+        .pr(px(4.0))
+        .cursor_text()
+        .on_click(move |_event, window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.begin_exclude_edit(row, column, window, cx)
+            });
+        })
+        .child(text)
+        .into_any_element()
+}
+
+/// A live-editable text cell of the trigger grid.
+#[allow(clippy::too_many_arguments)]
+fn trigger_edit_cell(
+    id: SharedString,
+    width: f32,
+    text: String,
+    theme: Theme,
+    selected: bool,
+    weak: &WeakEntity<TableDesignView>,
+    row: usize,
+    column: TriggerColumn,
+    editor: Option<Entity<TextInput>>,
+) -> AnyElement {
+    let cell = design_cell(id, width, theme, selected)
+        .when(selected, |cell| cell.bg(rgb(theme.grid_selection_bg)));
+    if let Some(editor) = editor {
+        return cell
+            .bg(rgb(theme.input_bg))
+            .text_color(rgb(theme.text))
+            .pl(px(DESIGN_CELL_INSET))
+            .child(
+                div()
+                    .w(px(width - DESIGN_CELL_INSET))
+                    .h(px(DESIGN_ROW_HEIGHT))
+                    .child(editor),
+            )
+            .into_any_element();
+    }
+    let weak = weak.clone();
+    cell.pl(px(DESIGN_CELL_INSET))
+        .pr(px(4.0))
+        .cursor_text()
+        .on_click(move |_event, window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.begin_trigger_edit(row, column, window, cx)
             });
         })
         .child(text)

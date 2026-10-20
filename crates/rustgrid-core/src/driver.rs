@@ -504,7 +504,41 @@ pub trait Connection: Send + Sync {
         modified: &TableSchema,
     ) -> String;
 
-    /// Apply the change described by [`Connection::table_schema_sql`].
+    /// Trigger statements that accompany a table change. They are separate from
+    /// [`Connection::table_schema_sql`] because a trigger body may contain semicolons and must be
+    /// sent to the server as one query; the default save runs them individually after the table
+    /// DDL.
+    fn table_schema_trigger_sql(
+        &self,
+        _database: &str,
+        _table: &str,
+        _original: Option<&TableSchema>,
+        _modified: &TableSchema,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The complete script the designer's SQL preview shows: table DDL plus trigger statements.
+    fn table_schema_script(
+        &self,
+        database: &str,
+        table: &str,
+        original: Option<&TableSchema>,
+        modified: &TableSchema,
+    ) -> String {
+        let mut sql = self.table_schema_sql(database, table, original, modified);
+        let triggers = self.table_schema_trigger_sql(database, table, original, modified);
+        if !triggers.is_empty() {
+            if !sql.trim().is_empty() {
+                sql.push_str(";\n");
+            }
+            sql.push_str(&triggers.join(";\n"));
+        }
+        sql
+    }
+
+    /// Apply the change described by [`Connection::table_schema_sql`] and
+    /// [`Connection::table_schema_trigger_sql`].
     async fn save_table_schema(
         &self,
         database: &str,
@@ -513,10 +547,13 @@ pub trait Connection: Send + Sync {
         modified: &TableSchema,
     ) -> Result<()> {
         let sql = self.table_schema_sql(database, table, original, modified);
-        if sql.trim().is_empty() {
-            return Ok(());
+        if !sql.trim().is_empty() {
+            self.execute_query(Some(database), &sql).await?;
         }
-        self.execute_query(Some(database), &sql).await.map(|_| ())
+        for statement in self.table_schema_trigger_sql(database, table, original, modified) {
+            self.execute_query(Some(database), &statement).await?;
+        }
+        Ok(())
     }
 
     async fn close(&self) -> Result<()>;
