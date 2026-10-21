@@ -1536,6 +1536,7 @@ impl AppView {
         self.sync.compare_total = 0;
         let source_database = self.sync.source_database.clone();
         let target_database = self.sync.target_database.clone();
+        let mode = self.sync.mode;
         let same_engine = self.sync_same_engine();
         let source_dialect = self.driver_dialect(source_index);
         let target_dialect = self.driver_dialect(target_index);
@@ -1623,6 +1624,7 @@ impl AppView {
                     target_name,
                     in_target,
                     same_engine,
+                    mode,
                     source_dialect,
                 )
                 .await;
@@ -1735,6 +1737,7 @@ impl AppView {
                     // Every table in this list either already existed or was just created.
                     true,
                     same_engine,
+                    mode,
                     source_dialect,
                 )
                 .await;
@@ -1794,6 +1797,7 @@ impl AppView {
         let source_database = self.sync.source_database.clone();
         let target_database = self.sync.target_database.clone();
         let same_engine = self.sync_same_engine();
+        let mode = self.sync.mode;
         let source_dialect = self.driver_dialect(source_index);
         let runtime = self.runtime.clone();
         cx.notify();
@@ -1808,6 +1812,7 @@ impl AppView {
                 target_name,
                 in_target,
                 same_engine,
+                mode,
                 source_dialect,
             )
             .await;
@@ -3095,6 +3100,17 @@ impl AppView {
                                     app.sync.sub_tab = mode.default_sub_tab();
                                     let same_engine = app.sync_same_engine();
                                     app.sync.keep_selection_visible(same_engine);
+                                    // Structure-only comparison deliberately does not read rows
+                                    // (a target key column may be missing until the structure is
+                                    // applied). Re-run the comparison on a mode switch so a table
+                                    // that only failed while reading data does not keep a stale
+                                    // error, and so switching back to a data mode fills its diff.
+                                    // An in-flight comparison was started with the old mode, so
+                                    // stop it before starting the new one.
+                                    if app.sync.comparing {
+                                        app.cancel_sync_compare(cx);
+                                    }
+                                    app.sync_recompare_all(cx);
                                 }
                                 cx.notify();
                             });
@@ -4541,6 +4557,7 @@ async fn compare_table(
     target_name: String,
     in_target: bool,
     same_engine: bool,
+    mode: SyncMode,
     source_dialect: rustgrid_core::DriverDialect,
 ) -> ComparedTable {
     let mut compared = ComparedTable {
@@ -4627,10 +4644,18 @@ async fn compare_table(
         _ => Vec::new(),
     };
 
+    // Structure-only comparison must not read rows at all. Besides being wasted work, the target
+    // structure may legitimately differ (a missing key column is exactly what is about to be
+    // synced), so ordering the target by the source key produced errors such as MySQL's
+    // "1054 - Unknown column ... in 'order clause'" and made the structure comparison fail.
     // A primary key is preferred; a table without one can still be compared through a unique
     // NOT NULL key (Navicat asks for such a key; the workbench has no picker, so it takes the
     // narrowest usable one).
-    let keys = usable_key_columns(&source_columns, compared.source_schema.as_ref());
+    let keys = if mode.uses_data() {
+        usable_key_columns(&source_columns, compared.source_schema.as_ref())
+    } else {
+        Vec::new()
+    };
     let order_by: Vec<SortColumn> = keys
         .iter()
         .map(|column| SortColumn {
@@ -4646,6 +4671,27 @@ async fn compare_table(
     } else {
         source_columns.clone()
     };
+    if mode.uses_data()
+        && in_target
+        && !keys.is_empty()
+        && key_positions(&compare_target_columns, &keys).is_none()
+    {
+        // The fallback path used to order the target by the source key even when the target did
+        // not have that column (a structure difference), which surfaced as a raw driver error.
+        // A clear message lets the user run a structure sync first.
+        let missing: Vec<&str> = keys
+            .iter()
+            .filter(|key| {
+                !compare_target_columns
+                    .iter()
+                    .any(|column| column.name.eq_ignore_ascii_case(key))
+            })
+            .map(String::as_str)
+            .collect();
+        compared.error =
+            Some(t!("sync.error.missing_key", columns = missing.join(", ")).to_string());
+        return compared;
+    }
     if !keys.is_empty() {
         if streamable_keys(&source_columns, &keys)
             && streamable_keys(&compare_target_columns, &keys)

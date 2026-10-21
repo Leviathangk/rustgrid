@@ -657,7 +657,10 @@ pub fn usable_key_columns(columns: &[ColumnInfo], schema: Option<&TableSchema>) 
 - 缺失表在 `仅数据` 下仍显示“目标不存在”，但不会进入执行计划，运行按钮不会把它算进去；
 - 建表只属于 `全部`、`仅结构`、`全量传输`：结构阶段按目标方言创建，随后数据阶段复制；
 - `run_sync_table` 的数据阶段不再兜底建表；目标表在比较后被删除时直接报“请先同步结构”；
-- SQL 预览在 `仅数据` + 缺失表时提示“不会创建表”，不再显示 `CREATE TABLE`。
+- SQL 预览在 `仅数据` + 缺失表时提示“不会创建表”，不再显示 `CREATE TABLE`；
+- `仅结构` 比较不读取数据行：目标尚未补上比较键时（例如
+  `1054 - Unknown column ... in 'order clause'`）不会再把结构比较判为失败；
+- 切换模式会重新比较，避免只读结构后切回数据模式时沿用空的数据差异。
 
 对应测试：`data_only_never_plans_a_missing_table`。
 
