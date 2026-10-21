@@ -628,6 +628,10 @@ impl Connection for MysqlConnection {
                 name,
                 TableStatus {
                     engine,
+                    // `information_schema.tables.table_rows` is an InnoDB estimate and MySQL 8
+                    // caches it for `information_schema_stats_expiry` seconds. It is routinely 0
+                    // for a table with thousands of rows (and a refresh returns the same cached
+                    // value), so the exact count is filled in below.
                     rows: optional_u64(row, 2),
                     auto_increment: optional_u64(row, 3),
                     updated,
@@ -636,6 +640,41 @@ impl Connection for MysqlConnection {
                     ..TableStatus::default()
                 },
             ));
+        }
+
+        // One `COUNT(*)` per table, batched into a single UNION ALL statement. The object list
+        // shows the real row count instead of the optimizer's estimate; a database with many
+        // tables pays one round trip and one scan per table.
+        if !statuses.is_empty() {
+            let mut sql = String::new();
+            for (index, (name, _)) in statuses.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str(" UNION ALL ");
+                }
+                sql.push_str(&format!(
+                    "SELECT {} AS table_name, COUNT(*) AS exact_rows FROM {}.{}",
+                    quote_literal(name),
+                    quote_identifier(database),
+                    quote_identifier(name)
+                ));
+            }
+            // Best-effort: if a table disappears between the catalog read and the count (or the
+            // user's database forbids reading one), keep the catalog estimate instead of failing
+            // the whole object list.
+            let count_rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default();
+            for row in &count_rows {
+                let name: String = row.try_get(0).map_err(map_query_error)?;
+                let count = optional_u64(row, 1).unwrap_or(0);
+                if let Some((_, status)) = statuses
+                    .iter_mut()
+                    .find(|(candidate, _)| candidate == &name)
+                {
+                    status.rows = Some(count);
+                }
+            }
         }
         Ok(statuses)
     }
@@ -911,13 +950,28 @@ impl Connection for MysqlConnection {
                 .map(|index| extra[index..].trim().to_string())
                 .unwrap_or_default();
 
+            // `information_schema` reports both an explicit empty-string default and no default as
+            // an empty string; only `None` means SQL NULL. Keeping the empty string as-is made
+            // `DEFAULT ''` indistinguishable from `DEFAULT NULL`, so the structure diff reported
+            // "no changes" while the DDL panes still showed the difference. Store the quoted empty
+            // string explicitly so both the diff and `format_default` see a real literal.
+            let default = default
+                .map(|value| {
+                    if value.is_empty() {
+                        "''".to_string()
+                    } else {
+                        value
+                    }
+                })
+                .unwrap_or_default();
+
             columns.push(ColumnDef {
                 name,
                 data_type,
                 length,
                 decimals,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
-                default: default.unwrap_or_default(),
+                default,
                 primary_key: key.eq_ignore_ascii_case("PRI"),
                 auto_increment: extra_lower.contains("auto_increment"),
                 identity: String::new(),
@@ -2980,6 +3034,22 @@ mod tests {
         assert!(sql.starts_with("CREATE TABLE `db`.`t`"));
         assert!(sql.contains("`id` int NOT NULL"));
         assert!(sql.contains("PRIMARY KEY (`id`)"));
+    }
+
+    #[test]
+    fn distinguishes_an_empty_string_default_from_no_default() {
+        let column = ColumnDef {
+            name: "name".to_string(),
+            data_type: "varchar".to_string(),
+            length: "64".to_string(),
+            default: "''".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_default(&column, &column.default),
+            Some("DEFAULT ''".to_string())
+        );
+        assert_eq!(format_default(&column, ""), None);
     }
 
     #[test]

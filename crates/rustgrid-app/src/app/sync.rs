@@ -220,14 +220,12 @@ impl SyncTable {
             return false;
         }
         let schema = !self.in_target || !self.schema_changes.is_empty();
+        // 仅数据 writes into an existing target table only. Creating a missing table belongs to
+        // 全部 / 仅结构 / 全量传输, so a data-only run never changes the target's structure.
         let data = if self.has_key() {
-            // A table the target does not have yet is a change even when the source has no rows:
-            // the data stage creates it (Navicat's "Create tables" transfer option).
-            !self.in_target || !self.data.is_empty()
+            self.in_target && !self.data.is_empty()
         } else {
-            // Without a key there is no incremental diff, but a missing table can still be
-            // created from the mapped definition and copied whole.
-            (self.force_transfer && self.in_target) || !self.in_target
+            self.force_transfer && self.in_target
         };
         match mode {
             // A missing table can be created across dialects from the mapped source definition;
@@ -237,6 +235,11 @@ impl SyncTable {
             SyncMode::All => data || (schema && (same_engine || !self.in_target)),
             SyncMode::Transfer => self.in_target || self.source_schema.is_some(),
         }
+    }
+
+    /// The tables a data-only run can actually write: the target table must already exist.
+    fn data_target_exists(&self, mode: SyncMode) -> bool {
+        mode != SyncMode::Data || self.in_target
     }
 
     /// Whether the current mode finds nothing to do for this table, so 隐藏一致 can drop its row.
@@ -251,6 +254,10 @@ impl SyncTable {
             return false;
         }
         if mode.uses_data() && !self.has_key() {
+            return false;
+        }
+        // A table the target does not have is not "equal" under 仅数据; it is simply skipped.
+        if !self.data_target_exists(mode) {
             return false;
         }
         !self.has_changes(mode, same_engine)
@@ -275,6 +282,9 @@ impl SyncTable {
         }
         if mode.uses_data() && !self.has_key() {
             return (t!("sync.status.no_key").to_string(), PillTone::Bad);
+        }
+        if mode == SyncMode::Data && !self.in_target {
+            return (t!("sync.status.missing").to_string(), PillTone::Bad);
         }
         if !self.in_target {
             return (
@@ -523,23 +533,18 @@ impl SyncState {
         self.selected.and_then(|index| self.tables.get(index))
     }
 
-    /// The table indices the list shows: the search filter plus 隐藏一致. The selected row stays
-    /// visible while it has no difference, so the inspector never points at a hidden row.
+    /// The table indices the list shows: the search filter plus 隐藏一致. The inspector selection
+    /// is reconciled separately by [`SyncState::keep_selection_visible`].
     fn visible_indices(&self, mode: SyncMode, same_engine: bool, hide_same: bool) -> Vec<usize> {
         let needle = self.search.trim().to_lowercase();
         self.tables
             .iter()
             .enumerate()
-            .filter(|(index, table)| {
+            .filter(|(_index, table)| {
                 if !needle.is_empty() && !table.name.to_lowercase().contains(&needle) {
                     return false;
                 }
                 if !hide_same {
-                    return true;
-                }
-                // Keep the inspected row: the inspector would otherwise show a table that is not
-                // in the list at all.
-                if self.selected == Some(*index) {
                     return true;
                 }
                 !table.is_identical(mode, same_engine)
@@ -556,6 +561,22 @@ impl SyncState {
             .filter(|(_, table)| table.checked)
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// Move the inspector off a row that 隐藏一致 just removed, so the list and the detail pane
+    /// never point at different tables. With nothing left to show the selection becomes `None`.
+    fn keep_selection_visible(&mut self, same_engine: bool) {
+        if !self.hide_same {
+            return;
+        }
+        let visible = self.visible_indices(self.mode, same_engine, true);
+        if self
+            .selected
+            .is_some_and(|selected| visible.contains(&selected))
+        {
+            return;
+        }
+        self.selected = visible.first().copied();
     }
 
     fn log_line(&mut self, line: String) {
@@ -1627,6 +1648,7 @@ impl AppView {
     /// Install one table's comparison result.
     fn apply_sync_comparison(&mut self, index: usize, compared: ComparedTable) {
         self.sync.compared += 1;
+        let same_engine = self.sync_same_engine();
         let Some(table) = self.sync.tables.get_mut(index) else {
             return;
         };
@@ -1642,6 +1664,7 @@ impl AppView {
         table.target_ddl = compared.target_ddl;
         table.data = compared.data;
         table.error = compared.error;
+        self.sync.keep_selection_visible(same_engine);
     }
 
     /// Re-compare every table (the toolbar's refresh action), keeping the checked set and the
@@ -2083,27 +2106,14 @@ impl AppView {
         if mode.uses_data() {
             lines.push(String::new());
             lines.push(t!("sync.sql.data_stage").to_string());
-            // 仅数据 creates a missing table first (the run does the same), so the preview shows
-            // that CREATE instead of claiming the structure must be synced.
-            if !table.in_target && !mode.uses_schema() {
-                match (connection.as_ref(), table.source_schema.as_ref()) {
-                    (Some(connection), Some(source)) => {
-                        let mapped = if same_engine {
-                            source.clone()
-                        } else {
-                            map_schema(source, source_dialect, dialect)
-                        };
-                        let sql =
-                            connection.table_schema_sql(&database, &target_name, None, &mapped);
-                        if !sql.trim().is_empty() {
-                            lines.push(sql);
-                        }
-                    }
-                    _ => lines.push(t!("sync.sql.missing_target").to_string()),
+            if !table.in_target {
+                // 全部/全量传输 create the table in the structure stage, then copy every row;
+                // 仅数据 has no structure stage, so it cannot write into a missing target.
+                if mode.uses_schema() {
+                    lines.push(t!("sync.sql.full_copy", table = table.name.clone()).to_string());
+                } else {
+                    lines.push(t!("sync.sql.missing_target").to_string());
                 }
-                lines.push(t!("sync.sql.full_copy", table = table.name.clone()).to_string());
-            } else if !table.in_target {
-                lines.push(t!("sync.sql.missing_target").to_string());
             } else if mode == SyncMode::Transfer || table.force_transfer {
                 if mode == SyncMode::Transfer && same_engine {
                     lines.push(format!(
@@ -3083,6 +3093,8 @@ impl AppView {
                                     app.sync.config_saved = false;
                                     app.sync.mode = mode;
                                     app.sync.sub_tab = mode.default_sub_tab();
+                                    let same_engine = app.sync_same_engine();
+                                    app.sync.keep_selection_visible(same_engine);
                                 }
                                 cx.notify();
                             });
@@ -3318,12 +3330,14 @@ impl AppView {
                     .text_color(rgb(theme.warning)),
             )
             .child(
-                t!(
-                    "sync.hetero",
-                    source = self.sync_engine_name(self.sync.source_connection),
-                    target = self.sync_engine_name(self.sync.target_connection)
-                )
-                .to_string(),
+                div().flex_1().min_w(px(0.0)).child(
+                    t!(
+                        "sync.hetero",
+                        source = self.sync_engine_name(self.sync.source_connection),
+                        target = self.sync_engine_name(self.sync.target_connection)
+                    )
+                    .to_string(),
+                ),
             )
     }
 
@@ -3557,6 +3571,8 @@ impl AppView {
             .on_click(move |_event, _window, cx| {
                 let _ = weak.update(cx, |app, cx| {
                     app.sync.hide_same = !app.sync.hide_same;
+                    let same_engine = app.sync_same_engine();
+                    app.sync.keep_selection_visible(same_engine);
                     app.persist_settings();
                     cx.notify();
                 });
@@ -3782,9 +3798,19 @@ impl AppView {
         let schema_changes = table.schema_changes.clone();
         let source_ddl = table.source_ddl.clone().unwrap_or_default();
         let target_ddl = table.target_ddl.clone().unwrap_or_default();
-        let (source_lines, target_lines) = ddl_line_marks(&source_ddl, &target_ddl);
-        let source_decorations = ddl_decorations(&source_ddl, &source_lines, theme);
-        let target_decorations = ddl_decorations(&target_ddl, &target_lines, theme);
+        // The DDL panes and the structure diff must tell the same story. When the snapshot diff
+        // finds nothing (the tables are structurally equal, or a cross-engine pair has no
+        // comparable structure), show the two definitions without red/green line marks instead of
+        // highlighting formatting differences the sync will never apply.
+        let (source_decorations, target_decorations) = if schema_changes.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            let (source_lines, target_lines) = ddl_line_marks(&source_ddl, &target_ddl);
+            (
+                ddl_decorations(&source_ddl, &source_lines, theme),
+                ddl_decorations(&target_ddl, &target_lines, theme),
+            )
+        };
         let source_text = if source_ddl.is_empty() {
             "--".to_string()
         } else {
@@ -3842,7 +3868,11 @@ impl AppView {
                 .flex()
                 .flex_col()
                 .flex_none()
-                .max_h(px(96.0))
+                .w_full()
+                // The change list is the "info above the DDL"; 96px cut a seven-column table in
+                // half. A generous cap still leaves the DDL panes most of the height while showing
+                // the common case completely.
+                .max_h(px(220.0))
                 .overflow_y_scroll()
                 .gap_0p5()
                 .px_3()
@@ -5368,30 +5398,10 @@ async fn run_sync_table(
     // Data-only mode still creates a missing target table when the pair shares a dialect, which is
     // how Navicat's transfer treats its "Create tables" option. Without this, 仅数据 could not
     // populate a fresh database at all (the structure stage is skipped in that mode).
+    // A data-only run never creates a table. Structures that can create one do it above; this
+    // guard only catches a stale plan (for example a target table dropped after the comparison).
     if mode.uses_data() && !plan.in_target && !created {
-        let Some(source_schema) = plan.source_schema.clone() else {
-            return Err(t!("sync.error.no_schema").to_string());
-        };
-        let mapped_schema = if same_engine {
-            source_schema
-        } else {
-            map_schema(&source_schema, source_dialect, target_dialect)
-        };
-        let target_connection = target.clone();
-        let database = target_database.clone();
-        let table = target_name.clone();
-        match runtime
-            .spawn(async move {
-                target_connection
-                    .save_table_schema(&database, &table, None, &mapped_schema)
-                    .await
-            })
-            .await
-        {
-            Ok(Ok(())) => created = true,
-            Ok(Err(error)) => return Err(error.to_string()),
-            Err(error) => return Err(error.to_string()),
-        }
+        return Err(t!("sync.error.missing_target").to_string());
     }
     // A table that did not exist was just created empty, so every source row is copied; an
     // existing one is emptied first.
@@ -5942,6 +5952,31 @@ mod tests {
             compare_key_rows(&source, &target, &[1], &[1]),
             CmpOrdering::Equal
         );
+    }
+
+    #[test]
+    fn data_only_never_plans_a_missing_table() {
+        let mut table = SyncTable::new("users".to_string(), "users".to_string(), false);
+        table.comparing = false;
+        table.source_schema = Some(TableSchema {
+            columns: vec![rustgrid_core::ColumnDef {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                primary_key: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        table.data.key_columns = vec!["id".to_string()];
+
+        // 仅数据 has no structure stage, so a missing target is not a data change. The table is
+        // still not "identical" (the inspector keeps it visible with the "target missing" pill).
+        assert!(!table.has_changes(SyncMode::Data, true));
+        assert!(!table.is_identical(SyncMode::Data, true));
+        // 全部 / 仅结构 / 全量传输 may create it from the mapped source definition.
+        assert!(table.has_changes(SyncMode::All, true));
+        assert!(table.has_changes(SyncMode::Schema, true));
+        assert!(table.has_changes(SyncMode::Transfer, true));
     }
 
     #[test]

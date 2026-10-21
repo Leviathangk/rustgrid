@@ -100,9 +100,29 @@ impl AppView {
     pub(super) fn render_context_menu(
         &self,
         menu: &ContextMenu,
+        window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
+        // A menu opened near the right/bottom edge used to be cut off by the window: the popup is
+        // an absolute root child at the pointer's position, with nothing clamping it. Keep a
+        // generous estimate of its height inside the viewport (the table menu is the common case;
+        // menus that need more room still start at the top edge).
+        let viewport = window.viewport_size();
+        let width = px(190.0);
+        let estimated_height = px(420.0);
+        let x = if menu.position.x + width > viewport.width {
+            viewport.width - width
+        } else {
+            menu.position.x
+        };
+        let y = if menu.position.y + estimated_height > viewport.height {
+            viewport.height - estimated_height
+        } else {
+            menu.position.y
+        };
+        let x = if x < px(4.0) { px(4.0) } else { x };
+        let y = if y < px(4.0) { px(4.0) } else { y };
 
         let mut items = div().flex().flex_col().w(px(170.0)).p_0p5();
 
@@ -700,11 +720,30 @@ impl AppView {
                             t!("object.empty_table").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.delete_confirm = Some(DeleteConfirm::Table {
-                                    connection_index: ci,
-                                    database_index: di,
-                                    name: empty_name.clone(),
-                                    operation: TableOperation::Empty,
+                                let selected = pane == RowPane::Objects
+                                    && this.objects_selection.contains(&empty_name);
+                                let mut names = if selected {
+                                    this.objects_selection.items()
+                                } else {
+                                    Vec::new()
+                                };
+                                if names.is_empty() {
+                                    names.push(empty_name.clone());
+                                }
+                                this.delete_confirm = Some(if names.len() == 1 {
+                                    DeleteConfirm::Table {
+                                        connection_index: ci,
+                                        database_index: di,
+                                        name: names.remove(0),
+                                        operation: TableOperation::Empty,
+                                    }
+                                } else {
+                                    DeleteConfirm::TablesOperation {
+                                        connection_index: ci,
+                                        database_index: di,
+                                        names,
+                                        operation: TableOperation::Empty,
+                                    }
                                 });
                                 cx.notify();
                             }),
@@ -714,11 +753,30 @@ impl AppView {
                             t!("object.truncate_table").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                this.delete_confirm = Some(DeleteConfirm::Table {
-                                    connection_index: ci,
-                                    database_index: di,
-                                    name: truncate_name.clone(),
-                                    operation: TableOperation::Truncate,
+                                let selected = pane == RowPane::Objects
+                                    && this.objects_selection.contains(&truncate_name);
+                                let mut names = if selected {
+                                    this.objects_selection.items()
+                                } else {
+                                    Vec::new()
+                                };
+                                if names.is_empty() {
+                                    names.push(truncate_name.clone());
+                                }
+                                this.delete_confirm = Some(if names.len() == 1 {
+                                    DeleteConfirm::Table {
+                                        connection_index: ci,
+                                        database_index: di,
+                                        name: names.remove(0),
+                                        operation: TableOperation::Truncate,
+                                    }
+                                } else {
+                                    DeleteConfirm::TablesOperation {
+                                        connection_index: ci,
+                                        database_index: di,
+                                        names,
+                                        operation: TableOperation::Truncate,
+                                    }
                                 });
                                 cx.notify();
                             }),
@@ -1308,8 +1366,8 @@ impl AppView {
         }
 
         ui::popup_panel(theme)
-            .left(menu.position.x)
-            .top(menu.position.y)
+            .left(x)
+            .top(y)
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                 // The 转储 SQL 文件, 管理分组, 颜色 and 导入连接 flyouts overflow past this panel, so
                 // a click on one also reads as "outside" here. Keep the menu alive when the click is

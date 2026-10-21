@@ -389,6 +389,9 @@ impl AppView {
                 cx.new(|cx| {
                     ui::SqlEditor::new(cx).options(ui::SqlEditorOptions {
                         language: "text".into(),
+                        // The result/信息 log is status text, not the query being edited: it
+                        // stays at 12px when the editor font is zoomed or changed in Options.
+                        font_size: 12.0,
                         line_number: false,
                         readonly: true,
                         ..Default::default()

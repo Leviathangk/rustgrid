@@ -577,7 +577,8 @@ rustgrid 的同步工作台（`crates/rustgrid-app/src/app/sync.rs` + `crates/ru
 - 源/目标各自选连接 + 数据库；
 - 表列表 + 每表状态（New / Same / Structure(n) / n row diff / No Key / Overwrite / Synced）；
 - 检查器三个页签：结构比对、数据比对、SQL 预览；
-- 选项：包含 DELETE、只同步目标已存在的表、隐藏一致表、每表 5000 行比较上限；
+- 选项：包含 DELETE、只同步目标已存在的表、隐藏一致表；数字键表全量流式比较，
+  文本键表保留每表 5000 行比较上限；
 - 运行：逐表比较、逐表应用、日志、取消、结束后重比较。
 
 结构比较 `diff_schema` 已覆盖：
@@ -603,7 +604,7 @@ rustgrid 的同步工作台（`crates/rustgrid-app/src/app/sync.rs` + `crates/ru
 
 | # | 差距 | Navicat 的做法 | rustgrid 原状 | 本次处理 |
 |---|---|---|---|---|
-| 1 | 仅数据模式无法给缺失表建表 | `Create tables` 独立选项，目标不存在时先建表 | `has_changes` 要求 `in_target`，数据模式遇到缺失表直接跳过/报错 | **已修**：同方言下数据模式先 `save_table_schema`，再复制行 |
+| 1 | 仅数据模式是否应给缺失表建表 | `Create tables` 是独立选项，不由数据同步模式隐式决定 | 旧实现让仅数据也建表，模式边界不清 | **已明确**：仅数据只写已存在的表；`全部`/`仅结构`/`全量传输`负责创建缺失表（跨引擎同样如此） |
 | 2 | 无主键表不能增量同步 | 要求选择比较键，或按可用唯一键/整行处理 | 只认 `ColumnInfo.primary_key`，无键就只能全量覆写 | **已修**：`usable_key_columns` 回退到非空唯一键 |
 | 3 | 建表顺序不按外键依赖 | 结构脚本按依赖顺序部署，并可 `Reorder Script` | 按表列表顺序建表，子表先建会因外键失败 | **已修**：`order_plans_for_creation` 按 FK 拓扑排序 |
 | 4 | 生成列被当作普通列写入 | 生成列由目标计算；比较/写入时排除 | `diff_rows` 把所有列纳入，写入生成列会报错 | **已修**：`prune_generated_changes` + `skip_write` 过滤 |
@@ -648,13 +649,17 @@ pub fn usable_key_columns(columns: &[ColumnInfo], schema: Option<&TableSchema>) 
 对应测试：`key_columns_fall_back_to_a_non_null_unique_key`、
 `key_columns_prefer_the_primary_key`。
 
-### 8.2 仅数据模式补建表
+### 8.2 模式边界：仅数据不建表
 
 `sync.rs`：
 
-- `SyncTable::has_changes` 中，数据模式对缺失表返回“有变化”；
-- `run_sync_table` 的数据阶段：同方言且目标缺失时先 `save_table_schema`，再全量复制；
-- SQL 预览在数据模式下也先显示 `CREATE TABLE`，不再提示“先同步结构”。
+- `SyncTable::has_changes` 中，`仅数据` 要求目标表已经存在；缺失表不算数据变化；
+- 缺失表在 `仅数据` 下仍显示“目标不存在”，但不会进入执行计划，运行按钮不会把它算进去；
+- 建表只属于 `全部`、`仅结构`、`全量传输`：结构阶段按目标方言创建，随后数据阶段复制；
+- `run_sync_table` 的数据阶段不再兜底建表；目标表在比较后被删除时直接报“请先同步结构”；
+- SQL 预览在 `仅数据` + 缺失表时提示“不会创建表”，不再显示 `CREATE TABLE`。
+
+对应测试：`data_only_never_plans_a_missing_table`。
 
 ### 8.3 外键拓扑排序
 
@@ -704,7 +709,7 @@ PostgreSQL 16 上通过。
 本次没有增加/删除/重排任何控件，也没有改表列表、检查器页签或状态栏结构；
 所有新行为都在现有四个模式和现有按钮下生效。只调整了两处说明文案，避免与行为矛盾：
 
-- `sync.hetero`：把“结构同步已锁定”改成“缺失表按目标类型创建，已有表仅同步数据”；
+- `sync.hetero`：改成“仅数据只写已存在的表；全部、仅结构、全量传输会按目标引擎类型创建缺失表”；
 - `sync.options.limit`：说明数字键表全量流式比较，文本键表仍受 `%{rows}` 行上限。
 
 ### 8.8 大表流式比较（数字键）
@@ -753,8 +758,9 @@ pub fn map_table_name(name, target: DriverDialect) -> String
 - 目标名：schema-less 目标（MySQL/SQLite）用裸表名，schema-aware 目标
   （PostgreSQL/SQL Server/Oracle）保留限定名；`resolve_target_name` 还能把
   `users` 对到目标实际的 `public.users` / `dbo.users`。
-- 跨引擎只对**缺失表**执行 `CREATE`；已有表不做跨方言 `ALTER`（类型系统无法逐属性比较），
-  只走数据同步/全量覆盖。数据同步比较时也不再报告跨方言的“结构差异”。
+- 跨引擎只对**缺失表**执行 `CREATE`，并且只在 `全部`/`仅结构`/`全量传输` 下发生；
+  `仅数据` 只写已存在的表。已有表不做跨方言 `ALTER`（类型系统无法逐属性比较），
+  只走数据同步/全量覆盖。结构比较时也不再报告跨方言的“结构差异”。
 
 单测覆盖 MySQL→PostgreSQL 的 `bigint/varchar/tinyint/decimal/datetime/blob`、
 identity 到各目标、以及 check/partition/trigger 的清除。
@@ -864,14 +870,17 @@ cargo test -p rustgrid-oracle -- --ignored
   PostgreSQL 16 上单独实测通过。
 - SQL Server：`round_trips_a_live_sql_server` 通过；测试中新增了一条显式 `id=100` 的
   identity 插入，验证 `IDENTITY_INSERT` 包装有效。
-- MySQL：`round_trips_a_live_*` 全部通过；仅
+- MySQL：`round_trips_a_live_*` 全部通过；新增的
+  `live_schema_keeps_an_explicit_empty_string_default` 与
+  `live_table_statuses_report_exact_row_counts` 通过（`DEFAULT ''` 不再与 `DEFAULT NULL`
+  合并，列表行数与 `COUNT(*)` 一致）。仅
   `live_auth_failure_maps_to_authentication` 因 `sqlx` 的 `mysql-rsa` 后端未启用而失败，
   与本次同步改动无关。
 - Oracle：`live_oracle` 的 4 个用例全部通过（连接、浏览、编辑、设计器往返），
   证明 `ALL_TAB_IDENTITY_COLS` 查询与 `GENERATED ALWAYS` DDL 没有破坏既有流程。
 - 核心单测：`rustgrid-core` 25 个通过（含唯一键、生成列、流式键比较、类型映射）。
-- 应用单测：`RustGrid` 162 个通过，2 个忽略；新增的流式/生成列/外键排序/类型映射/
-  目标名解析相关测试均通过。
+- 应用单测：`RustGrid` 163 个通过，2 个忽略；新增的流式/生成列/外键排序/类型映射/
+  目标名解析/仅数据模式边界相关测试均通过。
 - SQLite：本次未跑 live 测试；MySQL→SQLite 的映射 DDL 有单测覆盖。
 - 跨引擎 DDL 单测：MySQL→PostgreSQL / SQL Server / Oracle / SQLite、PostgreSQL→MySQL
   各自的 `CREATE TABLE` 生成均已通过。

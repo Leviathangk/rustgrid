@@ -1775,6 +1775,13 @@ enum DeleteConfirm {
         database_index: usize,
         names: Vec<String>,
     },
+    /// Empty or truncate several selected tables at once.
+    TablesOperation {
+        connection_index: usize,
+        database_index: usize,
+        names: Vec<String>,
+        operation: TableOperation,
+    },
     /// Delete a saved query from the saved-query list.
     SavedQuery { index: usize },
     /// Delete several saved queries at once (the list's multi-selection).
@@ -3499,13 +3506,13 @@ impl AppView {
         true
     }
 
-    /// The SQL editors the app owns in the main window: query editors, their 信息 logs and the
-    /// routine/view SQL 预览 panes.
+    /// The SQL editors the app owns in the main window: the query editors and the routine/view
+    /// SQL 预览 panes. The result 信息 log is excluded because it keeps a fixed 12px font.
     fn open_sql_editors(&self) -> Vec<Entity<ui::SqlEditor>> {
         self.query_editors
             .iter()
             .flatten()
-            .chain(self.query_info_editors.values())
+            // The result/信息 log is deliberately not zoomed; it stays at its fixed 12px.
             .chain(self.preview_editors.values())
             .cloned()
             .collect()
@@ -3539,13 +3546,13 @@ impl AppView {
                 editor.set_display_options(font.clone(), size, line_numbers, word_wrap, window, cx)
             });
         }
-        let plain: Vec<Entity<ui::SqlEditor>> = self
-            .query_info_editors
-            .values()
-            .chain(self.preview_editors.values())
-            .cloned()
-            .collect();
-        for editor in plain {
+        // The result/信息 log is fixed at 12px; only the SQL 预览 panes follow the editor font.
+        for editor in self.query_info_editors.values() {
+            editor.update(cx, |editor, cx| {
+                editor.set_display_options(font.clone(), 12.0, false, word_wrap, window, cx)
+            });
+        }
+        for editor in self.preview_editors.values() {
             editor.update(cx, |editor, cx| {
                 editor.set_display_options(font.clone(), size, false, word_wrap, window, cx)
             });
@@ -4493,7 +4500,7 @@ impl Render for AppView {
         }
 
         if let Some(menu) = self.context_menu.as_ref() {
-            root = root.child(self.render_context_menu(menu, cx));
+            root = root.child(self.render_context_menu(menu, window, cx));
         }
 
         // The connection-tree drag-and-drop drop indicator, drawn in window coordinates so it
