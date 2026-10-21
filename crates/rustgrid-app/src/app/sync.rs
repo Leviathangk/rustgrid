@@ -4403,8 +4403,14 @@ impl AppView {
                     .id(id)
                     .flex()
                     .flex_row()
-                    .items_center()
+                    // A label longer than the popup wraps onto a second line: the check box then
+                    // stays level with the label's first line instead of centring against the
+                    // middle of the block, and the padding keeps a single-line row at the 24px
+                    // control height.
+                    .items_start()
                     .justify_between()
+                    .gap_2()
+                    .py_1()
                     .cursor_pointer()
                     .text_size(px(12.0))
                     .text_color(rgb(theme.text))
@@ -4419,7 +4425,7 @@ impl AppView {
                             cx.notify();
                         });
                     })
-                    .child(div().min_w_0().child(label))
+                    .child(div().min_w(px(0.0)).child(label))
                     .child(ui::checkbox_box(value, theme)),
             );
         }
