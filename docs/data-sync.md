@@ -85,6 +85,10 @@
 所有数据库调用都通过 `Runtime::spawn` 进入 Tokio；gpui 的 executor 不是 Tokio，直接 await
 驱动 future 会 panic（"there is no reactor running"）。
 
+点击 **同步** 会先弹出确认框（列出模式、待同步表数与「源 → 目标」），确认后才开始写入。
+每个成功写入的表在运行结束后会**重新比对**：目标引擎没有接受某处变更（仍有差异）时，
+日志会追加一条 `[未生效]` 提示，而不是只报告成功。
+
 ## 选项
 
 - **包含 DELETE 语句**：关闭后增量同步只做 insert / update。

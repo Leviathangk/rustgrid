@@ -391,6 +391,8 @@ pub(super) struct SyncState {
     pub close_confirm: bool,
     /// The user confirmed the close, so the window's should-close guard may let it go.
     pub close_allowed: bool,
+    /// Waiting for the user to confirm the 同步 action before writing to the target.
+    pub run_confirm: bool,
     /// The saved table selection to re-apply when the comparison installs its table list.
     pub pending_tables: Option<HashSet<String>>,
     /// The table to select again once a comparison installs its table list (the full re-compare).
@@ -495,6 +497,7 @@ impl SyncState {
             hide_same: true,
             close_confirm: false,
             close_allowed: false,
+            run_confirm: false,
             pending_tables: None,
             pending_selected: None,
             generation: 0,
@@ -741,6 +744,24 @@ impl AppView {
         {
             self.sync_refresh(cx);
         }
+    }
+
+    /// The checked tables a run would actually write: unchanged tables are skipped, and
+    /// 只同步目标已存在的表 drops the ones the target does not have.
+    fn planned_sync_tables(&self) -> usize {
+        let cross_engine = !self.sync_same_engine();
+        self.sync
+            .checked_indices()
+            .into_iter()
+            .filter(|index| {
+                self.sync.tables.get(*index).is_some_and(|table| {
+                    if self.sync.existing_only && !table.in_target {
+                        return false;
+                    }
+                    table.has_changes(self.sync.mode, !cross_engine)
+                })
+            })
+            .count()
     }
 
     /// Whether both sides of the transfer are connected, so a comparison can run.
@@ -1144,6 +1165,7 @@ impl AppView {
         self.sync.options_open = false;
         self.sync.close_confirm = false;
         self.sync.close_allowed = false;
+        self.sync.run_confirm = false;
     }
 
     /// Write the window's current scope, mode, options and table selection into `transfers.json`.
@@ -1387,6 +1409,7 @@ impl AppView {
         self.sync.options_open = false;
         self.sync.close_confirm = false;
         self.sync.close_allowed = false;
+        self.sync.run_confirm = false;
         self.sync.config_name_input = None;
         self.sync.needs_refresh = false;
         self.sync_purge_previews();
@@ -1625,6 +1648,8 @@ impl AppView {
         let generation = self.sync.generation;
         let source_database = self.sync.source_database.clone();
         let target_database = self.sync.target_database.clone();
+        let mode = self.sync.mode;
+        let same_engine = self.sync_same_engine();
         let runtime = self.runtime.clone();
         let mut entries: Vec<(usize, String)> = Vec::new();
         for name in names {
@@ -1655,6 +1680,26 @@ impl AppView {
                 let _ = this.update(cx, |app, cx| {
                     if generation == app.sync.generation {
                         app.apply_sync_comparison(index, compared);
+                        // The run counted these as written; if the engine still reports a
+                        // difference the change did not land as intended, so say so instead of
+                        // leaving the log reading as an unqualified success.
+                        let remaining = app.sync.tables.get(index).and_then(|table| {
+                            // 全量传输 always "has changes" (it overwrites again by design).
+                            (mode != SyncMode::Transfer && table.has_changes(mode, same_engine))
+                                .then(|| {
+                                    let count = match mode {
+                                        SyncMode::Schema => table.schema_changes.len(),
+                                        SyncMode::Data => table.data.total(),
+                                        _ => table.schema_changes.len() + table.data.total(),
+                                    };
+                                    (table.name.clone(), count)
+                                })
+                        });
+                        if let Some((name, count)) = remaining {
+                            let message = t!("sync.log.still_differs", name = name, count = count)
+                                .to_string();
+                            app.sync_log(message, cx);
+                        }
                     }
                     cx.notify();
                 });
@@ -1711,8 +1756,20 @@ impl AppView {
 
     // ----- Running -------------------------------------------------------------------------------
 
+    /// 同步 opens the confirmation first; the run only starts from the dialog's 开始同步. A run
+    /// writes to the target — structure DDL, row DML and, in 全量传输, a DROP of the target table —
+    /// so a single click must not be enough.
+    pub(super) fn request_sync_run(&mut self, cx: &mut Context<'_, Self>) {
+        if self.sync.running || self.sync.comparing || self.planned_sync_tables() == 0 {
+            return;
+        }
+        self.sync.run_confirm = true;
+        cx.notify();
+    }
+
     /// Apply the checked tables' plans, sequentially, streaming the log.
     pub(super) fn run_sync(&mut self, cx: &mut Context<'_, Self>) {
+        self.sync.run_confirm = false;
         if self.sync.running {
             return;
         }
@@ -2490,7 +2547,10 @@ impl AppView {
             .track_focus(&self.sync_window_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    if this.sync.close_confirm {
+                    if this.sync.run_confirm {
+                        this.sync.run_confirm = false;
+                        cx.notify();
+                    } else if this.sync.close_confirm {
                         this.sync.close_confirm = false;
                         cx.notify();
                     } else if this.sync.options_open {
@@ -2508,10 +2568,136 @@ impl AppView {
         if self.sync.options_open {
             root = root.child(self.render_sync_options(cx));
         }
+        if self.sync.run_confirm {
+            root = root.child(self.render_sync_run_confirm(cx));
+        }
         if self.sync.close_confirm {
             root = root.child(self.render_sync_close_confirm(cx));
         }
         root.into_any_element()
+    }
+
+    /// The in-window confirmation shown before 同步 writes to the target. It sits over the whole
+    /// workbench like the unsaved-changes panel (the window is its own OS window, so the main
+    /// window's dialog machinery is not involved).
+    fn render_sync_run_confirm(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        let mode = sync_mode_label(self.sync.mode);
+        let tables = self.planned_sync_tables();
+        let source = self.sync_scope_label(true);
+        let target = self.sync_scope_label(false);
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000066))
+            .occlude()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .w(px(470.0))
+                    .p_4()
+                    .rounded(px(8.0))
+                    .bg(rgb(theme.dialog_face))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .shadow(ui::dialog_shadow())
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text))
+                            .child(t!("sync.confirm.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(
+                                t!("sync.confirm.body", mode = mode, tables = tables).to_string(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .px_2()
+                            .py_1p5()
+                            .rounded(px(4.0))
+                            .bg(rgb(theme.header_bg))
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .font_family("Consolas")
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme.text))
+                            .child(
+                                t!("sync.confirm.scope", source = source, target = target)
+                                    .to_string(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(theme.danger))
+                            .child(t!("sync.confirm.warning").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(ui::button(
+                                "sync-run-cancel",
+                                t!("sync.confirm.cancel").to_string(),
+                                ButtonKind::Normal,
+                                theme,
+                                {
+                                    let weak = weak.clone();
+                                    move |_event: &ClickEvent, _window, cx: &mut App| {
+                                        let _ = weak.update(cx, |app, cx| {
+                                            app.sync.run_confirm = false;
+                                            cx.notify();
+                                        });
+                                    }
+                                },
+                            ))
+                            .child(ui::button(
+                                "sync-run-start",
+                                t!("sync.confirm.run").to_string(),
+                                ButtonKind::Default,
+                                theme,
+                                move |_event: &ClickEvent, _window, cx: &mut App| {
+                                    let _ = weak.update(cx, |app, cx| app.run_sync(cx));
+                                },
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// `connection · database` for one side of the current scope, for the confirmation's summary.
+    fn sync_scope_label(&self, source: bool) -> String {
+        let (connection, database) = if source {
+            (self.sync.source_connection, &self.sync.source_database)
+        } else {
+            (self.sync.target_connection, &self.sync.target_database)
+        };
+        let name = connection
+            .and_then(|index| self.connections.get(index))
+            .map(|node| node.profile.name.clone())
+            .unwrap_or_else(|| t!("sync.select_connection").to_string());
+        if database.is_empty() {
+            name
+        } else {
+            format!("{name} · {database}")
+        }
     }
 
     /// The in-window confirmation shown when the window is closed with unsaved configuration
@@ -2735,20 +2921,7 @@ impl AppView {
         let mode = self.sync.mode;
         // The run button counts what a run would actually touch, not every checked row: unchanged
         // tables are skipped, so "Sync (23)" with one changed table was misleading.
-        let planned = self
-            .sync
-            .checked_indices()
-            .into_iter()
-            .filter(|index| {
-                self.sync.tables.get(*index).is_some_and(|table| {
-                    // A run with 只同步目标已存在的表 skips missing tables before planning.
-                    if self.sync.existing_only && !table.in_target {
-                        return false;
-                    }
-                    table.has_changes(mode, !cross_engine)
-                })
-            })
-            .count();
+        let planned = self.planned_sync_tables();
         let running = self.sync.running;
         let ready = self.sync_connections_ready();
 
@@ -2879,7 +3052,7 @@ impl AppView {
                 ButtonKind::Default
             },
             theme,
-            cx.listener(|this, _event, _window, cx| this.run_sync(cx)),
+            cx.listener(|this, _event, _window, cx| this.request_sync_run(cx)),
         );
 
         let target_hint = if self.sync.target_connection.is_none() {
