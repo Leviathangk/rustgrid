@@ -72,6 +72,15 @@ impl SyncMode {
         }
     }
 
+    /// The inspector tab a newly chosen mode opens on.
+    fn default_sub_tab(self) -> SyncSubTab {
+        match self {
+            SyncMode::Schema | SyncMode::All => SyncSubTab::Schema,
+            SyncMode::Data => SyncSubTab::Data,
+            SyncMode::Transfer => SyncSubTab::Sql,
+        }
+    }
+
     fn uses_schema(self) -> bool {
         matches!(self, SyncMode::All | SyncMode::Schema | SyncMode::Transfer)
     }
@@ -162,6 +171,8 @@ pub(super) struct SyncTable {
     pub data: DataDiff,
     /// The comparison is still running.
     pub comparing: bool,
+    /// The comparison was stopped before it finished.
+    pub stopped: bool,
     /// The table was written by this session, so its diff is empty.
     pub synced: bool,
     /// Per-table 全量覆写, offered for a table without a primary key.
@@ -182,6 +193,7 @@ impl SyncTable {
             target_ddl: None,
             data: DataDiff::default(),
             comparing: true,
+            stopped: false,
             synced: false,
             force_transfer: false,
             error: None,
@@ -195,7 +207,7 @@ impl SyncTable {
 
     /// Whether the selected mode would change anything on the target.
     fn has_changes(&self, mode: SyncMode, same_engine: bool) -> bool {
-        if self.error.is_some() || self.comparing {
+        if self.error.is_some() || self.comparing || self.stopped {
             return false;
         }
         let schema = !self.in_target || !self.schema_changes.is_empty();
@@ -213,6 +225,23 @@ impl SyncTable {
         }
     }
 
+    /// Whether the current mode finds nothing to do for this table, so 隐藏一致 can drop its row.
+    /// A table without a primary key is never "identical" for a data mode: its rows were not
+    /// compared at all.
+    fn is_identical(&self, mode: SyncMode, same_engine: bool) -> bool {
+        if self.comparing || self.stopped || self.error.is_some() {
+            return false;
+        }
+        // A definition that could not be read is not proof of equality.
+        if self.source_schema.is_none() || (self.in_target && self.target_schema.is_none()) {
+            return false;
+        }
+        if mode.uses_data() && !self.has_key() {
+            return false;
+        }
+        !self.has_changes(mode, same_engine)
+    }
+
     /// The status pill's `(text, tone)` for the current mode.
     fn status(&self, mode: SyncMode) -> (String, PillTone) {
         if self.error.is_some() {
@@ -220,6 +249,9 @@ impl SyncTable {
         }
         if self.comparing {
             return (t!("sync.status.comparing").to_string(), PillTone::Neutral);
+        }
+        if self.stopped {
+            return (t!("sync.status.stopped").to_string(), PillTone::Neutral);
         }
         if self.synced {
             return (t!("sync.status.synced").to_string(), PillTone::Neutral);
@@ -325,7 +357,8 @@ pub(super) struct SyncState {
     pub log_handle: gpui_kit::base::TextSelectionHandle,
     pub started: Option<Instant>,
     pub elapsed: Option<Duration>,
-    pub list_scroll: ScrollHandle,
+    /// The table list's vertical scrollbar/drag state.
+    pub list_detail: DetailScroll,
     pub inspector_scroll: ScrollHandle,
     pub source_combo: Option<Entity<ComboBox>>,
     pub source_database_combo: Option<Entity<ComboBox>>,
@@ -352,6 +385,12 @@ pub(super) struct SyncState {
     pub config_error: Option<String>,
     /// A scope was chosen while a side was still connecting: compare once both are ready.
     pub needs_refresh: bool,
+    /// Hide the table rows whose comparison found nothing to sync (persisted in `settings.json`).
+    pub hide_same: bool,
+    /// Waiting for the user to confirm closing a window with an unsaved configuration.
+    pub close_confirm: bool,
+    /// The user confirmed the close, so the window's should-close guard may let it go.
+    pub close_allowed: bool,
     /// The saved table selection to re-apply when the comparison installs its table list.
     pub pending_tables: Option<HashSet<String>>,
     /// The table to select again once a comparison installs its table list (the full re-compare).
@@ -434,7 +473,7 @@ impl SyncState {
             log_handle: gpui_kit::base::TextSelectionHandle::new(String::new(), cx),
             started: None,
             elapsed: None,
-            list_scroll: ScrollHandle::new(),
+            list_detail: DetailScroll::default(),
             inspector_scroll: ScrollHandle::new(),
             source_combo: None,
             source_database_combo: None,
@@ -453,6 +492,9 @@ impl SyncState {
             config_saved: false,
             config_error: None,
             needs_refresh: false,
+            hide_same: true,
+            close_confirm: false,
+            close_allowed: false,
             pending_tables: None,
             pending_selected: None,
             generation: 0,
@@ -464,13 +506,27 @@ impl SyncState {
         self.selected.and_then(|index| self.tables.get(index))
     }
 
-    /// The visible table indices after the search filter.
-    fn visible_indices(&self) -> Vec<usize> {
+    /// The table indices the list shows: the search filter plus 隐藏一致. The selected row stays
+    /// visible while it has no difference, so the inspector never points at a hidden row.
+    fn visible_indices(&self, mode: SyncMode, same_engine: bool, hide_same: bool) -> Vec<usize> {
         let needle = self.search.trim().to_lowercase();
         self.tables
             .iter()
             .enumerate()
-            .filter(|(_, table)| needle.is_empty() || table.name.to_lowercase().contains(&needle))
+            .filter(|(index, table)| {
+                if !needle.is_empty() && !table.name.to_lowercase().contains(&needle) {
+                    return false;
+                }
+                if !hide_same {
+                    return true;
+                }
+                // Keep the inspected row: the inspector would otherwise show a table that is not
+                // in the list at all.
+                if self.selected == Some(*index) {
+                    return true;
+                }
+                !table.is_identical(mode, same_engine)
+            })
             .map(|(index, _)| index)
             .collect()
     }
@@ -586,7 +642,13 @@ impl AppView {
             .connections
             .iter()
             .enumerate()
-            .map(|(index, node)| ComboOption::new(index.to_string(), node.profile.name.clone()))
+            .map(|(index, node)| {
+                // A leading engine mark tells the MySQL connection from the PostgreSQL one at a
+                // glance, both in the trigger and in the dropdown.
+                let (icon, color) = self.sync_engine_icon(Some(index));
+                ComboOption::new(index.to_string(), node.profile.name.clone())
+                    .with_icon(icon, color)
+            })
             .collect();
         let source_databases: Vec<ComboOption> = self
             .sync
@@ -635,11 +697,14 @@ impl AppView {
             .unwrap_or_default();
         let placeholder = t!("sync.select_connection").to_string();
         let database_placeholder = t!("database.name").to_string();
+        let (source_icon, source_icon_color) = self.sync_engine_icon(self.sync.source_connection);
+        let (target_icon, target_icon_color) = self.sync_engine_icon(self.sync.target_connection);
         if let Some(combo) = self.sync.source_combo.clone() {
             combo.update(cx, |combo, cx| {
                 combo.set_options(connections.clone(), cx);
                 combo.set_selected(source_connection, cx);
                 combo.set_placeholder(placeholder.clone(), cx);
+                combo.set_icon(source_icon, source_icon_color, cx);
             });
         }
         if let Some(combo) = self.sync.target_combo.clone() {
@@ -647,6 +712,7 @@ impl AppView {
                 combo.set_options(connections, cx);
                 combo.set_selected(target_connection, cx);
                 combo.set_placeholder(placeholder, cx);
+                combo.set_icon(target_icon, target_icon_color, cx);
             });
         }
         if let Some(combo) = self.sync.source_database_combo.clone() {
@@ -763,20 +829,13 @@ impl AppView {
         cx.notify();
     }
 
-    /// Whether both sides use the same engine. Structure sync needs it: the DDL one engine reports
-    /// is not valid on another.
+    /// Whether both sides use the same SQL dialect. Structure sync needs it: the DDL one engine
+    /// reports is not valid on another. MySQL and MariaDB share `DriverDialect::Mysql` and their
+    /// catalog/DDL syntax, so a pair of them is structure-syncable.
     fn sync_same_engine(&self) -> bool {
         match (self.sync.source_connection, self.sync.target_connection) {
             (Some(source), Some(target)) => {
-                let source = self
-                    .connections
-                    .get(source)
-                    .map(|node| &node.profile.driver);
-                let target = self
-                    .connections
-                    .get(target)
-                    .map(|node| &node.profile.driver);
-                source == target
+                self.driver_dialect(source) == self.driver_dialect(target)
             }
             _ => true,
         }
@@ -788,6 +847,27 @@ impl AppView {
             .and_then(|node| self.registry.get(&node.profile.driver))
             .map(|driver| driver.display_name())
             .unwrap_or_default()
+    }
+
+    /// The engine mark to draw for a connection (the driver descriptor's icon and colour). Used by
+    /// the source/target pickers so a connection is recognisable by its database type.
+    fn sync_engine_icon(&self, connection: Option<usize>) -> (&'static str, u32) {
+        let fallback = ("icons/connection.svg", self.theme.icon_connection);
+        let Some(index) = connection else {
+            return fallback;
+        };
+        let Some(node) = self.connections.get(index) else {
+            return fallback;
+        };
+        let Some(driver) = self.registry.get(&node.profile.driver) else {
+            return fallback;
+        };
+        let descriptor = driver.descriptor();
+        let color = match descriptor.icon_style {
+            DriverIconStyle::Brand(color) => color,
+            _ => self.theme.icon_connection,
+        };
+        (descriptor.icon, color)
     }
 
     // ----- Saved transfer configurations ---------------------------------------------------------
@@ -849,7 +929,7 @@ impl AppView {
         }
     }
 
-    fn transfer_key(&self, index: usize) -> Option<String> {
+    pub(super) fn transfer_key(&self, index: usize) -> Option<String> {
         self.transfer_configs
             .get(index)
             .map(|config| format!("transfer:{}", config.name))
@@ -901,10 +981,35 @@ impl AppView {
         cx.notify();
     }
 
+    /// Enter on the Transfer list: open the single selected configuration.
+    fn open_selected_transfer(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(index) = self
+            .transfers_selection
+            .single()
+            .and_then(|key| self.transfer_index_by_key(key))
+        else {
+            return;
+        };
+        self.open_transfer_config(index, cx);
+    }
+
+    /// Ctrl+A on the Transfer list: select every configuration the list currently shows.
+    pub(super) fn select_all_transfers(&mut self, cx: &mut Context<'_, Self>) {
+        let visible = self.visible_transfer_keys();
+        self.transfers_selection.select_all(&visible);
+        cx.notify();
+    }
+
     /// Open the 新建传输 window with a fresh scope. The source starts at the tree's current
     /// database, but the target deliberately starts empty: a transfer must name its destination
     /// rather than silently default to the source or to another open connection.
     pub(super) fn open_new_transfer(&mut self, cx: &mut Context<'_, Self>) {
+        // One transfer window at a time. A window with unsaved edits is only raised; a clean one
+        // switches to the requested configuration (its view observes this state).
+        let already_open = self.raise_sync_window(cx);
+        if already_open && self.sync_config_dirty() {
+            return;
+        }
         let Some(source) = self.default_query_connection(cx) else {
             self.error_dialog = Some(t!("sync.error.not_connected").to_string());
             cx.notify();
@@ -934,7 +1039,7 @@ impl AppView {
         self.sync.source_database = source_database;
         self.sync.target_connection = None;
         self.sync.target_database = String::new();
-        self.reset_sync_run();
+        self.reset_sync_run(cx);
         if !matches!(
             self.connections.get(source).map(|node| &node.status),
             Some(ConnectionStatus::Connected(_))
@@ -956,6 +1061,10 @@ impl AppView {
 
     /// Open a saved configuration in the 传输 window.
     pub(super) fn open_transfer_config(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let already_open = self.raise_sync_window(cx);
+        if already_open && self.sync_config_dirty() {
+            return;
+        }
         let Some(config) = self.transfer_configs.get(index).cloned() else {
             return;
         };
@@ -991,7 +1100,7 @@ impl AppView {
                 self.connect(index, cx);
             }
         }
-        self.reset_sync_run();
+        self.reset_sync_run(cx);
         let weak = cx.weak_entity();
         self.sync.config_name_input = Some(make_transfer_name_input(
             self.theme,
@@ -1012,8 +1121,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// Clear the previous run's progress/log so a freshly opened configuration starts clean.
-    fn reset_sync_run(&mut self) {
+    /// Clear the previous run's progress/log and the previous configuration's view state, so a
+    /// freshly opened configuration starts clean (its tab, data filter and search match it).
+    fn reset_sync_run(&mut self, cx: &mut Context<'_, Self>) {
         self.sync.running = false;
         self.sync.progress = 0.0;
         self.sync.log.clear();
@@ -1024,9 +1134,16 @@ impl AppView {
         self.sync.tables.clear();
         self.sync.selected = None;
         self.sync.pending_selected = None;
+        self.sync.sub_tab = self.sync.mode.default_sub_tab();
+        self.sync.data_filter = SyncDataFilter::All;
+        self.sync.search.clear();
+        let search_input = self.sync.search_input.clone();
+        search_input.update(cx, |input, cx| input.set_text(String::new(), cx));
         self.sync.compared = 0;
         self.sync.compare_total = 0;
         self.sync.options_open = false;
+        self.sync.close_confirm = false;
+        self.sync.close_allowed = false;
     }
 
     /// Write the window's current scope, mode, options and table selection into `transfers.json`.
@@ -1151,9 +1268,13 @@ impl AppView {
             };
             let bounds = Bounds::centered(None, size(px(1120.0), px(720.0)), cx);
             let view_weak = weak.clone();
+            let guard_weak = weak.clone();
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // The two-row toolbar and the two endpoint groups need room; below this the
+                    // action buttons would clip.
+                    window_min_size: Some(size(px(980.0), px(600.0))),
                     titlebar: Some(TitlebarOptions {
                         title: Some(title.clone().into()),
                         appears_transparent: true,
@@ -1166,6 +1287,16 @@ impl AppView {
                     crate::win_resize::install(window);
                     window.activate_window();
                     let view = cx.new(|cx| TransferWindow::new(view_weak.clone(), &app_entity, cx));
+                    // Closing a configuration with unsaved edits asks first (the in-window
+                    // confirmation layers over this window). This also catches the OS close and
+                    // Alt+F4, not just the titlebar ✕.
+                    window.on_window_should_close(cx, move |_window, cx| {
+                        let mut allow = true;
+                        let _ = guard_weak.update(cx, |app, cx| {
+                            allow = app.sync_close_allowed(cx);
+                        });
+                        allow
+                    });
                     let root = cx.new(|cx| gpui_kit::component::Root::new(view, window, cx));
                     window.focus(&focus, cx);
                     root
@@ -1186,6 +1317,108 @@ impl AppView {
                 }
             }
         });
+    }
+
+    /// Bring the open transfer window to the front. Returns whether one was already open.
+    ///
+    /// The 新建/编辑 actions used to reset the transfer state even when the window existed (the
+    /// open then returned early), silently replacing the configuration the user was editing.
+    fn raise_sync_window(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let Some(handle) = self.sync_window.as_ref() else {
+            return false;
+        };
+        if handle
+            .update(cx, |_root, window, cx| {
+                window.activate_window();
+                cx.notify();
+            })
+            .is_err()
+        {
+            // The handle outlived its window (no close notification reached us): forget it so a
+            // new configuration can open a fresh one.
+            self.sync_window = None;
+            return false;
+        }
+        true
+    }
+
+    /// Whether the window's configuration has edits that 保存配置 has not written yet.
+    fn sync_config_dirty(&self) -> bool {
+        // An unnamed new transfer has nothing saveable yet, so closing it does not lose a
+        // configuration; a named one (new or opened) does.
+        !self.sync.config_saved && !self.sync.config_name.trim().is_empty()
+    }
+
+    /// The transfer window's in-app close path (titlebar ✕ / Esc): remove it directly when there
+    /// is nothing to lose, otherwise open the confirmation.
+    fn request_sync_close(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.sync.close_allowed || !self.sync_config_dirty() {
+            window.remove_window();
+            return;
+        }
+        if !self.sync.close_confirm {
+            self.sync.close_confirm = true;
+            cx.notify();
+        }
+    }
+
+    /// The transfer window's close guard. `true` lets the window go; `false` keeps it open and
+    /// shows the in-window confirmation when there are unsaved edits.
+    fn sync_close_allowed(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        if self.sync.close_allowed || !self.sync_config_dirty() {
+            return true;
+        }
+        if !self.sync.close_confirm {
+            self.sync.close_confirm = true;
+            cx.notify();
+        }
+        false
+    }
+
+    /// The transfer window is gone: stop both the run and a comparison that is still walking the
+    /// tables, and drop the preview editors built for it.
+    pub(super) fn sync_window_closed(&mut self, cx: &mut Context<'_, Self>) {
+        self.sync.cancel.store(true, Ordering::Relaxed);
+        self.sync.running = false;
+        // Bumped so the comparison task stops at its next table instead of querying on in the
+        // background after the window is gone.
+        self.sync.generation = self.sync.generation.wrapping_add(1);
+        self.sync.comparing = false;
+        self.sync.options_open = false;
+        self.sync.close_confirm = false;
+        self.sync.close_allowed = false;
+        self.sync.config_name_input = None;
+        self.sync.needs_refresh = false;
+        self.sync_purge_previews();
+        cx.notify();
+    }
+
+    /// Stop the running comparison; rows that were still being compared are marked 已停止.
+    pub(super) fn cancel_sync_compare(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.sync.comparing {
+            return;
+        }
+        self.sync.generation = self.sync.generation.wrapping_add(1);
+        self.sync.comparing = false;
+        self.sync.pending_tables = None;
+        self.sync.pending_selected = None;
+        for table in &mut self.sync.tables {
+            if table.comparing {
+                table.comparing = false;
+                table.stopped = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Drop the cached DDL/SQL preview editors the transfer workbench created. They are keyed per
+    /// table (and mode), so keeping them all would retain two SQL editors for every table the user
+    /// inspected. The current table's editors are rebuilt on the next render.
+    fn sync_purge_previews(&mut self) {
+        self.preview_editors
+            .retain(|key, _| !key.starts_with("sync-"));
+        self.preview_decorations
+            .retain(|key, _| !key.starts_with("sync-"));
     }
 
     // ----- Comparison ----------------------------------------------------------------------------
@@ -1345,6 +1578,7 @@ impl AppView {
         // A fresh comparison supersedes the "written by this session" marker: the target may still
         // differ (an ALTER the engine normalized differently), and the status must say so.
         table.synced = false;
+        table.stopped = false;
         table.source_schema = compared.source_schema;
         table.target_schema = compared.target_schema;
         table.schema_changes = compared.schema_changes;
@@ -1792,9 +2026,20 @@ impl AppView {
                     .min_h(px(0.0))
                     .bg(rgb(theme.editor_bg))
                     .track_focus(&self.sync.transfer_focus)
+                    .key_context(TRANSFER_LIST_CONTEXT)
+                    .on_action(cx.listener(|this, _: &OpenTransferConfig, _window, cx| {
+                        this.open_selected_transfer(cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &DeleteTransferConfig, _window, cx| {
+                        this.confirm_delete_transfer(cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &SelectAllTransfers, _window, cx| {
+                        this.select_all_transfers(cx);
+                    }))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            window.focus(&this.sync.transfer_focus, cx);
                             this.begin_marquee(
                                 MarqueeTarget::Transfers,
                                 event.position,
@@ -1805,10 +2050,14 @@ impl AppView {
                     )
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                            // A right-click on the blank area just clears the highlight; the
-                            // toolbar's 删除 is the only destructive path.
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            // The blank area offers 新建传输; a row's own handler stops propagation
+                            // and opens its menu instead.
                             this.transfers_selection.clear();
+                            this.context_menu = Some(ContextMenu {
+                                target: ContextTarget::TransferList,
+                                position: event.position,
+                            });
                             cx.notify();
                         }),
                     )
@@ -2020,6 +2269,7 @@ impl AppView {
         let mode = sync_mode_label(SyncMode::from_saved(config.mode));
         let click_key = key.clone();
         let open_key = key.clone();
+        let menu_key = key.clone();
         let row = ui::detail_row(
             SharedString::from(format!("transfer-row-{index}")),
             selected,
@@ -2033,6 +2283,18 @@ impl AppView {
                 this.open_transfer_config(index, cx);
             }
         }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.hit_transfer(&menu_key, Modifiers::default(), cx);
+                this.context_menu = Some(ContextMenu {
+                    target: ContextTarget::TransferConfig { index },
+                    position: event.position,
+                });
+                cx.notify();
+            }),
+        )
         .child(
             div()
                 .flex()
@@ -2123,6 +2385,7 @@ impl AppView {
             let name = config.name.clone();
             let click_key = key.clone();
             let open_key = key.clone();
+            let menu_key = key.clone();
             let tile = ui::grid_item_sized(
                 SharedString::from(format!("transfer-tile-{index}")),
                 selected,
@@ -2137,6 +2400,18 @@ impl AppView {
                     this.open_transfer_config(index, cx);
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.hit_transfer(&menu_key, Modifiers::default(), cx);
+                    this.context_menu = Some(ContextMenu {
+                        target: ContextTarget::TransferConfig { index },
+                        position: event.position,
+                    });
+                    cx.notify();
+                }),
+            )
             .child(ui::leading_icon_badge("icons/sync.svg", theme.brand, 16.0))
             .child(
                 div()
@@ -2201,6 +2476,10 @@ impl AppView {
         } else {
             t!("sync.window.edit", name = self.sync.config_name.clone()).to_string()
         };
+        let close_weak = cx.weak_entity();
+        let titlebar = super::backup::titled_window_titlebar(title, theme, move |window, cx| {
+            let _ = close_weak.update(cx, |app, cx| app.request_sync_close(window, cx));
+        });
         let mut root = div()
             .relative()
             .flex()
@@ -2211,21 +2490,137 @@ impl AppView {
             .track_focus(&self.sync_window_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    if this.sync.options_open {
+                    if this.sync.close_confirm {
+                        this.sync.close_confirm = false;
+                        cx.notify();
+                    } else if this.sync.options_open {
                         this.sync.options_open = false;
                         cx.notify();
                     } else {
-                        window.remove_window();
+                        // Opening the unsaved-changes confirmation instead of dropping the edits.
+                        this.request_sync_close(window, cx);
                     }
                 }
             }))
-            .child(super::backup::backup_window_titlebar(title, theme))
+            .child(titlebar)
             .child(self.render_sync_workbench(cx))
             .child(self.render_sync_footer(cx));
         if self.sync.options_open {
             root = root.child(self.render_sync_options(cx));
         }
+        if self.sync.close_confirm {
+            root = root.child(self.render_sync_close_confirm(cx));
+        }
         root.into_any_element()
+    }
+
+    /// The in-window confirmation shown when the window is closed with unsaved configuration
+    /// edits. It layers over the whole workbench (the window is its own OS window, so the main
+    /// window's dialog machinery is not involved).
+    fn render_sync_close_confirm(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let error = self.sync.config_error.clone();
+        let weak = cx.weak_entity();
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000066))
+            .occlude()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .w(px(440.0))
+                    .p_4()
+                    .rounded(px(8.0))
+                    .bg(rgb(theme.dialog_face))
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .shadow(ui::dialog_shadow())
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text))
+                            .child(t!("unsaved.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme.text_muted))
+                            .child(t!("sync.close.body").to_string()),
+                    )
+                    .when_some(error, |panel, error| {
+                        panel.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(theme.danger))
+                                .child(error),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(ui::button(
+                                "sync-close-cancel",
+                                t!("sync.close.cancel").to_string(),
+                                ButtonKind::Normal,
+                                theme,
+                                {
+                                    let weak = weak.clone();
+                                    move |_event: &ClickEvent, _window, cx: &mut App| {
+                                        let _ = weak.update(cx, |app, cx| {
+                                            app.sync.close_confirm = false;
+                                            cx.notify();
+                                        });
+                                    }
+                                },
+                            ))
+                            .child(ui::button(
+                                "sync-close-discard",
+                                t!("sync.close.discard").to_string(),
+                                ButtonKind::Normal,
+                                theme,
+                                {
+                                    let weak = weak.clone();
+                                    move |_event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                        let _ = weak.update(cx, |app, cx| {
+                                            app.sync.close_allowed = true;
+                                            app.sync.close_confirm = false;
+                                            cx.notify();
+                                            window.remove_window();
+                                        });
+                                    }
+                                },
+                            ))
+                            .child(ui::button(
+                                "sync-close-save",
+                                t!("sync.close.save").to_string(),
+                                ButtonKind::Default,
+                                theme,
+                                move |_event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                    let _ = weak.update(cx, |app, cx| {
+                                        app.save_transfer_config(cx);
+                                        if app.sync.config_saved {
+                                            app.sync.close_allowed = true;
+                                            app.sync.close_confirm = false;
+                                            window.remove_window();
+                                        }
+                                        cx.notify();
+                                    });
+                                },
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// The window footer: the configuration name, its save state and 保存配置.
@@ -2337,7 +2732,23 @@ impl AppView {
     fn render_sync_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
         let cross_engine = !self.sync_same_engine();
-        let checked = self.sync.checked_indices().len();
+        let mode = self.sync.mode;
+        // The run button counts what a run would actually touch, not every checked row: unchanged
+        // tables are skipped, so "Sync (23)" with one changed table was misleading.
+        let planned = self
+            .sync
+            .checked_indices()
+            .into_iter()
+            .filter(|index| {
+                self.sync.tables.get(*index).is_some_and(|table| {
+                    // A run with 只同步目标已存在的表 skips missing tables before planning.
+                    if self.sync.existing_only && !table.in_target {
+                        return false;
+                    }
+                    table.has_changes(mode, !cross_engine)
+                })
+            })
+            .count();
         let running = self.sync.running;
         let ready = self.sync_connections_ready();
 
@@ -2395,14 +2806,9 @@ impl AppView {
                             let _ = weak.update(cx, |app, cx| {
                                 if app.sync.mode != mode {
                                     app.sync.config_saved = false;
+                                    app.sync.mode = mode;
+                                    app.sync.sub_tab = mode.default_sub_tab();
                                 }
-                                app.sync.mode = mode;
-                                app.sync.sub_tab = match mode {
-                                    SyncMode::Schema => SyncSubTab::Schema,
-                                    SyncMode::Data => SyncSubTab::Data,
-                                    SyncMode::Transfer => SyncSubTab::Sql,
-                                    SyncMode::All => SyncSubTab::Schema,
-                                };
                                 cx.notify();
                             });
                         })
@@ -2437,16 +2843,37 @@ impl AppView {
             theme,
             cx.listener(|this, _event, _window, cx| this.sync_recompare_all(cx)),
         );
+        // Bring the run log back after its panel was closed; it stays available for the last run.
+        let log_toggle = ui::toolbar_item(
+            "sync-log-toggle",
+            "icons/activity.svg",
+            t!("sync.log.title").to_string(),
+            !self.sync.log.is_empty(),
+            theme,
+            cx.listener(|this, _event, _window, cx| {
+                this.sync.log_open = !this.sync.log_open;
+                cx.notify();
+            }),
+        );
+        let stop_compare = self.sync.comparing.then(|| {
+            ui::button(
+                "sync-stop-compare",
+                t!("sync.stop_compare").to_string(),
+                ButtonKind::Normal,
+                theme,
+                cx.listener(|this, _event, _window, cx| this.cancel_sync_compare(cx)),
+            )
+        });
 
-        let run_label = if self.sync.mode == SyncMode::Transfer {
-            t!("sync.transfer", count = checked).to_string()
+        let run_label = if mode == SyncMode::Transfer {
+            t!("sync.transfer", count = planned).to_string()
         } else {
-            t!("sync.run", count = checked).to_string()
+            t!("sync.run", count = planned).to_string()
         };
         let run = ui::button(
             "sync-run",
             run_label,
-            if checked == 0 || running || self.sync.comparing || !ready {
+            if planned == 0 || running || self.sync.comparing || !ready {
                 ButtonKind::Disabled
             } else {
                 ButtonKind::Default
@@ -2515,7 +2942,9 @@ impl AppView {
                             .items_center()
                             .gap_2()
                             .flex_none()
+                            .child(log_toggle)
                             .child(recompare)
+                            .children(stop_compare)
                             .child(options_button)
                             .child(run),
                     ),
@@ -2626,20 +3055,32 @@ impl AppView {
     /// The table list column.
     fn render_sync_list(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
-        let visible = self.sync.visible_indices();
+        let mode = self.sync.mode;
+        let same_engine = self.sync_same_engine();
+        let visible = self
+            .sync
+            .visible_indices(mode, same_engine, self.sync.hide_same);
         let total = self.sync.tables.len();
         let checked = self.sync.checked_indices().len();
-        let all_checked = total > 0 && checked == total;
+        // 全选 applies to the rows the list actually shows: a search filter and 隐藏一致 both narrow
+        // what the user can see, and selecting invisible rows from this checkbox was surprising.
+        let all_checked = !visible.is_empty()
+            && visible.iter().all(|index| {
+                self.sync
+                    .tables
+                    .get(*index)
+                    .is_some_and(|table| table.checked)
+            });
+        let select_indices = visible.clone();
         let weak = cx.weak_entity();
 
-        let mut list = div()
-            .id("sync-table-list")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .track_scroll(&self.sync.list_scroll);
+        let mut list = ui::DetailList::new(
+            "sync-table-list",
+            &self.sync.list_detail,
+            SYNC_LIST_WIDTH - 14.0,
+            div(),
+        )
+        .header_height(0.0);
         if self.sync.tables.is_empty() {
             list = list.child(
                 div()
@@ -2655,8 +3096,21 @@ impl AppView {
                         t!("sync.no_tables").to_string()
                     }),
             );
+        } else if visible.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_3()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(if self.sync.search.trim().is_empty() {
+                        t!("sync.all_same").to_string()
+                    } else {
+                        t!("sync.no_matches").to_string()
+                    }),
+            );
         }
-        for index in visible {
+        for index in visible.iter().copied() {
             let Some(table) = self.sync.tables.get(index) else {
                 continue;
             };
@@ -2686,6 +3140,10 @@ impl AppView {
                         let _ = row_weak.update(cx, |app, cx| {
                             app.sync.selected = Some(index);
                             app.sync.data_filter = SyncDataFilter::All;
+                            // The data diff's scroll is shared by every table; a new table starts
+                            // at its top instead of inheriting the previous one's offset.
+                            app.sync.inspector_scroll.set_offset(Point::default());
+                            app.sync_purge_previews();
                             cx.notify();
                         });
                     })
@@ -2764,8 +3222,11 @@ impl AppView {
                                     .text_color(rgb(theme.text))
                                     .on_click(move |_event, _window, cx| {
                                         let _ = weak.update(cx, |app, cx| {
-                                            for table in &mut app.sync.tables {
-                                                table.checked = !all_checked;
+                                            for index in &select_indices {
+                                                if let Some(table) = app.sync.tables.get_mut(*index)
+                                                {
+                                                    table.checked = !all_checked;
+                                                }
                                             }
                                             app.sync.config_saved = false;
                                             cx.notify();
@@ -2784,6 +3245,7 @@ impl AppView {
                                     ),
                             ),
                     )
+                    .child(self.render_hide_same_toggle(cx))
                     .when(self.sync.comparing, |column| {
                         column.child(
                             div()
@@ -2800,7 +3262,33 @@ impl AppView {
                         )
                     }),
             )
-            .child(list)
+            .child(list.render(theme))
+    }
+
+    /// The 隐藏一致 switch under the table search: drop every row whose comparison found nothing
+    /// to sync. Persisted in `settings.json`, on by default.
+    fn render_hide_same_toggle(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        div()
+            .id("sync-hide-same")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .text_color(rgb(theme.text))
+            .on_click(move |_event, _window, cx| {
+                let _ = weak.update(cx, |app, cx| {
+                    app.sync.hide_same = !app.sync.hide_same;
+                    app.persist_settings();
+                    cx.notify();
+                });
+            })
+            .child(ui::checkbox_box(self.sync.hide_same, theme))
+            .child(t!("sync.hide_same").to_string())
+            .into_any_element()
     }
 
     /// The inspector: table header, sub-tabs and the active body.
@@ -2840,7 +3328,17 @@ impl AppView {
                 .into_any_element();
         };
         let sub_tab = self.sync.sub_tab;
-        let mut tabs = div().flex().flex_row().items_center().h_full().gap_4();
+        let table_comparing = self
+            .sync
+            .selected_table()
+            .is_some_and(|table| table.comparing);
+        let mut tabs = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h_full()
+            .gap_4()
+            .flex_none();
         for (tab, label, count) in [
             (
                 SyncSubTab::Schema,
@@ -2922,9 +3420,14 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .gap_2()
+                    .flex_1()
                     .min_w(px(0.0))
                     .child(
                         div()
+                            .id("sync-inspector-name")
+                            .min_w(px(0.0))
+                            .truncate()
+                            .tooltip(ui::text_tooltip(name.clone()))
                             .font_family("Consolas")
                             .text_size(px(13.0))
                             .font_weight(FontWeight::SEMIBOLD)
@@ -2936,7 +3439,7 @@ impl AppView {
                         "sync-recompare",
                         "icons/refresh.svg",
                         t!("sync.recompare").to_string(),
-                        !self.sync.comparing,
+                        !self.sync.comparing && !table_comparing,
                         theme,
                         cx.listener(|this, _event, _window, cx| {
                             if let Some(index) = this.sync.selected {
@@ -2992,6 +3495,9 @@ impl AppView {
         };
         if table.comparing {
             return sync_placeholder(t!("common.loading").to_string(), theme);
+        }
+        if table.stopped {
+            return sync_placeholder(t!("sync.compare_stopped").to_string(), theme);
         }
         if let Some(error) = table.error.as_ref() {
             return sync_placeholder(error.clone(), theme);
@@ -3076,6 +3582,7 @@ impl AppView {
                 };
                 summary = summary.child(
                     div()
+                        .truncate()
                         .font_family("Consolas")
                         .text_size(px(11.0))
                         .text_color(rgb(color))
@@ -3145,6 +3652,9 @@ impl AppView {
         };
         if table.comparing {
             return sync_placeholder(t!("common.loading").to_string(), theme);
+        }
+        if table.stopped {
+            return sync_placeholder(t!("sync.compare_stopped").to_string(), theme);
         }
         if let Some(error) = table.error.as_ref() {
             return sync_placeholder(error.clone(), theme);
@@ -3289,9 +3799,13 @@ impl AppView {
             .flex_none()
             .px_3()
             .py_2()
-            .child(pills)
+            .child(div().flex_none().child(pills))
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_align(gpui::TextAlign::Right)
                     .text_size(px(11.0))
                     .text_color(rgb(theme.text_muted))
                     .child(t!("sync.pk_anchor", columns = keys).to_string()),
@@ -4279,17 +4793,24 @@ type MarkedLines = Vec<(String, LineMark)>;
 fn ddl_line_marks(source: &str, target: &str) -> (MarkedLines, MarkedLines) {
     let source_lines: Vec<String> = source.lines().map(str::to_string).collect();
     let target_lines: Vec<String> = target.lines().map(str::to_string).collect();
+    let source_keys: Vec<String> = source_lines
+        .iter()
+        .map(|line| comparable_ddl_line(line))
+        .collect();
+    let target_keys: Vec<String> = target_lines
+        .iter()
+        .map(|line| comparable_ddl_line(line))
+        .collect();
     let mut source_marks = Vec::with_capacity(source_lines.len());
     let mut target_marks = Vec::with_capacity(target_lines.len());
 
     let mut target_counts: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
-    for line in &target_lines {
-        *target_counts.entry(line.trim()).or_default() += 1;
+    for key in &target_keys {
+        *target_counts.entry(key.as_str()).or_default() += 1;
     }
-    for line in &source_lines {
-        let key = line.trim();
-        match target_counts.get_mut(key) {
+    for (line, key) in source_lines.iter().zip(&source_keys) {
+        match target_counts.get_mut(key.as_str()) {
             Some(count) if *count > 0 => {
                 *count -= 1;
                 source_marks.push((line.clone(), LineMark::Same));
@@ -4299,12 +4820,11 @@ fn ddl_line_marks(source: &str, target: &str) -> (MarkedLines, MarkedLines) {
     }
     let mut source_counts: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
-    for line in &source_lines {
-        *source_counts.entry(line.trim()).or_default() += 1;
+    for key in &source_keys {
+        *source_counts.entry(key.as_str()).or_default() += 1;
     }
-    for line in &target_lines {
-        let key = line.trim();
-        match source_counts.get_mut(key) {
+    for (line, key) in target_lines.iter().zip(&target_keys) {
+        match source_counts.get_mut(key.as_str()) {
             Some(count) if *count > 0 => {
                 *count -= 1;
                 target_marks.push((line.clone(), LineMark::Same));
@@ -4313,6 +4833,31 @@ fn ddl_line_marks(source: &str, target: &str) -> (MarkedLines, MarkedLines) {
         }
     }
     (source_marks, target_marks)
+}
+
+/// Normalize one DDL line for the line diff. `AUTO_INCREMENT` is a counter, not a definition (the
+/// structure comparison ignores it), so a differing next id must not keep the options line
+/// highlighted forever.
+fn comparable_ddl_line(line: &str) -> String {
+    const TOKEN: &str = "AUTO_INCREMENT=";
+    let upper = line.to_ascii_uppercase();
+    let mut out = String::with_capacity(line.len());
+    let mut from = 0usize;
+    while let Some(offset) = upper[from..].find(TOKEN) {
+        let start = from + offset;
+        out.push_str(&line[from..start]);
+        let mut end = start + TOKEN.len();
+        while end < line.len() && line.as_bytes()[end].is_ascii_digit() {
+            end += 1;
+        }
+        from = end;
+        // Removing the option leaves the two surrounding spaces; keep one.
+        if out.ends_with(' ') && line[from..].starts_with(' ') {
+            from += 1;
+        }
+    }
+    out.push_str(&line[from..]);
+    out.trim().to_string()
 }
 
 /// The diff highlight of each non-identical DDL line, as byte ranges into `text` (the editor's
@@ -4446,6 +4991,20 @@ mod tests {
         let (source_lines, target_lines) = ddl_line_marks("a\nb", "a\na");
         assert_eq!(source_lines[1].1, LineMark::Add);
         assert_eq!(target_lines[1].1, LineMark::Del);
+    }
+
+    #[test]
+    fn ddl_marks_ignore_the_auto_increment_counter() {
+        let source = ") ENGINE=InnoDB AUTO_INCREMENT=103 DEFAULT CHARSET=utf8mb4;";
+        let target = ") ENGINE=InnoDB AUTO_INCREMENT=108 DEFAULT CHARSET=utf8mb4;";
+        let (source_lines, target_lines) = ddl_line_marks(source, target);
+        assert_eq!(source_lines[0].1, LineMark::Same);
+        assert_eq!(target_lines[0].1, LineMark::Same);
+
+        // A real options difference is still marked.
+        let changed = ") ENGINE=InnoDB AUTO_INCREMENT=103 DEFAULT CHARSET=latin1;";
+        let (source_lines, _) = ddl_line_marks(source, changed);
+        assert_eq!(source_lines[0].1, LineMark::Add);
     }
 
     #[test]

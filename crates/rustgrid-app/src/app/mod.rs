@@ -96,6 +96,13 @@ gpui::actions!(
     ]
 );
 
+// Transfer-configuration list actions: Enter opens the selected configuration, Delete deletes it
+// and Ctrl+A selects every visible row, matching the other main-tab lists.
+gpui::actions!(
+    transferlist,
+    [OpenTransferConfig, DeleteTransferConfig, SelectAllTransfers]
+);
+
 // Query-editor actions. The editor's own undo/redo bindings handle Ctrl+Z; `RunQuery` and
 // `RunSelectedQuery` are the 运行 / 运行已选 pair (their keystrokes come from the settings, Navicat's
 // Ctrl+R / Ctrl+Shift+R by default), and `SaveQuery` from Ctrl+S. `AcceptCompletion` lets Tab
@@ -254,6 +261,9 @@ const BACKUP_LIST_CONTEXT: &str = "BackupList";
 
 /// Key context applied to the saved-query file list.
 const QUERY_LIST_CONTEXT: &str = "QueryList";
+
+/// Key context applied to the Transfer main tab's saved-configuration list.
+const TRANSFER_LIST_CONTEXT: &str = "TransferList";
 
 /// Key context applied to the grid status bar's selectable SQL line, so Ctrl+C / Ctrl+A reach it
 /// instead of the `Root` context's copy/select-all.
@@ -1306,6 +1316,12 @@ enum ContextTarget {
     QueryFile {
         index: usize,
     },
+    /// A saved transfer configuration in the Transfer main tab's list.
+    TransferConfig {
+        index: usize,
+    },
+    /// The blank area of the Transfer main tab's list.
+    TransferList,
     /// The blank area of the Backup main tab's list.
     BackupList,
     /// The blank area of the Queries main tab's list.
@@ -2854,7 +2870,11 @@ impl AppView {
             backup_configs,
             transfer_configs,
             backup_files: Vec::new(),
-            sync: sync::SyncState::new(cx),
+            sync: {
+                let mut sync = sync::SyncState::new(cx);
+                sync.hide_same = settings.sync_hide_same;
+                sync
+            },
             backup_selected: None,
             new_backup_dialog: None,
             restore_dialog: None,
@@ -3379,6 +3399,7 @@ impl AppView {
             grid_field_layouts: self.grid_field_layouts.clone(),
             grid_show_comments: self.grid_show_comments,
             grid_show_types: self.grid_show_types,
+            sync_hide_same: self.sync.hide_same,
             shortcuts: self.shortcuts.clone(),
             preserve_object_search: self.preserve_object_search,
             restore_session: self.restore_session,

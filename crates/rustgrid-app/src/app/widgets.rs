@@ -1076,6 +1076,40 @@ impl AppView {
                         }),
                     ));
             }
+            ContextTarget::TransferConfig { index } => {
+                let index = *index;
+                items = items
+                    .child(self.context_item(
+                        "transfer-ctx-open",
+                        t!("backup.open").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.open_transfer_config(index, cx);
+                        }),
+                    ))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                    .child(self.context_item(
+                        "transfer-ctx-delete",
+                        t!("sync.delete").to_string(),
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            if let Some(key) = this.transfer_key(index) {
+                                this.hit_transfer(&key, Modifiers::default(), cx);
+                            }
+                            this.confirm_delete_transfer(cx);
+                        }),
+                    ));
+            }
+            ContextTarget::TransferList => {
+                items = items.child(self.context_item(
+                    "transferlist-ctx-new",
+                    t!("sync.new").to_string(),
+                    cx.listener(|this, _event, _window, cx| {
+                        this.context_menu = None;
+                        this.open_new_transfer(cx);
+                    }),
+                ));
+            }
             ContextTarget::BackupList => {
                 items = items
                     .child(self.context_item(
