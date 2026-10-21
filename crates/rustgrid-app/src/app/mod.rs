@@ -2142,6 +2142,10 @@ pub struct AppView {
     query_editors: Vec<Option<Entity<ui::SqlEditor>>>,
     /// Read-only SQL preview editors (routine/view ?? tabs), keyed by tab fingerprint.
     preview_editors: std::collections::HashMap<String, Entity<ui::SqlEditor>>,
+    /// The diff highlights last applied to each read-only preview (the transfer window's DDL
+    /// panes), so they are pushed again only when the text or the marks change.
+    preview_decorations:
+        std::collections::HashMap<String, Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>>,
     /// Shared completion catalog, refreshed as the connection tree loads tables and columns.
     completion_catalog: Arc<std::sync::RwLock<sql_completion::CompletionCatalog>>,
     /// The saved-query 详细列表's scroll state (vertical rows, horizontal header + rows) and its
@@ -2910,6 +2914,7 @@ impl AppView {
             grid_focus_pending: false,
             query_editors: Vec::new(),
             preview_editors: std::collections::HashMap::new(),
+            preview_decorations: std::collections::HashMap::new(),
             completion_catalog: Arc::new(std::sync::RwLock::new(
                 sql_completion::CompletionCatalog::default(),
             )),

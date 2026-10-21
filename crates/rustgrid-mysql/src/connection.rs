@@ -878,7 +878,13 @@ impl Connection for MysqlConnection {
 
             let numeric = data_type.eq_ignore_ascii_case("decimal")
                 || data_type.eq_ignore_ascii_case("numeric");
-            let length = if let Some(length) = char_length {
+            // `TEXT`/`BLOB` columns report their byte capacity as `character_maximum_length` (65535
+            // for `text`, 16777215 for `mediumtext`). That is not a definition length: rendering it
+            // back as `text(65535)` makes MySQL pick the smallest type that fits 65535 *characters*,
+            // which under utf8mb4 is `mediumtext` — so the column could never converge after a sync.
+            let length = if type_ignores_length(&data_type) {
+                "0".to_string()
+            } else if let Some(length) = char_length {
                 length.to_string()
             } else if numeric {
                 precision
@@ -1712,6 +1718,25 @@ fn primary_columns(schema: &TableSchema) -> Vec<String> {
         .collect()
 }
 
+/// Whether a column type's `(length)` is part of its definition.
+///
+/// MySQL treats `TEXT(M)`/`BLOB(M)` as "create the smallest type that fits M characters/bytes", so
+/// `text(65535)` under utf8mb4 becomes `mediumtext`. Those types therefore never carry a length:
+/// their catalog bytes (`character_maximum_length`) are not a definition the server accepts back.
+fn type_ignores_length(data_type: &str) -> bool {
+    matches!(
+        data_type.trim().to_ascii_lowercase().as_str(),
+        "tinytext"
+            | "text"
+            | "mediumtext"
+            | "longtext"
+            | "tinyblob"
+            | "blob"
+            | "mediumblob"
+            | "longblob"
+    )
+}
+
 /// Render one column definition for `CREATE`/`ALTER TABLE`.
 fn column_sql(column: &ColumnDef) -> String {
     let mut sql = quote_identifier(&column.name);
@@ -1720,7 +1745,7 @@ fn column_sql(column: &ColumnDef) -> String {
 
     let length = column.length.trim();
     let decimals = column.decimals.trim();
-    if !length.is_empty() && length != "0" {
+    if !length.is_empty() && length != "0" && !type_ignores_length(&column.data_type) {
         sql.push('(');
         sql.push_str(length);
         if !decimals.is_empty() && decimals != "0" {
@@ -2815,6 +2840,29 @@ mod tests {
         assert!(sql.starts_with("CREATE TABLE `db`.`t`"));
         assert!(sql.contains("`id` int NOT NULL"));
         assert!(sql.contains("PRIMARY KEY (`id`)"));
+    }
+
+    #[test]
+    fn renders_no_length_for_text_and_blob_types() {
+        let column = |data_type: &str, length: &str| ColumnDef {
+            name: "c".to_string(),
+            data_type: data_type.to_string(),
+            length: length.to_string(),
+            nullable: true,
+            ..Default::default()
+        };
+        // `text(65535)` makes MySQL choose the smallest type that fits 65535 characters, which is
+        // `mediumtext` under utf8mb4 — the sync could never converge on it.
+        assert_eq!(column_sql(&column("text", "65535")), "`c` text NULL");
+        assert_eq!(
+            column_sql(&column("mediumtext", "16777215")),
+            "`c` mediumtext NULL"
+        );
+        assert_eq!(column_sql(&column("blob", "65535")), "`c` blob NULL");
+        assert_eq!(
+            column_sql(&column("varchar", "255")),
+            "`c` varchar(255) NULL"
+        );
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub use registry::{BuiltinDriverSource, DriverRegistry, DriverSource};
 pub use routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 pub use sync::{
     CellChange, DataDiff, RowChange, RowChangeKind, SchemaChange, SchemaChangeKind,
-    column_type_text, diff_columns, diff_rows, render_change_sql, render_literal,
+    column_type_text, diff_columns, diff_rows, diff_schema, render_change_sql, render_literal,
 };
 pub use user::{
     AccountKind, DefaultObjectType, DefaultPrivilege, DefaultPrivilegeInfo, ObjectGrant,

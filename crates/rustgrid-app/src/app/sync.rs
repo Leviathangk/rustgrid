@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use rustgrid_core::{
     CellValue, ColumnInfo, DataDiff, ObjectKind, PageRequest, RowChange, RowChangeKind,
-    SchemaChange, SchemaChangeKind, SortColumn, TableSchema, TransferMode, diff_columns, diff_rows,
+    SchemaChange, SchemaChangeKind, SortColumn, TableSchema, TransferMode, diff_rows, diff_schema,
     render_change_sql,
 };
 
@@ -354,6 +354,8 @@ pub(super) struct SyncState {
     pub needs_refresh: bool,
     /// The saved table selection to re-apply when the comparison installs its table list.
     pub pending_tables: Option<HashSet<String>>,
+    /// The table to select again once a comparison installs its table list (the full re-compare).
+    pub pending_selected: Option<String>,
     /// Bumped by every new comparison, so a stale background task cannot write into the page.
     pub generation: u64,
 }
@@ -452,6 +454,7 @@ impl SyncState {
             config_error: None,
             needs_refresh: false,
             pending_tables: None,
+            pending_selected: None,
             generation: 0,
         }
     }
@@ -1020,6 +1023,7 @@ impl AppView {
         self.sync.error = None;
         self.sync.tables.clear();
         self.sync.selected = None;
+        self.sync.pending_selected = None;
         self.sync.compared = 0;
         self.sync.compare_total = 0;
         self.sync.options_open = false;
@@ -1236,7 +1240,9 @@ impl AppView {
         let source_database = self.sync.source_database.clone();
         let target_database = self.sync.target_database.clone();
         // A saved configuration carries its table selection; apply it to the list this run builds.
+        // The full re-compare also passes its selection so a refresh keeps the user's choices.
         let pending_tables = self.sync.pending_tables.take();
+        let pending_selected = self.sync.pending_selected.take();
         let runtime = self.runtime.clone();
         cx.notify();
 
@@ -1285,7 +1291,10 @@ impl AppView {
                     })
                     .collect();
                 app.sync.compare_total = total;
-                app.sync.selected = (!names.is_empty()).then_some(0);
+                app.sync.selected = pending_selected
+                    .as_ref()
+                    .and_then(|name| names.iter().position(|candidate| candidate == name))
+                    .or_else(|| (!names.is_empty()).then_some(0));
                 cx.notify();
             });
 
@@ -1333,6 +1342,9 @@ impl AppView {
             return;
         };
         table.comparing = false;
+        // A fresh comparison supersedes the "written by this session" marker: the target may still
+        // differ (an ALTER the engine normalized differently), and the status must say so.
+        table.synced = false;
         table.source_schema = compared.source_schema;
         table.target_schema = compared.target_schema;
         table.schema_changes = compared.schema_changes;
@@ -1340,6 +1352,81 @@ impl AppView {
         table.target_ddl = compared.target_ddl;
         table.data = compared.data;
         table.error = compared.error;
+    }
+
+    /// Re-compare every table (the toolbar's refresh action), keeping the checked set and the
+    /// inspected table so a refresh does not undo the user's selection.
+    pub(super) fn sync_recompare_all(&mut self, cx: &mut Context<'_, Self>) {
+        if self.sync.comparing || self.sync.running {
+            return;
+        }
+        let checked: HashSet<String> = self
+            .sync
+            .checked_indices()
+            .into_iter()
+            .filter_map(|index| self.sync.tables.get(index).map(|table| table.name.clone()))
+            .collect();
+        self.sync.pending_selected = self.sync.selected_table().map(|table| table.name.clone());
+        self.sync.pending_tables = (!self.sync.tables.is_empty()).then_some(checked);
+        self.sync_refresh(cx);
+    }
+
+    /// Re-read the given tables' comparison after a run, so the page reports what the target really
+    /// holds — a table whose ALTER the engine normalized differently is not left looking synced.
+    fn sync_recompare_tables(&mut self, names: Vec<String>, cx: &mut Context<'_, Self>) {
+        if names.is_empty() {
+            return;
+        }
+        let (Some(source_index), Some(target_index)) =
+            (self.sync.source_connection, self.sync.target_connection)
+        else {
+            return;
+        };
+        let (Some(source), Some(target)) = (
+            self.connection_arc(source_index),
+            self.connection_arc(target_index),
+        ) else {
+            return;
+        };
+        let generation = self.sync.generation;
+        let source_database = self.sync.source_database.clone();
+        let target_database = self.sync.target_database.clone();
+        let runtime = self.runtime.clone();
+        let mut entries: Vec<(usize, String)> = Vec::new();
+        for name in names {
+            if let Some(index) = self.sync.tables.iter().position(|table| table.name == name) {
+                if let Some(table) = self.sync.tables.get_mut(index) {
+                    table.comparing = true;
+                }
+                entries.push((index, name));
+            }
+        }
+        if entries.is_empty() {
+            return;
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            for (index, name) in entries {
+                let compared = compare_table(
+                    runtime.clone(),
+                    source.clone(),
+                    source_database.clone(),
+                    target.clone(),
+                    target_database.clone(),
+                    name,
+                    // Every table in this list either already existed or was just created.
+                    true,
+                )
+                .await;
+                let _ = this.update(cx, |app, cx| {
+                    if generation == app.sync.generation {
+                        app.apply_sync_comparison(index, compared);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Re-compare one table (the inspector's refresh action).
@@ -1467,6 +1554,7 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             let mut done = 0usize;
             let mut failures = 0usize;
+            let mut synced_names: Vec<String> = Vec::new();
             for plan in plans {
                 if cancel.load(Ordering::Relaxed) {
                     break;
@@ -1510,6 +1598,7 @@ impl AppView {
                                 table.data = DataDiff::default();
                                 table.force_transfer = false;
                             }
+                            synced_names.push(plan.name.clone());
                             app.sync_log(summary, cx);
                         }
                         Err(error) => {
@@ -1550,6 +1639,11 @@ impl AppView {
                 app.sync.log_line(message);
                 if let Some(index) = app.sync.target_connection {
                     app.load_databases(index, cx);
+                }
+                // Re-read what was written: a table the engine normalized differently (or a data
+                // write that did not land) must not keep the local "Synced ✓" state.
+                if !cancelled {
+                    app.sync_recompare_tables(synced_names, cx);
                 }
                 cx.notify();
             });
@@ -1667,9 +1761,16 @@ impl AppView {
     /// itself stays a list.
     pub(super) fn render_sync(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let empty = self.transfer_configs.is_empty();
-        let body: AnyElement = if empty {
-            self.render_transfer_empty(cx)
+        // With no saved configurations the page stays blank, exactly like the Queries and Backup
+        // tabs: a centred illustration here made the three lists look like different pages. The
+        // toolbar's 新建传输 is the way in.
+        let body: AnyElement = if self.transfer_configs.is_empty() {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .into_any_element()
         } else if self.view_mode(VIEW_PAGE_TRANSFERS) == ViewMode::Detail {
             self.render_transfer_detail(cx)
         } else {
@@ -1810,39 +1911,6 @@ impl AppView {
                             .child(self.sync.transfer_search_input.clone()),
                     ),
             )
-    }
-
-    /// A centred hint shown while no transfer configuration exists.
-    fn render_transfer_empty(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .child(
-                svg()
-                    .path("icons/sync.svg")
-                    .w(px(32.0))
-                    .h(px(32.0))
-                    .text_color(rgb(theme.text_muted)),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text_muted))
-                    .child(t!("sync.config.empty").to_string()),
-            )
-            .child(ui::button(
-                "transfer-empty-new",
-                t!("sync.new").to_string(),
-                ButtonKind::Default,
-                theme,
-                cx.listener(|this, _event, _window, cx| this.open_new_transfer(cx)),
-            ))
-            .into_any_element()
     }
 
     /// The content-fitted widths of the 传输 columns (名称 / 源 / 目标 / 模式).
@@ -2360,6 +2428,15 @@ impl AppView {
                     cx.notify();
                 }),
             ));
+        // Re-run the comparison for every table, not just the inspected one.
+        let recompare = ui::toolbar_item(
+            "sync-recompare-all",
+            "icons/refresh.svg",
+            t!("sync.recompare_all").to_string(),
+            !running && !self.sync.comparing && ready,
+            theme,
+            cx.listener(|this, _event, _window, cx| this.sync_recompare_all(cx)),
+        );
 
         let run_label = if self.sync.mode == SyncMode::Transfer {
             t!("sync.transfer", count = checked).to_string()
@@ -2438,6 +2515,7 @@ impl AppView {
                             .items_center()
                             .gap_2()
                             .flex_none()
+                            .child(recompare)
                             .child(options_button)
                             .child(run),
                     ),
@@ -2903,7 +2981,11 @@ impl AppView {
     }
 
     /// The 结构比对 tab: source and target DDL side by side, changed lines marked.
-    fn render_sync_schema_tab(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
+    ///
+    /// Each side is a read-only `ui::SqlEditor` (the same surface as the SQL 预览 panes): long
+    /// lines wrap instead of being clipped, the body scrolls, and a mouse drag selects text that
+    /// Ctrl+C copies. The changed lines are painted through the editor's decorations.
+    fn render_sync_schema_tab(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let Some(table) = self.sync.selected_table() else {
             return div().into_any_element();
@@ -2914,82 +2996,32 @@ impl AppView {
         if let Some(error) = table.error.as_ref() {
             return sync_placeholder(error.clone(), theme);
         }
+        let exists = table.in_target;
+        let name = table.name.clone();
+        let schema_changes = table.schema_changes.clone();
         let source_ddl = table.source_ddl.clone().unwrap_or_default();
         let target_ddl = table.target_ddl.clone().unwrap_or_default();
         let (source_lines, target_lines) = ddl_line_marks(&source_ddl, &target_ddl);
-        let exists = table.in_target;
-
-        let column = |title: String, engine: String, lines: Vec<(String, LineMark)>| {
-            let mut code = div()
-                .id(SharedString::from(format!("sync-ddl-{title}")))
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_x_scroll()
-                .py_2();
-            if lines.is_empty() {
-                code = code.child(
-                    div()
-                        .px_3()
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child("--"),
-                );
-            }
-            for (line, mark) in lines {
-                let (background, color, strike) = match mark {
-                    LineMark::Same => (None, theme.text, false),
-                    LineMark::Add => (
-                        Some((theme.icon_table << 8) | 0x18),
-                        theme.icon_table,
-                        false,
-                    ),
-                    LineMark::Del => (Some((theme.danger << 8) | 0x18), theme.danger, true),
-                };
-                let mut row = div()
-                    .flex()
-                    .flex_row()
-                    .h(px(19.0))
-                    .px_3()
-                    .whitespace_nowrap()
-                    .font_family("Consolas")
-                    .text_size(px(12.0))
-                    .text_color(rgb(color))
-                    .when_some(background, |style, background| style.bg(rgba(background)));
-                if strike {
-                    row = row.line_through();
-                }
-                code = code.child(row.child(line));
-            }
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .min_h(px(0.0))
-                .overflow_hidden()
-                .border_r_1()
-                .border_color(rgb(theme.border))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .h(px(28.0))
-                        .flex_none()
-                        .px_3()
-                        .bg(rgb(theme.header_bg))
-                        .border_b_1()
-                        .border_color(rgb(theme.border))
-                        .text_size(px(11.0))
-                        .text_color(rgb(theme.text_muted))
-                        .child(title)
-                        .child(engine),
-                )
-                .child(code)
+        let source_decorations = ddl_decorations(&source_ddl, &source_lines, theme);
+        let target_decorations = ddl_decorations(&target_ddl, &target_lines, theme);
+        let source_text = if source_ddl.is_empty() {
+            "--".to_string()
+        } else {
+            source_ddl
         };
+        let target_text = if target_ddl.is_empty() {
+            "--".to_string()
+        } else {
+            target_ddl
+        };
+        let source_engine = self.sync_engine_name(self.sync.source_connection);
+        let target_engine = if exists {
+            self.sync_engine_name(self.sync.target_connection)
+        } else {
+            t!("sync.not_exists").to_string()
+        };
+        let source_title = t!("sync.source_ddl").to_string();
+        let target_title = t!("sync.target_ddl").to_string();
 
         let body = div()
             .flex()
@@ -2998,19 +3030,23 @@ impl AppView {
             .min_h(px(0.0))
             .w_full()
             .overflow_hidden()
-            .child(column(
-                t!("sync.source_ddl").to_string(),
-                self.sync_engine_name(self.sync.source_connection),
-                source_lines,
+            .child(self.sync_ddl_pane(
+                format!("sync-ddl-source-{name}"),
+                source_title,
+                source_engine,
+                source_text,
+                source_decorations,
+                theme,
+                cx,
             ))
-            .child(column(
-                t!("sync.target_ddl").to_string(),
-                if exists {
-                    self.sync_engine_name(self.sync.target_connection)
-                } else {
-                    t!("sync.not_exists").to_string()
-                },
-                target_lines,
+            .child(self.sync_ddl_pane(
+                format!("sync-ddl-target-{name}"),
+                target_title,
+                target_engine,
+                target_text,
+                target_decorations,
+                theme,
+                cx,
             ));
         let mut content = div()
             .flex()
@@ -3019,17 +3055,20 @@ impl AppView {
             .min_h(px(0.0))
             .w_full()
             .overflow_hidden();
-        if !table.schema_changes.is_empty() {
+        if !schema_changes.is_empty() {
             let mut summary = div()
+                .id("sync-schema-changes")
                 .flex()
                 .flex_col()
                 .flex_none()
+                .max_h(px(96.0))
+                .overflow_y_scroll()
                 .gap_0p5()
                 .px_3()
                 .py_2()
                 .border_b_1()
                 .border_color(rgb(theme.border));
-            for change in &table.schema_changes {
+            for change in &schema_changes {
                 let color = match change.kind {
                     SchemaChangeKind::Added => theme.icon_table,
                     SchemaChangeKind::Removed => theme.danger,
@@ -3046,6 +3085,56 @@ impl AppView {
             content = content.child(summary);
         }
         content.child(body).into_any_element()
+    }
+
+    /// One side of the 结构比对 tab: a title bar over a read-only DDL editor.
+    #[allow(clippy::too_many_arguments)]
+    fn sync_ddl_pane(
+        &mut self,
+        key: String,
+        title: String,
+        engine: String,
+        text: String,
+        decorations: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .overflow_hidden()
+            .border_r_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(28.0))
+                    .flex_none()
+                    .px_3()
+                    .bg(rgb(theme.header_bg))
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(title)
+                    .child(engine),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .overflow_hidden()
+                    .child(self.render_sql_preview_marked(&key, &text, decorations, cx)),
+            )
     }
 
     /// The 数据比对 tab: action filters plus the changed rows.
@@ -3698,12 +3787,12 @@ async fn compare_table(
         Vec::new()
     };
     compared.schema_changes = match (&compared.source_schema, &compared.target_schema) {
-        (Some(source_schema), Some(target_schema)) => {
-            diff_columns(&source_schema.columns, &target_schema.columns)
-        }
+        (Some(source_schema), Some(target_schema)) => diff_schema(source_schema, target_schema),
         // A table that does not exist yet is all-new. When the target has the table but its
         // definition could not be read, report nothing rather than calling every column new.
-        (Some(source_schema), None) if !in_target => diff_columns(&source_schema.columns, &[]),
+        (Some(source_schema), None) if !in_target => {
+            diff_schema(source_schema, &TableSchema::default())
+        }
         _ => Vec::new(),
     };
 
@@ -4226,6 +4315,42 @@ fn ddl_line_marks(source: &str, target: &str) -> (MarkedLines, MarkedLines) {
     (source_marks, target_marks)
 }
 
+/// The diff highlight of each non-identical DDL line, as byte ranges into `text` (the editor's
+/// content). The ranges line up with `marks`, which [`ddl_line_marks`] built from the same text.
+fn ddl_decorations(
+    text: &str,
+    marks: &[(String, LineMark)],
+    theme: Theme,
+) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+    let mut decorations = Vec::new();
+    let mut offset = 0usize;
+    for (segment, (_, mark)) in text.split_inclusive('\n').zip(marks.iter()) {
+        let range = offset..offset + segment.len();
+        offset += segment.len();
+        let style = match mark {
+            LineMark::Same => None,
+            LineMark::Add => Some(gpui::HighlightStyle {
+                color: Some(rgb(theme.icon_table).into()),
+                background_color: Some(rgba((theme.icon_table << 8) | 0x18).into()),
+                ..Default::default()
+            }),
+            LineMark::Del => Some(gpui::HighlightStyle {
+                color: Some(rgb(theme.danger).into()),
+                background_color: Some(rgba((theme.danger << 8) | 0x18).into()),
+                strikethrough: Some(gpui::StrikethroughStyle {
+                    thickness: px(1.0),
+                    color: Some(rgb(theme.danger).into()),
+                }),
+                ..Default::default()
+            }),
+        };
+        if let Some(style) = style {
+            decorations.push((range, style));
+        }
+    }
+    decorations
+}
+
 /// A status pill: a tinted rounded label.
 fn sync_pill(text: &str, tone: PillTone, theme: Theme) -> AnyElement {
     let color = tone.color(theme);
@@ -4321,6 +4446,18 @@ mod tests {
         let (source_lines, target_lines) = ddl_line_marks("a\nb", "a\na");
         assert_eq!(source_lines[1].1, LineMark::Add);
         assert_eq!(target_lines[1].1, LineMark::Del);
+    }
+
+    #[test]
+    fn ddl_decorations_cover_the_changed_lines() {
+        let theme = Theme::dark();
+        let (source_lines, target_lines) = ddl_line_marks("a\nb\n", "a\nc\n");
+        let source = ddl_decorations("a\nb\n", &source_lines, theme);
+        assert_eq!(source.len(), 1);
+        assert_eq!(&"a\nb\n"[source[0].0.clone()], "b\n");
+        let target = ddl_decorations("a\nc\n", &target_lines, theme);
+        assert_eq!(target.len(), 1);
+        assert_eq!(&"a\nc\n"[target[0].0.clone()], "c\n");
     }
 
     #[test]
