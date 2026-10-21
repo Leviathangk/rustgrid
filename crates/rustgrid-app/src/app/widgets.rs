@@ -100,30 +100,10 @@ impl AppView {
     pub(super) fn render_context_menu(
         &self,
         menu: &ContextMenu,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        // A menu opened near the right/bottom edge used to be cut off by the window: the popup is
-        // an absolute root child at the pointer's position, with nothing clamping it. Keep a
-        // generous estimate of its height inside the viewport (the table menu is the common case;
-        // menus that need more room still start at the top edge).
-        let viewport = window.viewport_size();
-        let width = px(190.0);
-        let estimated_height = px(420.0);
-        let x = if menu.position.x + width > viewport.width {
-            viewport.width - width
-        } else {
-            menu.position.x
-        };
-        let y = if menu.position.y + estimated_height > viewport.height {
-            viewport.height - estimated_height
-        } else {
-            menu.position.y
-        };
-        let x = if x < px(4.0) { px(4.0) } else { x };
-        let y = if y < px(4.0) { px(4.0) } else { y };
-
         let mut items = div().flex().flex_col().w(px(170.0)).p_0p5();
 
         match &menu.target {
@@ -1365,32 +1345,41 @@ impl AppView {
             }
         }
 
-        ui::popup_panel(theme)
-            .left(x)
-            .top(y)
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                // The 转储 SQL 文件, 管理分组, 颜色 and 导入连接 flyouts overflow past this panel, so
-                // a click on one also reads as "outside" here. Keep the menu alive when the click is
-                // on a flyout (their zones are only populated while they are shown).
-                let on_flyout = [
-                    &this.dump_zone,
-                    &this.move_zone,
-                    &this.color_zone,
-                    &this.import_zone,
-                ]
-                .iter()
-                .any(|zone| zone.borrow().contains(&event.position));
-                if on_flyout {
-                    return;
-                }
-                this.context_menu = None;
-                this.dump_submenu = None;
-                this.move_submenu = None;
-                this.color_submenu = None;
-                this.import_submenu = false;
-                cx.notify();
-            }))
-            .child(items)
+        // The panel places itself from the pointer through `anchored`, which measures the menu
+        // after layout: a menu opened near the bottom edge switches its anchor corner and grows
+        // upward from the click instead of being clamped by a guessed height; the old fixed
+        // estimate pushed a short menu far above the row it belonged to.
+        anchored()
+            .position(menu.position)
+            .anchor(Anchor::TopLeft)
+            .child(
+                ui::popup_panel(theme)
+                    .relative()
+                    .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                        // The 转储 SQL 文件, 管理分组, 颜色 and 导入连接 flyouts overflow past this
+                        // panel, so a click on one also reads as "outside" here. Keep the menu
+                        // alive when the click is on a flyout (their zones are only populated
+                        // while they are shown).
+                        let on_flyout = [
+                            &this.dump_zone,
+                            &this.move_zone,
+                            &this.color_zone,
+                            &this.import_zone,
+                        ]
+                        .iter()
+                        .any(|zone| zone.borrow().contains(&event.position));
+                        if on_flyout {
+                            return;
+                        }
+                        this.context_menu = None;
+                        this.dump_submenu = None;
+                        this.move_submenu = None;
+                        this.color_submenu = None;
+                        this.import_submenu = false;
+                        cx.notify();
+                    }))
+                    .child(items),
+            )
     }
 
     pub(super) fn render_tab_menu(
@@ -1424,14 +1413,18 @@ impl AppView {
                 cx.listener(|this, _event, _window, cx| this.close_all_tabs(cx)),
             ));
 
-        ui::popup_panel(theme)
-            .left(menu.position.x)
-            .top(menu.position.y)
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                this.tab_menu = None;
-                cx.notify();
-            }))
-            .child(items)
+        anchored()
+            .position(menu.position)
+            .anchor(Anchor::TopLeft)
+            .child(
+                ui::popup_panel(theme)
+                    .relative()
+                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                        this.tab_menu = None;
+                        cx.notify();
+                    }))
+                    .child(items),
+            )
     }
 
     /// Wraps a submenu trigger row so its window-space rectangle can be recorded into the

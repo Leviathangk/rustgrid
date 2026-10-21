@@ -7,15 +7,15 @@ use std::time::Duration;
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
-    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight, HighlightStyle,
-    ImageSource, KeyBinding, KeyDownEvent, Keystroke, ListHorizontalSizingBehavior, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Resource,
-    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
+    Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
+    DispatchPhase, Div, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight,
+    HighlightStyle, ImageSource, KeyBinding, KeyDownEvent, Keystroke, ListHorizontalSizingBehavior,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    Resource, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
     StyledText, Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection,
     UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
-    WindowId, WindowOptions, canvas, deferred, div, img, prelude::*, px, relative, rgb, rgba, size,
-    svg, uniform_list,
+    WindowId, WindowOptions, anchored, canvas, deferred, div, img, prelude::*, px, relative, rgb,
+    rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{
     AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,

@@ -456,6 +456,15 @@ touching UI code.
   `absolute` + `.occlude()` + the dialog face/border/shadow, so scrolling inside a popup never
   scrolls the view underneath. Never hand-roll a `div().absolute()` popup; build it on
   `popup_panel`. gpui-kit's own `Combobox`/`Select`/`Popover` already occlude, so they are fine.
+- **A menu that opens at the pointer is positioned by gpui's `anchored`, never by a guessed
+  height.** `render_context_menu` / `render_tab_menu` wrap their `popup_panel` in
+  `anchored().position(pointer).anchor(Anchor::TopLeft)` and leave `left`/`top` to it (the wrapped
+  panel is `.relative()` inside it). `anchored` measures the menu after layout and, when it would
+  overflow, switches its anchor corner — growing up/left from the pointer — falling back to snapping
+  it to the window edge. A fixed height estimate used to clamp a menu opened on the last row far
+  above the click, so the menu floated in the middle of the pane instead of under the row. The
+  flyouts' `left(relative(1.0))` still resolves against the panel (it is the nearest positioned
+  ancestor), so their placement is unaffected.
 - **A hover-opened submenu flyout closes through a two-rectangle zone, not through its trigger
   row's hover alone.** The menu's flyouts (颜色, 管理分组, 转储 SQL 文件, 导入连接) open while the
   pointer is on their row, but a flyout built on `popup_panel` occludes the row behind it, so the
