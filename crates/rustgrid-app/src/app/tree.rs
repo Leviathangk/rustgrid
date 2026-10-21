@@ -50,12 +50,16 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.editing = None;
-        let default_port = self
+        let (default_port, default_username) = self
             .registry
             .get(&driver)
-            .map(|driver| driver.default_port())
-            .unwrap_or(3306);
-        self.show_form(ConnectionForm::for_driver(driver, default_port), window, cx);
+            .map(|driver| (driver.default_port(), driver.default_username()))
+            .unwrap_or((3306, "root"));
+        self.show_form(
+            ConnectionForm::for_driver(driver, default_port, default_username),
+            window,
+            cx,
+        );
     }
 
     pub(super) fn open_edit_form(
@@ -1436,6 +1440,7 @@ impl AppView {
         let state = GridState {
             id,
             connection,
+            dialect: self.driver_dialect(connection_index),
             connection_name,
             connection_id,
             database,

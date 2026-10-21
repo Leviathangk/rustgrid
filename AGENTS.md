@@ -263,7 +263,9 @@ touching UI code.
   under the field it controls. The 常规 page does **not** repeat the engine in a read-only box — the
   window title (`新建/编辑连接 · <engine>`) already names it. The generic ODBC driver is the one that
   keeps the plain form (`home: Odbc`) and declares no TLS/tunnel/advanced pages (it reads none of
-  them).
+  them). The username a fresh form starts with is the engine's own
+  (`Driver::default_username`: `root`, `postgres`, `sa`; empty where there is no conventional
+  account), never one engine's account shown for another.
 - **Per-engine table design.** `DriverDescriptor::table_designer` (`TableDesignerSpec`) is the whole
   designer spec, read from the driver through the registry (`AppView::table_designer`) — never by
   matching on an engine id. `tabs` lists the sub-tabs (`DesignerTab`) in order, `column_options` the
@@ -808,6 +810,15 @@ make more engines cheap later — do not build those features early.
   condition block fills the pane (responsive) up to 700px; the hover-only
   divider on its right edge (so it does not read as a scrollbar) drags a manual width (min 520,
   max 700) and double-clicking it restores auto-fit (`filter_resize_drag`).
+
+- **A key-down listener must never claim a printable keystroke to "use" its character.** On
+  Windows `WM_GPUI_KEYDOWN` runs `TranslateMessage` only while the event propagates, so calling
+  `cx.stop_propagation()` for a letter/digit/symbol suppresses the `WM_CHAR` that would type it.
+  Type-ahead handlers that only move a list's highlight (the connection tree's
+  `sidebar::nav_typeahead`, the object list's `ObjectPane::object_key`) therefore leave the event
+  propagating, and skip working at all while an in-place rename editor is open inside them —
+  `stop_propagation` there silently made the group rename editor untypable in every non-IME input
+  mode. A claimed character is fine only where the handler itself inserts text.
 
 - **An empty grid still shows an empty table.** With no rows to paint, `GridView::render` swaps the
   `uniform_list` for a decorative body (`grid_view.rs::empty_grid_rows`): the gutter plus one bordered

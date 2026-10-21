@@ -261,6 +261,7 @@ impl GridView {
         cx.notify();
 
         let runtime = self.runtime.clone();
+        let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let result = match runtime
                 .spawn(async move {
@@ -279,9 +280,11 @@ impl GridView {
                 Ok(inner) => inner,
                 Err(error) => Err(Error::other(error)),
             };
+            let elapsed = started.elapsed();
 
             let _ = this.update(cx, |grid, cx| {
                 grid.state.loading = false;
+                grid.state.elapsed = Some(elapsed);
                 match result {
                     Ok(page) => {
                         // The widths carry over by column name when the user has dragged column
@@ -377,6 +380,7 @@ impl GridView {
         cx.notify();
 
         let runtime = self.runtime.clone();
+        let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let query_database = (!database.is_empty()).then(|| database.clone());
             let query_connection = connection.clone();
@@ -391,6 +395,7 @@ impl GridView {
                 Ok(inner) => inner,
                 Err(error) => Err(Error::other(error)),
             };
+            let elapsed = started.elapsed();
 
             // `execute_query` only returns result-set metadata, so re-attach the catalog's
             // primary-key/data-type flags. Without them a later edit would use every column as
@@ -416,6 +421,7 @@ impl GridView {
 
             let _ = this.update(cx, |grid, cx| {
                 grid.state.loading = false;
+                grid.state.elapsed = Some(elapsed);
                 match result {
                     Ok(mut query_result) => {
                         if let Some(catalog_columns) = catalog_columns {

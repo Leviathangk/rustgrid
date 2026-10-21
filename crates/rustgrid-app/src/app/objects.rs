@@ -2018,7 +2018,8 @@ impl ObjectPane {
         else {
             return;
         };
-        cx.stop_propagation();
+        // The list only reads the key to move its highlight; claiming it would stop the platform
+        // from delivering the character to the in-place rename editor drawn inside this pane.
         let now = std::time::Instant::now();
         if self
             .typeahead_at

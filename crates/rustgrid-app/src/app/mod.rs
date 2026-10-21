@@ -1513,6 +1513,9 @@ struct TreePane {
     selected_table: Option<(usize, usize, String, bool)>,
     /// The in-place rename editor to draw in the matching row this frame, if it belongs here.
     rename_row: Option<RenameRow>,
+    /// Whether a connection-group rename editor is open somewhere in this tree. Typing then
+    /// belongs to that editor, not to the tree's type-ahead.
+    group_renaming: bool,
     /// Focus target for the tree, so F2 reaches [`AppView::begin_rename_table`].
     focus: FocusHandle,
     theme: Theme,
