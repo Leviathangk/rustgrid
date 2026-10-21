@@ -8,6 +8,62 @@
 use crate::dialect::DriverDialect;
 use crate::model::{CellValue, ColumnDef, ColumnInfo, TableOptions, TableSchema};
 
+/// The columns a row comparison can key on.
+///
+/// A primary key is always preferred. When a table has none, the first unique key whose columns
+/// are all `NOT NULL` is usable: a comparable key must identify exactly one row, and a nullable
+/// unique column does not (most engines allow several `NULL`s). Navicat's data synchronization
+/// likewise requires a key and lets the user pick another one; without a UI for that choice this
+/// falls back to the narrowest usable unique key, then to no key at all.
+pub fn usable_key_columns(columns: &[ColumnInfo], schema: Option<&TableSchema>) -> Vec<String> {
+    let primary: Vec<String> = columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .map(|column| column.name.clone())
+        .collect();
+    if !primary.is_empty() {
+        return primary;
+    }
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<Vec<String>> = schema
+        .indexes
+        .iter()
+        .filter(|index| index.unique && !index.primary)
+        .map(|index| {
+            index
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()
+        })
+        .collect();
+    candidates.extend(schema.unique_keys.iter().map(|key| key.columns.clone()));
+    // Prefer the narrowest key, which keeps the generated WHERE clause and the in-memory map
+    // small; equal-width keys keep the catalog's order.
+    candidates.sort_by_key(Vec::len);
+    for candidate in candidates {
+        if candidate.is_empty() {
+            continue;
+        }
+        let resolved: Option<Vec<String>> = candidate
+            .iter()
+            .map(|name| {
+                columns
+                    .iter()
+                    .find(|column| column.name.eq_ignore_ascii_case(name))
+                    .filter(|column| !column.nullable)
+                    .map(|column| column.name.clone())
+            })
+            .collect();
+        if let Some(resolved) = resolved {
+            return resolved;
+        }
+    }
+    Vec::new()
+}
+
 /// How one column differs between the source and target table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaChangeKind {
@@ -117,6 +173,23 @@ fn column_difference(column: &ColumnDef, other: &ColumnDef, type_text: &str) -> 
         text.push_str(column.generated.trim());
         text.push(')');
     }
+    if !column.identity.trim().is_empty() && !column.identity.eq_ignore_ascii_case(&other.identity)
+    {
+        text.push_str(" GENERATED ");
+        text.push_str(column.identity.trim());
+    }
+    if !column.identity_start.trim().is_empty()
+        && column.identity_start.trim() != other.identity_start.trim()
+    {
+        text.push_str(" START WITH ");
+        text.push_str(column.identity_start.trim());
+    }
+    if !column.identity_increment.trim().is_empty()
+        && column.identity_increment.trim() != other.identity_increment.trim()
+    {
+        text.push_str(" INCREMENT BY ");
+        text.push_str(column.identity_increment.trim());
+    }
     if column.zerofill != other.zerofill && column.zerofill {
         text.push_str(" ZEROFILL");
     }
@@ -158,6 +231,9 @@ pub fn diff_columns(source: &[ColumnDef], target: &[ColumnDef]) -> Vec<SchemaCha
                     || column.default != existing.default
                     || column.generated != existing.generated
                     || column.stored != existing.stored
+                    || column.identity != existing.identity
+                    || column.identity_start != existing.identity_start
+                    || column.identity_increment != existing.identity_increment
                     || column.unsigned != existing.unsigned
                     || column.zerofill != existing.zerofill
                     || column.charset != existing.charset
@@ -440,48 +516,26 @@ pub fn diff_rows(
         match target_by_key.get(&key) {
             None => {
                 diff.inserts += 1;
-                diff.rows.push(RowChange {
-                    kind: RowChangeKind::Insert,
-                    keys: row_keys(source_columns, source_row, key_columns),
-                    values: mapped_values(source_columns, target_columns, source_row),
-                    changes: Vec::new(),
-                });
+                diff.rows.push(insert_row_change(
+                    source_columns,
+                    target_columns,
+                    source_row,
+                    key_columns,
+                ));
             }
             Some(target_index) => {
                 let Some(target_row) = target_rows.get(*target_index) else {
                     continue;
                 };
-                let mut changes = Vec::new();
-                let mut values = Vec::new();
-                for (source_position, column) in source_columns.iter().enumerate() {
-                    let Some(target_position) = find_column(target_columns, &column.name) else {
-                        continue;
-                    };
-                    let before = display_value(target_row.get(target_position));
-                    let after = display_value(source_row.get(source_position));
-                    if before == after {
-                        continue;
-                    }
-                    values.push((
-                        column.name.clone(),
-                        source_row
-                            .get(source_position)
-                            .and_then(|value| value.as_edit_value()),
-                    ));
-                    changes.push(CellChange {
-                        column: column.name.clone(),
-                        before,
-                        after,
-                    });
-                }
-                if !changes.is_empty() {
+                if let Some(change) = update_row_change(
+                    source_columns,
+                    target_columns,
+                    source_row,
+                    target_row,
+                    key_columns,
+                ) {
                     diff.updates += 1;
-                    diff.rows.push(RowChange {
-                        kind: RowChangeKind::Update,
-                        keys: row_keys(source_columns, source_row, key_columns),
-                        values,
-                        changes,
-                    });
+                    diff.rows.push(change);
                 }
             }
         }
@@ -498,14 +552,78 @@ pub fn diff_rows(
             continue;
         }
         diff.deletes += 1;
-        diff.rows.push(RowChange {
-            kind: RowChangeKind::Delete,
-            keys: row_keys(target_columns, target_row, key_columns),
-            values: Vec::new(),
-            changes: Vec::new(),
-        });
+        diff.rows
+            .push(delete_row_change(target_columns, target_row, key_columns));
     }
     diff
+}
+
+/// The change for a source row the target does not have.
+pub fn insert_row_change(
+    source_columns: &[ColumnInfo],
+    target_columns: &[ColumnInfo],
+    source_row: &[CellValue],
+    key_columns: &[String],
+) -> RowChange {
+    RowChange {
+        kind: RowChangeKind::Insert,
+        keys: row_keys(source_columns, source_row, key_columns),
+        values: mapped_values(source_columns, target_columns, source_row),
+        changes: Vec::new(),
+    }
+}
+
+/// The change for a row present on both sides, or `None` when every mapped value matches.
+pub fn update_row_change(
+    source_columns: &[ColumnInfo],
+    target_columns: &[ColumnInfo],
+    source_row: &[CellValue],
+    target_row: &[CellValue],
+    key_columns: &[String],
+) -> Option<RowChange> {
+    let mut changes = Vec::new();
+    let mut values = Vec::new();
+    for (source_position, column) in source_columns.iter().enumerate() {
+        let Some(target_position) = find_column(target_columns, &column.name) else {
+            continue;
+        };
+        let before = display_value(target_row.get(target_position));
+        let after = display_value(source_row.get(source_position));
+        if before == after {
+            continue;
+        }
+        values.push((
+            column.name.clone(),
+            source_row
+                .get(source_position)
+                .and_then(|value| value.as_edit_value()),
+        ));
+        changes.push(CellChange {
+            column: column.name.clone(),
+            before,
+            after,
+        });
+    }
+    (!changes.is_empty()).then(|| RowChange {
+        kind: RowChangeKind::Update,
+        keys: row_keys(source_columns, source_row, key_columns),
+        values,
+        changes,
+    })
+}
+
+/// The change for a target row the source no longer has.
+pub fn delete_row_change(
+    target_columns: &[ColumnInfo],
+    target_row: &[CellValue],
+    key_columns: &[String],
+) -> RowChange {
+    RowChange {
+        kind: RowChangeKind::Delete,
+        keys: row_keys(target_columns, target_row, key_columns),
+        values: Vec::new(),
+        changes: Vec::new(),
+    }
 }
 
 /// Render one row change as a single SQL statement, for the inspector's preview.
@@ -703,6 +821,63 @@ mod tests {
             CellValue::Text(email.to_string()),
             CellValue::Text(role.to_string()),
         ]
+    }
+
+    #[test]
+    fn key_columns_fall_back_to_a_non_null_unique_key() {
+        use crate::model::{IndexColumnDef, IndexDef};
+
+        let mut columns = vec![
+            column("id", "bigint", false),
+            column("email", "varchar(255)", false),
+            column("tenant", "bigint", false),
+        ];
+        for column in &mut columns {
+            column.nullable = false;
+        }
+        let schema = TableSchema {
+            indexes: vec![
+                IndexDef {
+                    name: "idx_email".to_string(),
+                    unique: true,
+                    columns: vec![IndexColumnDef::new("email")],
+                    ..Default::default()
+                },
+                IndexDef {
+                    name: "idx_tenant".to_string(),
+                    unique: true,
+                    columns: vec![IndexColumnDef::new("tenant")],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let keys = usable_key_columns(&columns, Some(&schema));
+        assert_eq!(keys, vec!["email".to_string()]);
+
+        // A nullable unique column cannot identify a row, so it is skipped.
+        let mut nullable = columns.clone();
+        nullable[1].nullable = true;
+        let keys = usable_key_columns(&nullable, Some(&schema));
+        assert_eq!(keys, vec!["tenant".to_string()]);
+    }
+
+    #[test]
+    fn key_columns_prefer_the_primary_key() {
+        let columns = vec![column("id", "bigint", true), column("email", "text", false)];
+        let schema = TableSchema {
+            unique_keys: vec![crate::model::UniqueKeyDef {
+                name: "uq_email".to_string(),
+                columns: vec!["email".to_string()],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            usable_key_columns(&columns, Some(&schema)),
+            vec!["id".to_string()]
+        );
+        // Without a schema there is nothing but the primary key to go on.
+        assert!(usable_key_columns(&[column("email", "text", false)], None).is_empty());
     }
 
     #[test]

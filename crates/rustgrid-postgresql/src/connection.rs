@@ -400,15 +400,18 @@ impl Connection for PostgresConnection {
         let qualified = qualify(&schema, &bare);
         let (where_clause, binds) = filter_clause(&page.filter, &columns);
 
-        let total_rows = self
-            .scalar_i64(
+        let total_rows = if page.skip_total {
+            None
+        } else {
+            self.scalar_i64(
                 database,
                 &format!("SELECT count(*) FROM {qualified}{where_clause}"),
                 &binds,
             )
             .await
             .ok()
-            .map(|value| value.max(0) as u64);
+            .map(|value| value.max(0) as u64)
+        };
 
         // Project every column to text so the binary protocol path (which is taken because the
         // filter is bound) yields readable `numeric`/`uuid`/`json`/array values.
@@ -534,6 +537,9 @@ impl Connection for PostgresConnection {
         let (schema, bare) = self.resolve_object(database, table).await?;
         let qualified = qualify(&schema, &bare);
         let pool = self.pool(Some(database)).await?;
+        let always_identity = self
+            .always_identity_columns(database, &schema, &bare)
+            .await?;
         let mut transaction = pool.begin().await.map_err(map_query_error)?;
 
         for row in rows {
@@ -551,6 +557,14 @@ impl Connection for PostgresConnection {
                 .map(|(column, _)| quote_identifier(column))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // `GENERATED ALWAYS AS IDENTITY` rejects an explicit value unless the insert says
+            // `OVERRIDING SYSTEM VALUE`. The sync keeps the source ids (foreign keys depend on
+            // them), exactly like Navicat's identity-preserving transfer.
+            let overriding = row.values.iter().any(|(column, _)| {
+                always_identity
+                    .iter()
+                    .any(|identity| identity.eq_ignore_ascii_case(column))
+            });
             let mut binds: Vec<Option<String>> = Vec::new();
             let placeholders = row
                 .values
@@ -561,7 +575,13 @@ impl Connection for PostgresConnection {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let sql = format!("INSERT INTO {qualified} ({names}) VALUES ({placeholders})");
+            let sql = if overriding {
+                format!(
+                    "INSERT INTO {qualified} ({names}) OVERRIDING SYSTEM VALUE VALUES ({placeholders})"
+                )
+            } else {
+                format!("INSERT INTO {qualified} ({names}) VALUES ({placeholders})")
+            };
             let mut query = sqlx::query(AssertSqlSafe(sql));
             for bind in &binds {
                 query = query.bind(bind.clone());
@@ -1138,6 +1158,31 @@ impl Connection for PostgresConnection {
 }
 
 impl PostgresConnection {
+    /// The table's identity columns that only accept `DEFAULT` unless an insert declares
+    /// `OVERRIDING SYSTEM VALUE` (`GENERATED ALWAYS AS IDENTITY`).
+    async fn always_identity_columns(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>> {
+        let pool = self.pool(Some(database)).await?;
+        let rows = sqlx::query(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 \
+               AND is_identity = 'YES' AND identity_generation = 'ALWAYS'",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&pool)
+        .await
+        .map_err(map_query_error)?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.try_get::<String, _>(0).ok())
+            .collect())
+    }
+
     /// The database used to run `CREATE`/`DROP DATABASE` for `target`: `postgres` when possible,
     /// then the default database, then `template1`. The target itself is never used.
     fn maintenance_database(&self, target: &str) -> String {

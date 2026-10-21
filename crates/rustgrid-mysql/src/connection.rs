@@ -257,13 +257,16 @@ impl Connection for MysqlConnection {
 
         let (where_clause, binds) = filter_clause(&page.filter);
 
-        let total_rows = self
-            .scalar_u64(
+        let total_rows = if page.skip_total {
+            None
+        } else {
+            self.scalar_u64(
                 format!("SELECT COUNT(*) FROM {qualified}{where_clause}"),
                 &binds,
             )
             .await
-            .ok();
+            .ok()
+        };
 
         let page_sql = format!(
             "SELECT * FROM {qualified}{where_clause}{} LIMIT ? OFFSET ?",
@@ -2977,6 +2980,47 @@ mod tests {
         assert!(sql.starts_with("CREATE TABLE `db`.`t`"));
         assert!(sql.contains("`id` int NOT NULL"));
         assert!(sql.contains("PRIMARY KEY (`id`)"));
+    }
+
+    #[test]
+    fn creates_a_table_mapped_from_postgres() {
+        use rustgrid_core::{DriverDialect, map_schema};
+
+        let source = TableSchema {
+            columns: vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: "bigint".to_string(),
+                    nullable: false,
+                    primary_key: true,
+                    auto_increment: true,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "name".to_string(),
+                    data_type: "varchar".to_string(),
+                    length: "255".to_string(),
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "payload".to_string(),
+                    data_type: "bytea".to_string(),
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: "created".to_string(),
+                    data_type: "timestamptz".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mapped = map_schema(&source, DriverDialect::Postgres, DriverDialect::Mysql);
+        let sql = schema_sql(Engine::MySql, "db", "users", None, &mapped);
+        assert!(sql.contains("`id` bigint NOT NULL AUTO_INCREMENT"), "{sql}");
+        assert!(sql.contains("`name` varchar(255)"), "{sql}");
+        assert!(sql.contains("`payload` longblob"), "{sql}");
+        assert!(sql.contains("`created` timestamp"), "{sql}");
     }
 
     #[test]
