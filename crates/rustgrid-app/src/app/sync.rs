@@ -4405,7 +4405,6 @@ impl AppView {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .h(px(24.0))
                     .cursor_pointer()
                     .text_size(px(12.0))
                     .text_color(rgb(theme.text))
@@ -4420,7 +4419,7 @@ impl AppView {
                             cx.notify();
                         });
                     })
-                    .child(div().child(label))
+                    .child(div().min_w_0().child(label))
                     .child(ui::checkbox_box(value, theme)),
             );
         }
