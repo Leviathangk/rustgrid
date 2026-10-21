@@ -3294,8 +3294,12 @@ impl AppView {
 
     /// Re-translate the search fields' baked-in placeholders after a language change. Most
     /// placeholders resolve through `t!` on every render (or when their transient dialog/window is
-    /// created), but the four shared search boxes are built once with the startup locale, so their
-    /// text has to be pushed explicitly or it stays in the previous language.
+    /// created), but the shared search boxes live in `AppView` (or a long-lived child state) and
+    /// are built once with the locale of that moment, so their text has to be pushed explicitly or
+    /// it stays in the previous language. The Options window's shortcut search and the Sync
+    /// window's table search are in that set even though their windows are re-opened later: the
+    /// entities survive the window (the Options one is even built before the language is applied),
+    /// so a language change has to retranslate them too.
     fn sync_search_placeholders(&mut self, cx: &mut Context<'_, Self>) {
         self.object_search_input.update(cx, |input, cx| {
             input.set_placeholder(t!("object.search").to_string(), cx);
@@ -3306,6 +3310,12 @@ impl AppView {
         self.backup_search_input.update(cx, |input, cx| {
             input.set_placeholder(t!("backup.search").to_string(), cx);
         });
+        self.routine_find_input.update(cx, |input, cx| {
+            input.set_placeholder(t!("routine.find").to_string(), cx);
+        });
+        self.sync.search_input.update(cx, |input, cx| {
+            input.set_placeholder(t!("sync.search").to_string(), cx);
+        });
         self.sync.transfer_search_input.update(cx, |input, cx| {
             input.set_placeholder(t!("sync.config.search").to_string(), cx);
         });
@@ -3314,9 +3324,16 @@ impl AppView {
                 input.set_placeholder(t!("sync.config.name_placeholder").to_string(), cx);
             });
         }
-        self.routine_find_input.update(cx, |input, cx| {
-            input.set_placeholder(t!("routine.find").to_string(), cx);
-        });
+        if let Some(input) = self.options_shortcut_search.clone() {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(t!("keymap.search").to_string(), cx);
+            });
+        }
+        // The grids' 字段筛选 search box is built with each grid, not per popup, so it does not pick
+        // up a locale change by itself either.
+        for grid in &self.grids {
+            grid.update(cx, |grid, cx| grid.sync_search_placeholder(cx));
+        }
     }
 
     /// Show or hide the right-hand object-info pane and remember the choice, so the next launch
