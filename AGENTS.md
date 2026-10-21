@@ -837,6 +837,14 @@ make more engines cheap later — do not build those features early.
   — never from the filler's own height, which would feed back and grow. The filler carries no
   hitboxes, so nothing in it is selectable; a click just focuses the grid.
 
+- **A running fetch is a spinner inside a bar the grid already draws, never a bar of its own.** The
+  old `加载中...` strip was a `flex_none` child of the grid root, so every page load pushed the rows
+  down and back up. `GridView::render_loading_spinner` is now appended to the grid toolbar's far end
+  (`render_grid_toolbar`, right-aligned by a `flex_1` spacer) and, for grids without a toolbar (SQL
+  results), to the status bar's right group next to the page info; a grid with neither (the view
+  designer's preview) floats it over the header's right end with `absolute`. Do not put it back in
+  the flex column — the pane must not reflow for a fetch.
+
 - **Read-only text the user must copy is selectable, but `SelectableText` alone does not copy.**
   `gpui_kit::base::SelectableText` participates in the window's selection — a mouse drag selects —
   but Ctrl+C only reaches it while something inside the run holds focus, because `gpui_base::Root`

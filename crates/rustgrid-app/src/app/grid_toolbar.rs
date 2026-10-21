@@ -1,5 +1,6 @@
 use super::grid::filter_node;
 use super::*;
+use gpui_kit::component::spinner::Spinner;
 
 /// The per-row actions of the filter builder.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,20 @@ fn filter_path_key(path: &[usize]) -> String {
 }
 
 impl GridView {
+    /// The grid's running-fetch indicator: one spinner, dropped into a bar the grid already
+    /// draws — the toolbar when it has one, the status bar otherwise. It is never a row of its
+    /// own, so a fetch starting or ending shifts nothing under the pointer.
+    pub(super) fn render_loading_spinner(&self) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id("grid-loading")
+            .flex_none()
+            .flex()
+            .items_center()
+            .tooltip(ui::text_tooltip(t!("common.loading").to_string()))
+            .child(Spinner::new().color(rgb(theme.text_muted).into()))
+    }
+
     pub(super) fn render_grid_toolbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         div()
@@ -110,6 +125,12 @@ impl GridView {
                         false,
                         cx.listener(|this, _event, _window, cx| this.toggle_field_filter(cx)),
                     ))
+            })
+            // The spinner sits at the toolbar's far end while a fetch runs; the toolbar has a
+            // fixed 28px height, so the table below never moves for it.
+            .when(self.state.loading, |bar| {
+                bar.child(div().flex_1())
+                    .child(self.render_loading_spinner())
             })
     }
 
@@ -1657,6 +1678,10 @@ impl GridView {
                     .items_center()
                     .gap_4()
                     .flex_none()
+                    // Grids without a toolbar (SQL results) report the fetch here instead.
+                    .when(self.state.loading && !self.state.show_toolbar, |right| {
+                        right.child(self.render_loading_spinner())
+                    })
                     .child(info),
             )
     }
