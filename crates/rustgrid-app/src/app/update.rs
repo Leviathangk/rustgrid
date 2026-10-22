@@ -115,15 +115,9 @@ impl UpdateStatus {
     }
 }
 
-/// The repository's English changelog, for an English UI; the Chinese one is [`CHANGELOG_ZH_FILE`].
-const CHANGELOG_EN_FILE: &str = "CHANGELOG.md";
-
-/// The repository's Chinese changelog, for a 简体中文 UI (see `changelog`).
-const CHANGELOG_ZH_FILE: &str = "CHANGELOG_zh.md";
-
 /// Blocking: ask GitHub for the newest release and return its version and notes when it is strictly
 /// newer than the running build. Runs on the tokio blocking pool via `Runtime::spawn_blocking`.
-fn check_latest() -> Result<Option<(String, Option<String>)>, String> {
+fn check_latest(language: LanguageSetting) -> Result<Option<(String, Option<String>)>, String> {
     let updater = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
@@ -135,42 +129,40 @@ fn check_latest() -> Result<Option<(String, Option<String>)>, String> {
     let release = updater
         .is_update_available()
         .map_err(|error| error.to_string())?;
-    // The notes travel with the release (see `release_notes`), so 关于 can show what installing
-    // would bring without a second check.
-    Ok(release.map(|release| (release.version().to_string(), release_notes(&release))))
+    // The notes are read from the repository's changelog for the UI's language (see
+    // `release_notes`), so 关于 can show what installing would bring without a second check.
+    Ok(release.map(|release| {
+        let version = release.version().to_string();
+        let notes = release_notes(&release, language);
+        (version, notes)
+    }))
 }
 
-/// The newer release's notes as 关于 should show them — the release body when the release job wrote
-/// it, and otherwise the version's section read out of the repository's changelogs.
+/// The newer release's notes as 关于 should show them: the release's section out of the repository
+/// changelog for the UI's language, falling back to English when that language has no changelog of
+/// its own (see [`changelog::version_notes`]).
 ///
-/// The running build embeds the changelogs as of *its own* release, so it has no entry for a version
-/// newer than itself; and every release published before the workflow copied the section into the
-/// release body carries only GitHub's auto-generated `**Full Changelog**: …` line — which is not a
-/// changelog. For those the note is fetched (one request per language, and only in that case, so a
-/// release the job documented costs nothing extra), and 关于 then shows what installing would bring
-/// instead of the running version's entry. A failed fetch falls back to the body as it is: a
-/// hand-written release still says something worth reading.
-fn release_notes(release: &self_update::Release) -> Option<String> {
-    // A release with no description at all is no better than one whose description is not a
-    // changelog, so it takes the same route; and with nothing to show the panel stays hidden (see
-    // `options_about_body`) rather than reaching for the version this build already is.
-    let body = release
-        .body()
-        .filter(|body| !body.trim().is_empty())
-        .map(str::to_string);
-    if body.as_deref().is_some_and(changelog::is_release_notes) {
-        return body;
-    }
-    let fetched = match (
-        fetch_repo_file(CHANGELOG_EN_FILE),
-        fetch_repo_file(CHANGELOG_ZH_FILE),
-    ) {
-        (Some(english), Some(chinese)) => {
-            changelog::notes_body(release.version(), &english, &chinese)
-        }
-        _ => None,
-    };
-    fetched.or(body)
+/// The release body itself is not a changelog any more — the release workflow publishes links to
+/// the per-language files (see `.github/workflows/release.yml`), which keeps the body small as
+/// languages are added. A hand-written release body (an older release, or a repository fetch that
+/// failed) is still shown; the workflow's link-only body is not.
+fn release_notes(release: &self_update::Release, language: LanguageSetting) -> Option<String> {
+    release_notes_with(release, language, fetch_repo_file)
+}
+
+/// [`release_notes`] with the file reader injected, so the body fallback can be tested offline.
+fn release_notes_with(
+    release: &self_update::Release,
+    language: LanguageSetting,
+    fetch: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    changelog::version_notes(release.version(), language, fetch).or_else(|| {
+        release
+            .body()
+            .map(str::trim)
+            .filter(|body| !body.is_empty() && !changelog::is_changelog_links(body))
+            .map(str::to_string)
+    })
 }
 
 /// Blocking: a file's text from the repository through GitHub's contents API.
@@ -282,8 +274,9 @@ impl AppView {
         }
         self.update_status = UpdateStatus::Checking;
         let runtime = self.runtime.clone();
+        let language = self.language;
         cx.spawn(async move |this, cx| {
-            let result = runtime.spawn_blocking(check_latest).await;
+            let result = runtime.spawn_blocking(move || check_latest(language)).await;
             let _ = this.update(cx, move |app, cx| {
                 match result {
                     Ok(Ok(Some((version, notes)))) => {
@@ -304,6 +297,40 @@ impl AppView {
                     }
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Re-read an available release's notes in the UI's new language after a language change.
+    ///
+    /// The notes are fetched in the language they are shown in (see [`changelog::version_notes`]),
+    /// so keeping the previous language's text would leave 选项 → 关于 half-translated. Nothing
+    /// happens without an available release, and a failed refetch keeps the old notes rather than
+    /// blanking a panel that was already showing something.
+    pub(super) fn refresh_update_notes(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(version) = self.update_version.clone() else {
+            return;
+        };
+        let language = self.language;
+        let runtime = self.runtime.clone();
+        let fetch_version = version.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched = runtime
+                .spawn_blocking(move || {
+                    changelog::version_notes(&fetch_version, language, fetch_repo_file)
+                })
+                .await;
+            let _ = this.update(cx, move |app, cx| {
+                if app.language != language
+                    || app.update_version.as_deref() != Some(version.as_str())
+                {
+                    return;
+                }
+                if let Ok(Some(notes)) = fetched {
+                    app.update_notes = Some(notes);
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -587,7 +614,7 @@ impl AppView {
     /// [`changelog`]). It never falls back to this build's own entry, which would label the running
     /// version as the update.
     fn changelog_panel(&self, theme: Theme) -> Option<AnyElement> {
-        let notes = changelog::notes(self.language, self.update_notes.as_deref());
+        let notes = changelog::notes(self.update_notes.as_deref());
         if notes.is_empty() {
             return None;
         }
@@ -744,39 +771,46 @@ mod tests {
     }
 
     #[test]
-    fn a_release_the_job_documented_keeps_its_own_notes() {
-        // The release job already built the body out of the changelog (see release.yml), so it must
-        // be what 关于 shows — as published, and without the fallback's two requests.
-        let body = changelog::notes_body(
-            "0.0.11",
-            "## [0.0.11] - 2026-10-15\n\n### Added\n\n- published\n",
-            "## [0.0.11] - 2026-10-15\n\n### 新增\n\n- 已发布\n",
-        )
-        .expect("both languages document 0.0.11");
+    fn a_link_only_release_body_is_not_shown_as_notes() {
+        // The release job now publishes only links to the changelogs (see release.yml); 关于 must
+        // not render them as notes. A hand-written body still says something worth reading when no
+        // changelog documents the version (the injected reader finds nothing here).
+        let links = format!(
+            "{}\n### Changelog\n\n- [English](https://example.com/CHANGELOG.md)\n",
+            changelog::CHANGELOG_LINKS_MARKER
+        );
         assert_eq!(
-            release_notes(&release(&body)).as_deref(),
-            Some(body.as_str())
+            release_notes_with(&release(&links), LanguageSetting::En, |_| None),
+            None
+        );
+
+        let hand_written = "## What's Changed\n\n* fix a thing\n";
+        assert_eq!(
+            release_notes_with(&release(hand_written), LanguageSetting::En, |_| None).as_deref(),
+            Some(hand_written.trim())
         );
     }
 
     #[test]
     #[ignore = "network: fetches the repository's changelogs from the GitHub API"]
-    fn a_release_without_its_own_notes_is_documented_from_the_repository() {
-        // The reported bug: a release published before the workflow copied the changelog into its
-        // body carries only GitHub's auto-generated `**Full Changelog**: …` line, so 关于 showed
-        // that — or the running version's entry — instead of what installing would bring. The
-        // repository's changelog documents the version, so the fallback must supply it in both
-        // languages. The body below is verbatim what the v0.0.11 release carries.
-        let notes = release_notes(&release(
+    fn a_release_reads_its_notes_from_the_repository_changelog() {
+        // Every release reads the version's section from the changelog in the UI language, English
+        // standing in where a language has no translated file yet — regardless of what the release
+        // body says. 0.0.11 predates the link-only bodies and carries only GitHub's auto-generated
+        // line.
+        let release = release(
             "**Full Changelog**: https://github.com/yisier/rustgrid/compare/v0.0.10...v0.0.11",
-        ))
-        .expect("the repository changelogs document 0.0.11");
-        for language in [LanguageSetting::En, LanguageSetting::ZhCn] {
-            let section = changelog::release_body_section(&notes, language)
-                .unwrap_or_else(|| panic!("{language:?}: the notes carry a section per language"));
+        );
+        for language in [
+            LanguageSetting::En,
+            LanguageSetting::ZhCn,
+            LanguageSetting::Ru,
+        ] {
+            let notes = release_notes(&release, language)
+                .unwrap_or_else(|| panic!("{language:?}: the repository documents 0.0.11"));
             assert!(
-                section.starts_with("## [0.0.11]"),
-                "{language:?}: 关于 must show 0.0.11's entry, got {section}"
+                notes.starts_with("## [0.0.11]"),
+                "{language:?}: 关于 must show 0.0.11's entry, got {notes}"
             );
         }
     }

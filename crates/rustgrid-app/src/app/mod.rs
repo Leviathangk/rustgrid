@@ -3294,6 +3294,9 @@ impl AppView {
         }
         self.language = language;
         rust_i18n::set_locale(language.locale());
+        // The newer release's notes are fetched in the UI language (see `changelog`), so an
+        // available release's notes have to be re-read in the new one.
+        self.refresh_update_notes(cx);
         self.sync_search_placeholders(cx);
         self.persist_settings();
         self.notify_object_pane(cx);

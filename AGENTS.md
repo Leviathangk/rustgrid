@@ -224,17 +224,17 @@ not a later refactor.
   paste a Chinese label into the English file (or an English label into the Chinese one) just because
   that is what the UI, an issue or a commit message called it; a test
   (`crates/rustgrid-app/src/app/changelog.rs`) fails on CJK anywhere else in `CHANGELOG.md`. Those two
-  files are the single source of the version's own notes: the release job publishes the matching
-  sections as the GitHub release notes (split by the `<!-- rustgrid:en -->` / `<!-- rustgrid:zh -->`
-  markers) and fails when either is missing, alongside its tag-vs-`Cargo.toml` check; 选项 → 关于
-  shows the newer release's section — never this build's own — while a check has found one, in the
-  UI's own language, and leaves the 更新日志 section off the page entirely while this build is the
-  newest release (`crates/rustgrid-app/src/app/changelog.rs`). A release tagged before the job
-  copied its section into the body carries only GitHub's auto-generated `**Full Changelog**: …`
-  line, so the check reads that version's section out of the repository's own changelogs instead and
-  rebuilds the marked body (`update.rs::fetch_repo_file` → `changelog::notes_body`). A version bump
-  with no changelog entry therefore fails the app's own test (`changelog.rs`) as well as the release
-  job — write the entry with the bump, never after it.
+  files are the single source of the version's own notes: the release job publishes a link-only body
+  pointing at them (`CHANGELOG.md`, `CHANGELOG_zh.md`, plus any other `CHANGELOG_<lang>.md`) and fails
+  when either must-have file lacks the section, alongside its tag-vs-`Cargo.toml` check. 选项 → 关于
+  fetches the newer release's section — never this build's own — from the changelog for the UI
+  language (`changelog_file`), falls back to English when that language has no file or its translation
+  lags, and leaves the 更新日志 section off the page entirely while this build is the newest release
+  (`crates/rustgrid-app/src/app/changelog.rs`). The release body is never the notes; the app only
+  reads it as a fallback for a hand-written release, and the workflow's link-only body is ignored
+  (`update.rs::release_notes` → `changelog::version_notes`). A version bump with no changelog entry
+  therefore fails the app's own test (`changelog.rs`) as well as the release job — write the entry
+  with the bump, never after it.
 
 ## Extensibility requirements (design for these from the start)
 
