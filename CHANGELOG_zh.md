@@ -6,11 +6,29 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.1.1] - 2026-10-22
 
 ### 新增
 
-- 新增俄语界面（Русский）。
+- 新增俄语界面及其更新日志（[#22](https://github.com/yisier/rustgrid/pull/22)）。
+- 选项 → 常规：新增「单击模式」，连接、数据库、表等对象单击即可打开
+  （[#14](https://github.com/yisier/rustgrid/issues/14)）。
+- 选项 → 关于 按界面语言显示新版本的更新日志。
+
+### 变更
+
+- 所有窗口统一使用同一套标题栏，窗口按钮交给系统绘制
+  （[#21](https://github.com/yisier/rustgrid/issues/21)）。
+
+### 修复
+
+- MySQL 5.7 等没有 `GENERATION_EXPRESSION` 的服务器：表设计器与结构同步不再报 1054 错误
+  （[#20](https://github.com/yisier/rustgrid/issues/20)）。
+- 点击 表 / 视图 分类时，对象列表不再跳动或重新布局
+  （[#23](https://github.com/yisier/rustgrid/issues/23)）。
+- 俄语等较长的标签不再挤掉同步页的运行按钮。
+- 中文连接树的分类名称不再回退成英文。
+- 关闭有未保存改动的窗口时总会确认，包括 Alt+F4。
 
 ## [0.1.0] - 2026-10-21
 

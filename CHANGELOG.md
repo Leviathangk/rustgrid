@@ -10,11 +10,30 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
-## [Unreleased]
+## [0.1.1] - 2026-10-22
 
 ### Added
 
-- Russian interface language (Русский).
+- The Russian interface, with its own changelog
+  ([#22](https://github.com/yisier/rustgrid/pull/22)).
+- Options → General: "Single-click mode" opens connections, databases and tables with one click
+  ([#14](https://github.com/yisier/rustgrid/issues/14)).
+- Options → About reads a new version's notes in the interface language.
+
+### Changed
+
+- Every window uses the same title bar with the platform's own window buttons
+  ([#21](https://github.com/yisier/rustgrid/issues/21)).
+
+### Fixed
+
+- MySQL 5.7 and other servers without `GENERATION_EXPRESSION` no longer break the table designer and
+  structure sync with error 1054 ([#20](https://github.com/yisier/rustgrid/issues/20)).
+- Clicking the Tables or Views category no longer makes the object list jump and re-lay-out
+  ([#23](https://github.com/yisier/rustgrid/issues/23)).
+- Long Russian labels no longer clip the sync controls.
+- The Chinese connection tree shows its category names in Chinese again instead of English.
+- Closing a window with unsaved work always asks first, including Alt+F4.
 
 ## [0.1.0] - 2026-10-21
 
