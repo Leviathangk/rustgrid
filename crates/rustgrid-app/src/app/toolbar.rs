@@ -29,94 +29,44 @@ impl AppView {
     pub(super) fn render_titlebar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let anchor = self.theme_menu_anchor.clone();
-
-        div()
+        let actions = div()
             .flex()
             .flex_row()
             .items_center()
-            .w_full()
-            .h(px(32.0))
-            .flex_none()
-            .bg(rgb(theme.titlebar_bg))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .id("titlebar-drag")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .flex_1()
-                    .h_full()
-                    // The leading inset is platform-aware: on macOS the native window buttons sit
-                    // over this corner of the content view (see `titlebar_leading_padding`).
-                    .pr_3()
-                    .pl(px(ui::titlebar_leading_padding(12.0)))
-                    .text_size(px(12.5))
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(
-                        img(ImageSource::Resource(Resource::Embedded("logo.png".into())))
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex_none(),
-                    )
-                    .child(t!("app.title").to_string()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .h_full()
-                    // The theme button is this row's first child; remember its bounds so the
-                    // dropdown can be anchored under its right edge.
-                    .on_children_prepainted(move |bounds, _window, _cx| {
-                        if let Some(bounds) = bounds.first() {
-                            *anchor.borrow_mut() = Point::new(bounds.left(), bounds.bottom());
-                        }
-                    })
-                    .child(self.titlebar_theme_button(theme, cx))
-                    .child(titlebar_icon_button(
-                        "titlebar-github",
-                        "icons/github.svg",
-                        theme,
-                        |_event, _window, _cx| open_in_browser(GITHUB_URL),
-                    ))
-                    .child(self.titlebar_update_button(theme, cx))
-                    .child(titlebar_icon_button(
-                        "titlebar-settings",
-                        "icons/gear.svg",
-                        theme,
-                        cx.listener(|this, _event, _window, cx| this.open_options(cx)),
-                    ))
-                    .child(titlebar_button(
-                        "titlebar-min",
-                        "—",
-                        theme,
-                        |window, _cx| {
-                            window.minimize_window();
-                        },
-                    ))
-                    .child(titlebar_button(
-                        "titlebar-max",
-                        "□",
-                        theme,
-                        |window, _cx| {
-                            toggle_maximize(window);
-                        },
-                    ))
-                    .child(titlebar_button("titlebar-close", "✕", theme, {
-                        let weak = cx.weak_entity();
-                        move |window, cx| {
-                            if let Some(app) = weak.upgrade() {
-                                app.update(cx, |app, cx| app.request_quit(window, cx));
-                            } else {
-                                window.remove_window();
-                            }
-                        }
-                    })),
-            )
+            .h_full()
+            // The theme button is this row's first child; remember its bounds so the dropdown
+            // can be anchored under its right edge.
+            .on_children_prepainted(move |bounds, _window, _cx| {
+                if let Some(bounds) = bounds.first() {
+                    *anchor.borrow_mut() = Point::new(bounds.left(), bounds.bottom());
+                }
+            })
+            .child(self.titlebar_theme_button(theme, cx))
+            .child(titlebar_icon_button(
+                "titlebar-github",
+                "icons/github.svg",
+                theme,
+                |_event, _window, _cx| open_in_browser(GITHUB_URL),
+            ))
+            .child(self.titlebar_update_button(theme, cx))
+            .child(titlebar_icon_button(
+                "titlebar-settings",
+                "icons/gear.svg",
+                theme,
+                cx.listener(|this, _event, _window, cx| this.open_options(cx)),
+            ));
+        let weak = cx.weak_entity();
+
+        ui::title_bar(theme)
+            .child(ui::bar_title(t!("app.title").to_string(), theme))
+            .child(ui::action_cluster(actions))
+            .on_close_window(move |_event, window, cx| {
+                if let Some(app) = weak.upgrade() {
+                    app.update(cx, |app, cx| app.request_quit(window, cx));
+                } else {
+                    window.remove_window();
+                }
+            })
     }
 
     /// The titlebar theme button; its icon mirrors the current setting (monitor / sun / moon).

@@ -234,12 +234,7 @@ impl AppView {
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(title.clone().into()),
-                        appears_transparent: true,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                    ..ui::window_options(title)
                 },
                 move |window, cx| {
                     #[cfg(target_os = "windows")]
@@ -505,9 +500,10 @@ impl AppView {
                     this.close_options(window, cx);
                 }
             }))
-            .child(export::child_window_titlebar(
+            .child(ui::window_title_bar(
                 t!("options.title").to_string(),
                 theme,
+                None,
             ))
             .child(
                 div()

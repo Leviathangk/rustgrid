@@ -1,8 +1,8 @@
 //! The New/Edit Connection window (新建连接 / 编辑连接).
 //!
-//! A separate OS window styled like the reference design: a slim header with a status dot, a
-//! minimal tab bar with an underline, one-column pages with labels above large inputs, and a
-//! footer with 重置 / 测试连接 / 保存并连接.
+//! A separate OS window styled like the reference design: the shared title bar, a minimal tab bar
+//! with an underline, one-column pages with labels above large inputs, and a footer with 重置 /
+//! 测试连接 / 保存并连接.
 
 use std::rc::Rc;
 
@@ -115,12 +115,7 @@ impl AppView {
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(title.clone().into()),
-                        appears_transparent: true,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                    ..ui::window_options(title)
                 },
                 move |window, cx| {
                     #[cfg(target_os = "windows")]
@@ -225,7 +220,7 @@ impl AppView {
                     this.cancel_connection_form(window, cx);
                 }
             }))
-            .child(self.form_header())
+            .child(self.form_titlebar())
             .child(self.form_tab_strip(cx))
             .child(self.form_error_banner(cx))
             .child(
@@ -281,15 +276,14 @@ impl AppView {
         }
     }
 
-    /// The slim header: a status dot, the title, and the window controls.
-    fn form_header(&self) -> impl IntoElement {
-        let theme = self.theme;
+    /// The window titlebar: the shared app chrome with the form's dynamic heading.
+    fn form_titlebar(&self) -> impl IntoElement {
         let action = if self.editing.is_some() {
             t!("form.window.edit")
         } else {
             t!("form.window.new")
         };
-        // The engine is part of the header title so the window reads `New Connection · SQL Server`
+        // The engine is part of the title so the window reads `New Connection · SQL Server`
         // rather than hard-coding MySQL.
         let title = match self
             .form
@@ -300,69 +294,7 @@ impl AppView {
             None => action.to_string(),
         };
 
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .h(px(48.0))
-            .flex_none()
-            .pr_4()
-            .bg(rgb(theme.dialog_bg))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .id("form-titlebar-drag")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .flex_1()
-                    .h_full()
-                    // Platform-aware leading inset: macOS draws its window buttons over this corner
-                    // (see `ui::titlebar_leading_padding`).
-                    .pl(px(ui::titlebar_leading_padding(16.0)))
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(
-                        div()
-                            .w(px(9.0))
-                            .h(px(9.0))
-                            .flex_none()
-                            .rounded(px(5.0))
-                            .bg(rgb(0x22c55e)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(15.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(title),
-                    ),
-            )
-            .child(titlebar_button(
-                "form-titlebar-min",
-                "—",
-                theme,
-                |window, _cx| {
-                    window.minimize_window();
-                },
-            ))
-            .child(titlebar_button(
-                "form-titlebar-max",
-                "□",
-                theme,
-                |window, _cx| {
-                    toggle_maximize(window);
-                },
-            ))
-            .child(titlebar_button(
-                "form-titlebar-close",
-                "✕",
-                theme,
-                |window, _cx| {
-                    window.remove_window();
-                },
-            ))
+        ui::title_bar(self.theme).child(ui::bar_title(title, self.theme))
     }
 
     /// The tab bar with a black underline on the active tab. The tabs come from the driver's spec

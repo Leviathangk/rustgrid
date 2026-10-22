@@ -1341,12 +1341,7 @@ impl AppView {
                     // The two-row toolbar and the two endpoint groups need room; below this the
                     // action buttons would clip.
                     window_min_size: Some(size(px(980.0), px(600.0))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(title.clone().into()),
-                        appears_transparent: true,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                    ..ui::window_options(title)
                 },
                 move |window, cx| {
                     #[cfg(target_os = "windows")]
@@ -2654,9 +2649,15 @@ impl AppView {
             t!("sync.window.edit", name = self.sync.config_name.clone()).to_string()
         };
         let close_weak = cx.weak_entity();
-        let titlebar = super::backup::titled_window_titlebar(title, theme, move |window, cx| {
-            let _ = close_weak.update(cx, |app, cx| app.request_sync_close(window, cx));
-        });
+        let titlebar = ui::window_title_bar(
+            title,
+            theme,
+            Some(Rc::new(
+                move |_event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = close_weak.update(cx, |app, cx| app.request_sync_close(window, cx));
+                },
+            )),
+        );
         let mut root = div()
             .relative()
             .flex()

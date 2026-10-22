@@ -349,14 +349,23 @@ impl AppView {
             .any(|tab| tab.connection_index == Some(index) && tab.is_dirty())
     }
 
-    /// Ask before closing the main window when there is unsaved work.
-    pub(super) fn request_quit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    /// The main window's close guard, shared by the OS close path (`WM_CLOSE` / the macOS close
+    /// button) and the Linux title-bar button. Returns whether the window may close; unsaved work
+    /// raises the confirmation and keeps the window open.
+    pub(crate) fn should_close_main_window(&mut self, cx: &mut Context<'_, Self>) -> bool {
         if self.has_unsaved_changes(cx) {
             self.unsaved_confirm = Some(PendingAction::Quit);
             cx.notify();
-            return;
+            return false;
         }
-        window.remove_window();
+        true
+    }
+
+    /// Ask before closing the main window when there is unsaved work.
+    pub(super) fn request_quit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.should_close_main_window(cx) {
+            window.remove_window();
+        }
     }
 
     /// Run the action a pending confirmation was guarding.

@@ -355,14 +355,20 @@ touching UI code.
 
 ## UI conventions
 
-- **Look: shadcn/ui on Navicat's layout.** The structural layout is Navicat's — a custom 32px
-  titlebar (`render_titlebar` / `titlebar_button`), menu bar, command toolbar, then the
-  connection tree + content pane — but the chrome is the shadcn look delivered by gpui-kit:
-  rounded corners, muted borders, solid `primary` fills, ghost/outline button variants. Do not
-  re-introduce bespoke square Win32 chrome. The native titlebar is suppressed
-  (`TitlebarOptions { appears_transparent: true }` in `main.rs`); dragging uses
-  `WindowControlArea::Drag`, and min/max/close call `window.minimize_window()`,
-  `window.zoom_window()`, `window.remove_window()`.
+- **Look: shadcn/ui on Navicat's layout.** The structural layout is Navicat's — a custom 34px
+  titlebar, menu bar, command toolbar, then the connection tree + content pane — but the chrome is
+  the shadcn look delivered by gpui-kit: rounded corners, muted borders, solid `primary` fills,
+  ghost/outline button variants. Do not re-introduce bespoke square Win32 chrome. Every window
+  draws its titlebar through `src/app/ui/titlebar.rs`, a thin app wrapper over
+  `gpui_kit::component::TitleBar`: `ui::window_options(title)` sets the transparent titlebar and
+  `app_owns_titlebar_drag`, `ui::title_bar(theme)` applies the app palette, `ui::bar_title` adds
+  the logo + title, and `ui::window_title_bar` is the child-window bar. The kit draws the window
+  controls itself (native caption buttons on Windows, window-manager controls on Linux, native
+  traffic lights on macOS), so do not add app-drawn min/max/close buttons back. The main window's
+  theme/GitHub/update/settings cluster must stay inside `ui::action_cluster`: it occludes the kit
+  bar's full-width `WindowControlArea::Drag` hitbox, without which Windows hit-tests those buttons
+  as `HTCAPTION` and they never receive a click. Closing goes through the platform close path and
+  `Window::on_window_should_close`; do not put the unsaved-work confirmation on a custom button.
 - **Use gpui-kit components first.** Reach for `gpui_kit::component::*` before hand-drawing a
   control: `button::Button` (via `AppView::win_button` / `dialog_button` / `toolbar_item`),
   `checkbox`, `Dialog`, `Input`, `Combobox`, `Scrollbar`, `Tab`, `Table`, `Theme`. Anything
@@ -1036,15 +1042,16 @@ make more engines cheap later — do not build those features early.
   `SetWindowSubclass` hook that answers `WM_NCHITTEST` with the real frame-metric resize codes
   before gpui sees the message (`install(window)` is called from `open_window`). Do **not** edit
   the crates.io copy of gpui under `~/.cargo/registry` to fix this — it is not reproducible.
-- **macOS keeps its native window buttons.** gpui suppresses the OS titlebar
+- **macOS uses the title bar's native traffic lights.** gpui suppresses the OS titlebar
   (`TitlebarOptions::appears_transparent`) so every window draws its own chrome from the window's
   top-left corner, but AppKit still paints the traffic lights (close/minimise/zoom) over that
-  corner — which used to cover the titlebar's logo and title. Every custom titlebar therefore takes
-  its leading inset from `ui::titlebar_leading_padding(base)`: the plain `base` on Windows/Linux,
-  `base + 78px` on macOS. The app deliberately keeps its own right-hand min/max/close buttons on
-  macOS as well: the app's ✕ goes through `request_quit`'s unsaved-work confirmation, while the
-  native close button reaches `on_window_closed` and quits outright. Dragging in that top strip
-  stays AppKit's — `WindowControlArea::Drag` is Windows-only hit-testing (see `win_resize.rs`).
+  corner. `gpui_kit::component::TitleBar` accounts for them with its 80px left padding and positions
+  them at `(9, 9)` through `TitleBar::title_bar_options()`; it draws no right-hand controls on
+  macOS. `app_owns_titlebar_drag: true` (set by `ui::window_options` / the main window's options)
+  makes the bar move the window through `start_window_move` and own double-click handling, so
+  AppKit does not drag the titlebar or delay clicks while disambiguating. The native close button
+  reaches `on_window_should_close`, which now holds the main window's unsaved-work confirmation
+  (the transfer window keeps its own guard there too).
 - **macOS builds the app *inaccessible*, on purpose.** `main.rs::application()` builds the
   `Application` through `gpui::Application::new_inaccessible` on macOS instead of
   `gpui_kit::application()`. GPUI installs `accesskit_macos::SubclassingAdapter` on **every**

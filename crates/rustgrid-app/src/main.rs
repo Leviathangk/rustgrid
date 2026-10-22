@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui_kit::component::TitleBar;
 use rustgrid_core::{BuiltinDriverSource, DriverRegistry};
 
 use crate::app::AppView;
@@ -86,16 +87,29 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some(t!("app.title").to_string().into()),
-                    appears_transparent: true,
-                    ..Default::default()
+                    ..TitleBar::title_bar_options()
                 }),
+                app_owns_titlebar_drag: true,
                 ..Default::default()
             },
             cx,
             move |window, cx| {
                 #[cfg(target_os = "windows")]
                 win_resize::install(window);
-                cx.new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx))
+                let view = cx
+                    .new(|cx| AppView::new(registry.clone(), config.clone(), runtime.clone(), cx));
+                let weak = view.downgrade();
+                // The kit title bar's close button posts `WM_CLOSE` (and macOS' native close goes
+                // through the same hook), so the unsaved-work confirmation has to live here rather
+                // than on a custom button. It covers Alt+F4 as well.
+                window.on_window_should_close(cx, move |_window, cx| {
+                    let mut allow = true;
+                    let _ = weak.update(cx, |app, cx| {
+                        allow = app.should_close_main_window(cx);
+                    });
+                    allow
+                });
+                view
             },
         )
         .expect("failed to open the main window");

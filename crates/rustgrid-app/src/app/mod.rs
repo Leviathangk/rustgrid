@@ -12,10 +12,9 @@ use gpui::{
     HighlightStyle, ImageSource, KeyBinding, KeyDownEvent, Keystroke, ListHorizontalSizingBehavior,
     Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
     Resource, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
-    StyledText, Subscription, Svg, TextLayout, TitlebarOptions, UTF16Selection,
-    UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
-    WindowId, WindowOptions, anchored, canvas, deferred, div, img, prelude::*, px, relative, rgb,
-    rgba, size, svg, uniform_list,
+    StyledText, Subscription, Svg, TextLayout, UTF16Selection, UniformListScrollHandle, WeakEntity,
+    Window, WindowBounds, WindowHandle, WindowId, WindowOptions, anchored, canvas, deferred, div,
+    img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{
     AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,
@@ -4701,37 +4700,6 @@ fn tree_message(text: String, indent: f32, color: u32) -> impl IntoElement {
         .py_0p5()
         .text_color(rgb(color))
         .child(text)
-}
-
-/// Toggle the window between maximized and restored.
-///
-/// gpui's `Window::zoom_window()` only maximizes on Windows (it calls `SW_MAXIMIZE`, a no-op when
-/// the window is already maximized), so a second click on the maximize button did nothing. Use the
-/// Windows helper, which calls `SW_RESTORE`, there; other platforms' `zoom()` already toggles.
-pub(super) fn toggle_maximize(window: &mut Window) {
-    #[cfg(target_os = "windows")]
-    crate::win_resize::toggle_maximize(window);
-    #[cfg(not(target_os = "windows"))]
-    window.zoom_window();
-}
-
-pub(super) fn titlebar_button(
-    id: &'static str,
-    label: &str,
-    theme: Theme,
-    action: impl Fn(&mut Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(40.0))
-        .h_full()
-        .cursor_pointer()
-        .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
-        .on_click(move |_event, window, cx| action(window, cx))
-        .child(label.to_string())
 }
 
 fn is_temporal_type(data_type: &str) -> bool {
