@@ -981,6 +981,7 @@ impl AppView {
 }
 
 impl ObjectPane {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         app: WeakEntity<AppView>,
         connection_index: usize,
@@ -988,6 +989,7 @@ impl ObjectPane {
         schema: Option<String>,
         category: Category,
         theme: Theme,
+        grid_viewport: f32,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         Self {
@@ -998,7 +1000,7 @@ impl ObjectPane {
             category,
             selected: None,
             selected_routine: None,
-            grid: ColumnGrid::default(),
+            grid: ColumnGrid::with_viewport(grid_viewport),
             detail_scroll: DetailScroll::default(),
             table_columns: Rc::new(RefCell::new(DetailColumns::default())),
             routine_columns: Rc::new(RefCell::new(DetailColumns::default())),
@@ -1099,7 +1101,20 @@ impl ObjectPane {
         };
         match tables {
             Loadable::Idle => div().into_any_element(),
-            Loadable::Loading => object_message(theme.text_muted, t!("common.loading").to_string()),
+            Loadable::Loading => match mode {
+                // Lay the empty 平铺网格 out while the tables load: its scroller then reports the
+                // real viewport height before the first row arrives, so the loaded list wraps its
+                // columns correctly on its very first frame instead of reflowing afterwards.
+                ViewMode::Grid => {
+                    let placeholder = ui::grid_columns().child(ui::grid_column().child(
+                        object_message(theme.text_muted, t!("common.loading").to_string()),
+                    ));
+                    self.render_grid(placeholder, theme, cx)
+                }
+                ViewMode::Detail => {
+                    object_message(theme.text_muted, t!("common.loading").to_string())
+                }
+            },
             Loadable::Failed(error) => object_message(theme.danger, error),
             Loadable::Loaded(tables) => {
                 let want_view = match self.category {

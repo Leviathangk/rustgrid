@@ -903,6 +903,29 @@ impl AppView {
         {
             category = Category::Tables;
         }
+        self.show_object_category(connection_index, database_index, schema, category, cx);
+        if category == Category::Functions {
+            self.ensure_routines_loaded(connection_index, database_index, cx);
+        }
+        self.active_grid = None;
+        self.active_query = None;
+        self.active_design = None;
+        cx.notify();
+    }
+
+    /// Point the content pane at `category` for a scope. A pane already showing that scope is
+    /// reused — its scroll position, remembered layout and selection survive — and only the
+    /// category changes; any other scope builds a new pane. Rebuilding on every category click
+    /// wiped that state (and made the 平铺网格 lay itself out again from an unmeasured viewport),
+    /// which is what made the list visibly jump.
+    fn show_object_category(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        schema: Option<String>,
+        category: Category,
+        cx: &mut Context<'_, Self>,
+    ) {
         let existing = self.object_pane.as_ref().map(|pane| {
             let pane = pane.read(cx);
             (
@@ -925,8 +948,16 @@ impl AppView {
                         pane.category = category;
                         pane.selected = None;
                         pane.selected_routine = None;
+                        // The new category is a different list: start it at its own beginning
+                        // instead of keeping the previous list's scroll offset.
+                        pane.grid.reset();
+                        pane.detail_scroll.reset();
                         cx.notify();
                     });
+                    self.rename_edit = None;
+                    self.rename_blur = None;
+                    self.saved_query_selected = None;
+                    self.query_selection.clear();
                     self.objects_selection.clear();
                     self.objects_row_rects.clear();
                 }
@@ -936,13 +967,6 @@ impl AppView {
                 self.clear_object_search_unless_kept(cx);
             }
         }
-        if category == Category::Functions {
-            self.ensure_routines_loaded(connection_index, database_index, cx);
-        }
-        self.active_grid = None;
-        self.active_query = None;
-        self.active_design = None;
-        cx.notify();
     }
 
     /// Create (or replace) the object pane for a database and return the entity handle.
@@ -956,6 +980,14 @@ impl AppView {
     ) {
         let app = cx.weak_entity();
         let theme = self.theme;
+        // A new pane's scroller has no bounds until its first paint. Seed it with the height the
+        // list it replaces was showing, so the 平铺网格 wraps its columns correctly on the first
+        // frame instead of laying out one over-tall column and reflowing later.
+        let grid_viewport = self
+            .object_pane
+            .as_ref()
+            .map(|pane| pane.read(cx).grid.viewport_height())
+            .unwrap_or_default();
         self.rename_edit = None;
         self.rename_blur = None;
         self.saved_query_selected = None;
@@ -971,9 +1003,22 @@ impl AppView {
                 schema,
                 category,
                 theme,
+                grid_viewport,
                 cx,
             )
         }));
+        // Nothing has ever measured a grid in this window yet: one deferred repaint lets the
+        // pane's first scroller report its height and the rows settle before the user sees a
+        // wrong column split.
+        if grid_viewport <= 0.0 {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(32))
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
     }
 
     pub(super) fn toggle_category(
@@ -1037,7 +1082,7 @@ impl AppView {
             self.load_routines(connection_index, database_index, connection, name, cx);
         }
 
-        self.open_object_pane(connection_index, database_index, schema, category, cx);
+        self.show_object_category(connection_index, database_index, schema, category, cx);
         self.clear_object_search_unless_kept(cx);
         self.active_grid = None;
         self.active_query = None;
@@ -1174,8 +1219,7 @@ impl AppView {
             MainTab::Queries => Category::Queries,
             _ => Category::Tables,
         };
-        self.open_object_pane(connection_index, database_index, Some(schema), category, cx);
-        self.clear_object_search_unless_kept(cx);
+        self.show_object_category(connection_index, database_index, Some(schema), category, cx);
         self.active_grid = None;
         self.active_query = None;
         self.active_design = None;
@@ -1259,33 +1303,27 @@ impl AppView {
 
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
-            let result = match runtime
-                .spawn(async move {
-                    let tables = connection.list_tables(&database_name).await?;
-                    // One extra query for the Tables 详细列表's overview columns; a driver without
-                    // support returns an empty list rather than failing the whole load.
-                    let statuses = connection
-                        .table_statuses(&database_name)
-                        .await
-                        .unwrap_or_default();
-                    Ok((tables, statuses))
-                })
+            // The table list is published first: the default 平铺网格 does not show any of the
+            // overview columns, and the per-table `COUNT(*)` pass behind `table_statuses` can take
+            // seconds on a large database. Waiting for both made the list appear only after the
+            // counts had finished.
+            let list_connection = connection.clone();
+            let list_database = database_name.clone();
+            let tables = match runtime
+                .spawn(async move { list_connection.list_tables(&list_database).await })
                 .await
             {
                 Ok(inner) => inner,
                 Err(error) => Err(Error::other(error)),
             };
-
+            let failed = tables.is_err();
             let _ = this.update(cx, |view, cx| {
                 if let Some(node) = view.connections.get_mut(connection_index)
                     && let Loadable::Loaded(databases) = &mut node.databases
                     && let Some(database) = databases.get_mut(database_index)
                 {
-                    match result {
-                        Ok((tables, statuses)) => {
-                            database.tables = Loadable::Loaded(tables);
-                            database.table_statuses = Loadable::Loaded(statuses);
-                        }
+                    match tables {
+                        Ok(tables) => database.tables = Loadable::Loaded(tables),
                         Err(error) => {
                             database.tables = Loadable::Failed(error.to_string());
                             database.table_statuses = Loadable::Failed(error.to_string());
@@ -1306,6 +1344,31 @@ impl AppView {
                     let _ = this.update(cx, |_, cx| cx.notify());
                 })
                 .detach();
+            });
+            if failed {
+                return;
+            }
+
+            // The overview columns fill in when the extra query returns; the list itself is
+            // already on screen and stays interactive meanwhile.
+            let statuses = runtime
+                .spawn(async move {
+                    connection
+                        .table_statuses(&database_name)
+                        .await
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+            let _ = this.update(cx, |view, cx| {
+                if let Some(node) = view.connections.get_mut(connection_index)
+                    && let Loadable::Loaded(databases) = &mut node.databases
+                    && let Some(database) = databases.get_mut(database_index)
+                {
+                    database.table_statuses = Loadable::Loaded(statuses);
+                }
+                view.notify_object_pane(cx);
+                cx.notify();
             });
         })
         .detach();

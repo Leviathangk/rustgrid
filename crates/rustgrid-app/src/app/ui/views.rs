@@ -1031,6 +1031,11 @@ pub(crate) fn grid_item_width(longest: f32) -> f32 {
 pub(crate) struct ColumnGrid {
     scroll: ScrollHandle,
     grab: Option<f32>,
+    /// The scroller's last measured height. A freshly built grid has no bounds until its first
+    /// paint, so the list that replaces another one seeds this from the previous grid: the first
+    /// frame then already wraps its columns at the real height instead of laying out one tall
+    /// clipped column and reflowing a frame later.
+    viewport: Cell<f32>,
 }
 
 /// Scroll `scroll` vertically just enough that `item` (window bounds from the last frame) is fully
@@ -1075,9 +1080,23 @@ impl DetailScroll {
     pub(crate) fn viewport_height(&self) -> f32 {
         f32::from(self.vscroll.bounds().size.height)
     }
+
+    /// Return both axes to the top-left, e.g. when the list switches to another category.
+    pub(crate) fn reset(&self) {
+        self.vscroll.set_offset(Point::new(px(0.0), px(0.0)));
+        self.hscroll.set_offset(Point::new(px(0.0), px(0.0)));
+    }
 }
 
 impl ColumnGrid {
+    /// A grid whose first render already knows the viewport height of the list it replaces.
+    pub(crate) fn with_viewport(height: f32) -> Self {
+        Self {
+            viewport: Cell::new(height),
+            ..Self::default()
+        }
+    }
+
     /// Scroll the columns so `item` is visible after a keyboard move.
     pub(crate) fn reveal(&self, item: Bounds<Pixels>) {
         reveal_horizontally(&self.scroll, item);
@@ -1088,6 +1107,19 @@ impl ColumnGrid {
         f32::from(self.scroll.bounds().size.width)
     }
 
+    /// The grid viewport's height: the scroller's own bounds once it has been laid out, otherwise
+    /// the height remembered from the list it replaced (or the one this grid measured before a
+    /// rebuild). Zero only for a grid that has never been painted anywhere.
+    pub(crate) fn viewport_height(&self) -> f32 {
+        let measured = f32::from(self.scroll.bounds().size.height);
+        if measured > 0.0 {
+            self.viewport.set(measured);
+            measured
+        } else {
+            self.viewport.get()
+        }
+    }
+
     /// How many item rows fit in one column at the current viewport height.
     pub(crate) fn rows_per_column(&self) -> usize {
         self.rows_per_column_with(GRID_ROW_HEIGHT)
@@ -1095,12 +1127,17 @@ impl ColumnGrid {
 
     /// How many item rows of `row_height` fit in one column at the current viewport height.
     pub(crate) fn rows_per_column_with(&self, row_height: f32) -> usize {
-        let viewport = f32::from(self.scroll.bounds().size.height);
+        let viewport = self.viewport_height();
         if viewport <= 0.0 {
             return 30;
         }
         let rows = ((viewport - GRID_BOTTOM_MARGIN) / row_height).floor() as usize;
         rows.max(1)
+    }
+
+    /// Return the list to its first column, e.g. when it switches to another category.
+    pub(crate) fn reset(&self) {
+        self.scroll.set_offset(Point::new(px(0.0), px(0.0)));
     }
 
     /// The scroller that holds the [`grid_columns`] body.
@@ -1284,7 +1321,16 @@ pub(crate) fn marquee_rect(
 
 #[cfg(test)]
 mod tests {
-    use super::{DetailSort, SortKey};
+    use super::{ColumnGrid, DetailSort, SortKey};
+
+    #[test]
+    fn a_seeded_grid_wraps_its_columns_before_its_own_scroller_is_measured() {
+        // 464px leaves room for 22 rows at 20px with the 16px bottom margin.
+        let grid = ColumnGrid::with_viewport(464.0);
+        assert_eq!(grid.rows_per_column(), 22);
+        // A grid that has never been painted anywhere keeps the old fallback.
+        assert_eq!(ColumnGrid::default().rows_per_column(), 30);
+    }
 
     #[test]
     fn a_detail_sort_toggles_direction_and_starts_elsewhere_ascending() {
