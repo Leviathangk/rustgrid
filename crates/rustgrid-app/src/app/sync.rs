@@ -77,6 +77,18 @@ impl SyncMode {
         }
     }
 
+    /// The hover tooltip of the mode switch. The tab labels stay short in every language (a long
+    /// translation is what pushed the run controls off the toolbar), so the full meaning of each
+    /// mode lives here.
+    fn hint_key(self) -> &'static str {
+        match self {
+            SyncMode::All => "sync.mode.all.hint",
+            SyncMode::Schema => "sync.mode.schema.hint",
+            SyncMode::Data => "sync.mode.data.hint",
+            SyncMode::Transfer => "sync.mode.transfer.hint",
+        }
+    }
+
     /// The inspector tab a newly chosen mode opens on.
     fn default_sub_tab(self) -> SyncSubTab {
         match self {
@@ -1339,7 +1351,7 @@ impl AppView {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     // The two-row toolbar and the two endpoint groups need room; below this the
-                    // action buttons would clip.
+                    // second row wraps the run controls onto a third line.
                     window_min_size: Some(size(px(980.0), px(600.0))),
                     ..ui::window_options(title)
                 },
@@ -3033,9 +3045,11 @@ impl AppView {
         page.into_any_element()
     }
 
-    /// The topology + mode switch + actions bar. It uses two rows: the source → target pickers on
-    /// the first and the mode switch with the run controls on the second, so the target picker is
-    /// never squeezed or overlapped in a narrow window.
+    /// The topology + mode switch + actions bar. It uses two rows: the source → target pickers and
+    /// the sync-log toggle on the first, the mode switch and the run controls on the second, so the
+    /// target picker is never squeezed or overlapped in a narrow window. The second row wraps its
+    /// action group onto a new line when a long translation does not fit, instead of clipping the
+    /// run button off the window edge.
     fn render_sync_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
         let cross_engine = !self.sync_same_engine();
@@ -3095,6 +3109,7 @@ impl AppView {
                         })
                     })
                     .when(!enabled, |style| style.opacity(0.4))
+                    .tooltip(ui::text_tooltip(t!(mode.hint_key()).to_string()))
                     .when(enabled, |style| {
                         style.on_click(move |_event, _window, cx| {
                             let _ = weak.update(cx, |app, cx| {
@@ -3189,12 +3204,6 @@ impl AppView {
             cx.listener(|this, _event, _window, cx| this.request_sync_run(cx)),
         );
 
-        let target_hint = if self.sync.target_connection.is_none() {
-            t!("sync.select_target").to_string()
-        } else {
-            String::new()
-        };
-
         div()
             .flex()
             .flex_col()
@@ -3221,27 +3230,22 @@ impl AppView {
                             .child("→"),
                     )
                     .child(self.sync_endpoint_group(false, theme))
-                    .child(div().flex_1().min_w(px(0.0))),
+                    .child(div().flex_1().min_w(px(0.0)))
+                    // The log toggle is a read-only view of the last run, so it rides on the first
+                    // row's free space instead of competing with the run controls for width.
+                    .child(log_toggle),
             )
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
+                    .justify_between()
                     .gap_3()
                     .px_2()
                     .pb_2()
                     .child(modes)
-                    .child(div().flex_1().min_w(px(0.0)))
-                    .when(!target_hint.is_empty(), |row| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(rgb(theme.warning))
-                                .child(target_hint),
-                        )
-                    })
                     .child(
                         div()
                             .flex()
@@ -3249,7 +3253,6 @@ impl AppView {
                             .items_center()
                             .gap_2()
                             .flex_none()
-                            .child(log_toggle)
                             .child(recompare)
                             .children(stop_compare)
                             .child(options_button)
