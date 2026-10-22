@@ -1,13 +1,14 @@
 # Changelog
 
-English | [简体中文](CHANGELOG_zh.md)
+English | [简体中文](CHANGELOG_zh.md) | [Русский](CHANGELOG_ru.md)
 
 All notable changes to RustGrid are documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 UI labels are quoted as the app shows them, so this file quotes the English strings;
-[`CHANGELOG_zh.md`](CHANGELOG_zh.md) quotes the 简体中文 ones.
+[`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
+Russian ones.
 
 ## [Unreleased]
 

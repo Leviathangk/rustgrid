@@ -223,10 +223,11 @@ not a later refactor.
   name of the other language, engine/product names, identifiers, file paths and code spans. Never
   paste a Chinese label into the English file (or an English label into the Chinese one) just because
   that is what the UI, an issue or a commit message called it; a test
-  (`crates/rustgrid-app/src/app/changelog.rs`) fails on CJK anywhere else in `CHANGELOG.md`. Those two
-  files are the single source of the version's own notes: the release job publishes a link-only body
-  pointing at them (`CHANGELOG.md`, `CHANGELOG_zh.md`, plus any other `CHANGELOG_<lang>.md`) and fails
-  when either must-have file lacks the section, alongside its tag-vs-`Cargo.toml` check. 选项 → 关于
+  (`crates/rustgrid-app/src/app/changelog.rs`) fails on CJK anywhere else in `CHANGELOG.md`. Those
+  files — and any translated `CHANGELOG_<lang>.md` such as `CHANGELOG_ru.md` — are the single source
+  of the version's own notes: the release job publishes a link-only body pointing at them
+  (`CHANGELOG.md`, `CHANGELOG_zh.md`, plus any other `CHANGELOG_<lang>.md`) and fails when either
+  must-have file lacks the section, alongside its tag-vs-`Cargo.toml` check. 选项 → 关于
   fetches the newer release's section — never this build's own — from the changelog for the UI
   language (`changelog_file`), falls back to English when that language has no file or its translation
   lags, and leaves the 更新日志 section off the page entirely while this build is the newest release

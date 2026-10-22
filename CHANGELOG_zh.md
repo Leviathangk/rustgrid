@@ -1,6 +1,6 @@
 # 更新日志
 
-[English](CHANGELOG.md) | 简体中文
+[English](CHANGELOG.md) | 简体中文 | [Русский](CHANGELOG_ru.md)
 
 本文件记录 RustGrid 的每个版本变更。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
