@@ -16,6 +16,8 @@ options.general.preserve_object_search: "Сохранять поиск по об
 options.general.preserve_object_search_hint: "Сохранять отдельный поиск для каждого списка (таблицы, представления, функции, запросы) при переключении вкладок, баз данных или соединений, чтобы не вводить один и тот же запрос заново."
 options.general.restore_session: "Восстанавливать при запуске"
 options.general.restore_session_hint: "Восстанавливать вкладки запросов, соединения, открытые базы данных и вкладки таблиц при следующем запуске."
+options.general.single_click_open: "Режим одного клика"
+options.general.single_click_open_hint: "Открывать соединения, базы данных, таблицы и другие объекты одним щелчком. Если выключено — двойной щелчок (по умолчанию)."
 options.tab: "Вкладки"
 options.query: "Запросы"
 options.editor: "Редактор"

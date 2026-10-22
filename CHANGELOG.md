@@ -9,6 +9,12 @@ All notable changes to RustGrid are documented in this file. The format is based
 UI labels are quoted as the app shows them, so this file quotes the English strings;
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) quotes the 简体中文 ones.
 
+## [Unreleased]
+
+### Added
+
+- Russian interface language (Русский).
+
 ## [0.1.0] - 2026-10-21
 
 ### Added
