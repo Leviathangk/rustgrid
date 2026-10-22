@@ -165,6 +165,8 @@ pub enum LanguageSetting {
     En,
     #[serde(rename = "zh-CN")]
     ZhCn,
+    #[serde(rename = "ru")]
+    Ru,
 }
 
 impl LanguageSetting {
@@ -172,6 +174,7 @@ impl LanguageSetting {
         match self {
             LanguageSetting::En => "en",
             LanguageSetting::ZhCn => "zh-CN",
+            LanguageSetting::Ru => "ru",
         }
     }
 }

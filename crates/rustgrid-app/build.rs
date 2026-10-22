@@ -7,6 +7,7 @@ fn main() {
     {
         use std::path::PathBuf;
 
+        println!("cargo:rerun-if-changed=locales");
         println!("cargo:rerun-if-changed=assets/logo.rc");
         println!("cargo:rerun-if-changed=assets/logo.ico");
         println!("cargo:rerun-if-changed=build.rs");
