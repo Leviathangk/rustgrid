@@ -158,6 +158,71 @@ async fn live_schema_keeps_an_explicit_empty_string_default() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a live MySQL server (set RUSTGRID_MYSQL_PASSWORD)"]
+async fn live_schema_loads_without_generation_expression() {
+    use rustgrid_core::{ColumnDef, TableSchema};
+
+    let driver = rustgrid_mysql::MysqlDriver::new();
+    let connection = driver
+        .connect(&config())
+        .await
+        .expect("connect to the live server");
+
+    let database = "rustgrid_live";
+    connection
+        .execute_query(None, &format!("CREATE DATABASE IF NOT EXISTS `{database}`"))
+        .await
+        .expect("create the scratch database");
+
+    let table = "rustgrid_plain";
+    let _ = connection.drop_table(database, table).await;
+    let schema = TableSchema {
+        columns: vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                primary_key: true,
+                auto_increment: true,
+                ..ColumnDef::default()
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                data_type: "varchar".to_string(),
+                length: "50".to_string(),
+                nullable: true,
+                ..ColumnDef::default()
+            },
+        ],
+        ..TableSchema::default()
+    };
+    connection
+        .save_table_schema(database, table, None, &schema)
+        .await
+        .expect("create the table");
+
+    // MySQL 5.6, MariaDB 10.1 and some MySQL-compatible servers have no
+    // `INFORMATION_SCHEMA.COLUMNS.GENERATION_EXPRESSION`; loading the schema must retry without it
+    // instead of surfacing `1054 - Unknown column 'generation_expression' in 'field list'`.
+    let loaded = connection
+        .table_schema(database, table)
+        .await
+        .expect("load the table schema");
+    assert_eq!(loaded.columns.len(), 2, "{:?}", loaded.columns);
+    assert!(
+        loaded
+            .columns
+            .iter()
+            .any(|column| column.name == "id" && column.primary_key && column.auto_increment),
+        "the identity column did not load: {:?}",
+        loaded.columns
+    );
+
+    let _ = connection.drop_table(database, table).await;
+    connection.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a live MySQL server (set RUSTGRID_MYSQL_PASSWORD)"]
 async fn live_multi_statement_returns_every_result_set() {
     let driver = rustgrid_mysql::MysqlDriver::new();
     let connection = driver

@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use futures_util::TryStreamExt;
@@ -20,6 +22,10 @@ pub struct MysqlConnection {
     pub(crate) pool: MySqlPool,
     /// Which MySQL-protocol engine (MySQL or MariaDB) this connection targets.
     engine: Engine,
+    /// Whether `INFORMATION_SCHEMA.COLUMNS` has `GENERATION_EXPRESSION` (MySQL 5.7.6+ / MariaDB
+    /// 10.2+). Older servers reject the whole column query with `1054`, so the first failure flips
+    /// this off and later schema loads leave the column out instead of failing again.
+    generation_expression: AtomicBool,
     /// The tunnel forwarding this connection, kept alive for as long as the connection is.
     _tunnel: Option<rustgrid_tunnel::Tunnel>,
 }
@@ -29,8 +35,37 @@ impl MysqlConnection {
         Self {
             pool,
             engine,
+            generation_expression: AtomicBool::new(true),
             _tunnel: tunnel,
         }
+    }
+
+    /// The `INFORMATION_SCHEMA.COLUMNS` rows of one table, ordered by position. `with_generation`
+    /// adds `generation_expression`, which only MySQL 5.7.6+ and MariaDB 10.2+ report.
+    async fn schema_column_rows(
+        &self,
+        database: &str,
+        table: &str,
+        with_generation: bool,
+    ) -> std::result::Result<Vec<MySqlRow>, sqlx::Error> {
+        let expression = if with_generation {
+            ", generation_expression"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT column_name, data_type, column_type, is_nullable, column_default, extra, \
+                    column_key, column_comment, character_set_name, collation_name, \
+                    character_maximum_length, numeric_precision, numeric_scale{expression} \
+             FROM information_schema.columns \
+             WHERE table_schema = ? AND table_name = ? \
+             ORDER BY ordinal_position"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(database)
+            .bind(table)
+            .fetch_all(&self.pool)
+            .await
     }
 
     async fn scalar_u64(&self, sql: String, binds: &[String]) -> Result<u64> {
@@ -886,20 +921,28 @@ impl Connection for MysqlConnection {
     }
 
     async fn table_schema(&self, database: &str, table: &str) -> Result<TableSchema> {
-        let column_rows = sqlx::query(
-            "SELECT column_name, data_type, column_type, is_nullable, column_default, extra, \
-                    column_key, column_comment, character_set_name, collation_name, \
-                    character_maximum_length, numeric_precision, numeric_scale, \
-                    generation_expression \
-             FROM information_schema.columns \
-             WHERE table_schema = ? AND table_name = ? \
-             ORDER BY ordinal_position",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_query_error)?;
+        let mut with_generation = self.generation_expression.load(Ordering::Relaxed);
+        let column_rows = match self
+            .schema_column_rows(database, table, with_generation)
+            .await
+        {
+            Ok(rows) => rows,
+            // MySQL before 5.7.6, MariaDB before 10.2 and a few MySQL-compatible servers have no
+            // `GENERATION_EXPRESSION` column and reject the whole statement with `1054`. Those
+            // servers have no generated columns either, so retry without it — failing the designer
+            // (and structure sync) over an optional metadata column is worse than not reporting it.
+            Err(error) if with_generation && is_unknown_column_error(&error) => {
+                match self.schema_column_rows(database, table, false).await {
+                    Ok(rows) => {
+                        with_generation = false;
+                        self.generation_expression.store(false, Ordering::Relaxed);
+                        rows
+                    }
+                    Err(_) => return Err(map_query_error(error)),
+                }
+            }
+            Err(error) => return Err(map_query_error(error)),
+        };
 
         let mut columns = Vec::with_capacity(column_rows.len());
         for row in &column_rows {
@@ -916,7 +959,11 @@ impl Connection for MysqlConnection {
             let char_length = optional_u64(row, 10);
             let precision = optional_u64(row, 11);
             let scale = optional_u64(row, 12);
-            let generated: Option<String> = row.try_get(13).unwrap_or(None);
+            let generated: Option<String> = if with_generation {
+                row.try_get(13).unwrap_or(None)
+            } else {
+                None
+            };
 
             let numeric = data_type.eq_ignore_ascii_case("decimal")
                 || data_type.eq_ignore_ascii_case("numeric");
@@ -2508,6 +2555,17 @@ pub(crate) fn map_query_error(error: sqlx::Error) -> Error {
         ));
     }
     Error::Query(error.to_string())
+}
+
+/// Whether the server rejected a statement because it names a column the server does not have
+/// (MySQL error 1054).
+fn is_unknown_column_error(error: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(database_error) = error else {
+        return false;
+    };
+    database_error
+        .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+        .is_some_and(|mysql_error| mysql_error.number() == 1054)
 }
 
 fn columns_from_row(row: &MySqlRow) -> Vec<ColumnInfo> {
