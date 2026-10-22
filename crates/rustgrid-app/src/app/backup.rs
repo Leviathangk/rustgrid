@@ -734,7 +734,7 @@ impl AppView {
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
             this.hit_backup(&click_key, event.click_count(), event.modifiers(), cx);
-            if event.click_count() >= 2
+            if this.click_opens(event.click_count(), event.modifiers())
                 && let Some(BackupEntry::File(index)) = this.backup_single_selection()
             {
                 this.open_restore_backup(index, cx);
@@ -841,7 +841,7 @@ impl AppView {
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
             this.hit_backup(&click_key, event.click_count(), event.modifiers(), cx);
-            if event.click_count() >= 2 {
+            if this.click_opens(event.click_count(), event.modifiers()) {
                 this.open_backup_config(index, cx);
             }
         }))
@@ -976,7 +976,7 @@ impl AppView {
             )
             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                 this.hit_backup(&click_key, event.click_count(), event.modifiers(), cx);
-                if event.click_count() >= 2 {
+                if this.click_opens(event.click_count(), event.modifiers()) {
                     match entry {
                         BackupEntry::File(index) => this.open_restore_backup(index, cx),
                         BackupEntry::Config(index) => this.open_backup_config(index, cx),

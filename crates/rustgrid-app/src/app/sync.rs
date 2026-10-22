@@ -2454,7 +2454,7 @@ impl AppView {
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
             this.hit_transfer(&click_key, event.modifiers(), cx);
-            if event.click_count() >= 2
+            if this.click_opens(event.click_count(), event.modifiers())
                 && let Some(index) = this.transfer_index_by_key(&open_key)
             {
                 this.open_transfer_config(index, cx);
@@ -2571,7 +2571,7 @@ impl AppView {
             )
             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                 this.hit_transfer(&click_key, event.modifiers(), cx);
-                if event.click_count() >= 2
+                if this.click_opens(event.click_count(), event.modifiers())
                     && let Some(index) = this.transfer_index_by_key(&open_key)
                 {
                     this.open_transfer_config(index, cx);

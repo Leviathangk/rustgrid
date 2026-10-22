@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u32 = 2;
 const PROFILES_FILE: &str = "connections.json";
-const SETTINGS_VERSION: u32 = 15;
+const SETTINGS_VERSION: u32 = 16;
 const SETTINGS_FILE: &str = "settings.json";
 /// The settings version that introduced 保留对象搜索 as a deliberate choice. Files written before
 /// it kept the old `false` default, so loading turns the switch on once; a file that version or
@@ -279,6 +279,9 @@ struct SettingsFile {
     /// the next start.
     #[serde(default = "default_true")]
     restore_session: bool,
+    /// Open tree/list objects with a single click (off: double-click, the default).
+    #[serde(default)]
+    single_click_open: bool,
     /// The most statements one query run may execute (0: no limit).
     #[serde(default = "default_max_statements")]
     max_statements_per_run: u32,
@@ -392,6 +395,9 @@ pub struct AppSettings {
     /// Restore the previous session (open connections, query tabs, open databases and table tabs)
     /// on the next start.
     pub restore_session: bool,
+    /// Open connections, databases, tables and the other tree/list objects with a single click
+    /// (off: double-click, the default).
+    pub single_click_open: bool,
     /// The most statements one query run may execute, against accidents (0: no limit).
     pub max_statements_per_run: u32,
     /// Stop a script at its first failing statement (off: run the rest and report each).
@@ -421,6 +427,7 @@ impl Default for AppSettings {
             shortcuts: BTreeMap::new(),
             preserve_object_search: true,
             restore_session: true,
+            single_click_open: false,
             max_statements_per_run: DEFAULT_MAX_STATEMENTS,
             stop_on_error: false,
         }
@@ -668,6 +675,7 @@ impl ConfigStore {
             preserve_object_search: file.preserve_object_search
                 || file.version < PRESERVE_OBJECT_SEARCH_SINCE,
             restore_session: file.restore_session,
+            single_click_open: file.single_click_open,
             max_statements_per_run: file.max_statements_per_run,
             stop_on_error: file.stop_on_error,
         })
@@ -697,6 +705,7 @@ impl ConfigStore {
             shortcuts: settings.shortcuts.clone(),
             preserve_object_search: settings.preserve_object_search,
             restore_session: settings.restore_session,
+            single_click_open: settings.single_click_open,
             max_statements_per_run: settings.max_statements_per_run,
             stop_on_error: settings.stop_on_error,
             run_shortcut: None,
@@ -959,5 +968,17 @@ mod tests {
             serde_json::from_str(r#"{ "version": 15, "sync_hide_same": false }"#)
                 .expect("parse v15");
         assert!(!chosen.sync_hide_same);
+    }
+
+    #[test]
+    fn single_click_open_defaults_off_and_keeps_a_saved_choice() {
+        // 单击模式 is off by default: objects open on double-click.
+        let older: SettingsFile = serde_json::from_str(r#"{ "version": 15 }"#).expect("parse v15");
+        assert!(!older.single_click_open);
+
+        let chosen: SettingsFile =
+            serde_json::from_str(r#"{ "version": 16, "single_click_open": true }"#)
+                .expect("parse v16");
+        assert!(chosen.single_click_open);
     }
 }

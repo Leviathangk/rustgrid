@@ -726,10 +726,9 @@ impl TreePane {
                         cx.notify();
                     });
                 }
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
-                if double_click {
-                    let _ = click_app.update(cx, |app, cx| {
+                let click_count = event.click_count();
+                let _ = click_app.update(cx, |app, cx| {
+                    if app.click_opens(click_count, event.modifiers()) {
                         let connected = matches!(
                             app.connections.get(index).map(|node| &node.status),
                             Some(ConnectionStatus::Connected(_))
@@ -739,8 +738,8 @@ impl TreePane {
                         } else {
                             app.connect(index, cx);
                         }
-                    });
-                }
+                    }
+                });
                 cx.notify();
             }))
             .on_mouse_down(
@@ -914,7 +913,7 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
@@ -926,13 +925,12 @@ impl TreePane {
                     });
                 }
                 // A plain click shows an already-open database's objects for the active main tab; a
-                // closed database is only highlighted (double-click opens it).
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                // closed database is only highlighted (unless 单击模式 is on).
+                let click_count = event.click_count();
                 let _ = open_app.update(cx, |app, cx| {
-                    if double_click {
+                    if app.click_opens(click_count, event.modifiers()) {
                         app.open_database(connection_index, database_index, cx);
-                    } else {
+                    } else if app.click_is_plain(click_count) {
                         app.show_database_objects(connection_index, database_index, cx);
                     }
                 });
@@ -1097,20 +1095,19 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
                 // A plain click shows an already-open schema's objects for the active main tab; a
-                // closed schema is only highlighted (double-click opens it).
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                // closed schema is only highlighted (unless 单击模式 is on).
+                let click_count = event.click_count();
                 let name = click_name.clone();
                 let _ = app.update(cx, |app, cx| {
-                    if double_click {
+                    if app.click_opens(click_count, event.modifiers()) {
                         app.select_schema(connection_index, database_index, name, cx);
-                    } else {
+                    } else if app.click_is_plain(click_count) {
                         app.show_schema_objects(connection_index, database_index, name, cx);
                     }
                 });
@@ -1527,23 +1524,21 @@ impl TreePane {
                     .text_color(rgb(theme.tree_selected_text))
             })
             .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            .on_click(cx.listener(move |this, event, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
                 this.selected_table = None;
+                let click_count = event.click_count();
                 let _ = app.update(cx, |app, cx| {
-                    app.set_info_routine(
-                        connection_index,
-                        database_index,
-                        click_name.clone(),
-                        kind,
-                    );
-                    cx.notify();
-                });
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
-                if double_click {
-                    let _ = app.update(cx, |app, cx| {
+                    if app.click_is_plain(click_count) {
+                        app.set_info_routine(
+                            connection_index,
+                            database_index,
+                            click_name.clone(),
+                            kind,
+                        );
+                    }
+                    if app.click_opens(click_count, event.modifiers()) {
                         app.open_routine_by_name(
                             connection_index,
                             database_name.clone(),
@@ -1551,8 +1546,9 @@ impl TreePane {
                             kind,
                             cx,
                         );
-                    });
-                }
+                    }
+                    cx.notify();
+                });
                 cx.notify();
             }))
             .on_mouse_down(
@@ -1668,10 +1664,9 @@ impl TreePane {
                 ));
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                let click_count = event.click_count();
                 let _ = app.update(cx, |app, cx| {
-                    if double_click {
+                    if app.click_opens(click_count, event.modifiers()) {
                         app.select_table(
                             connection_index,
                             database_name.clone(),
@@ -1679,9 +1674,9 @@ impl TreePane {
                             is_view,
                             cx,
                         );
-                    } else {
-                        // A single click only selects the table (and updates the info pane);
-                        // opening its data grid takes a double-click, like Navicat.
+                    } else if app.click_is_plain(click_count) {
+                        // A plain click only selects the table (and updates the info pane);
+                        // opening its data grid takes a double-click unless 单击模式 is on.
                         app.set_info_table(connection_index, database_index, table_name.clone());
                     }
                 });
@@ -1773,14 +1768,12 @@ impl TreePane {
                 this.selected_table = None;
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                let click_count = event.click_count();
                 let _ = app.update(cx, |app, cx| {
-                    if double_click {
+                    if app.click_opens(click_count, event.modifiers()) {
                         app.open_saved_query(file_index, cx);
-                    } else {
-                        cx.notify();
                     }
+                    cx.notify();
                 });
                 cx.notify();
             }))
@@ -1895,12 +1888,11 @@ impl TreePane {
                     .collect();
                 let mode = selection_mode(event.modifiers());
                 let shift = event.modifiers().shift;
-                let double_click =
-                    matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+                let click_count = event.click_count();
                 if let Some(app) = select_app.upgrade() {
                     app.update(cx, |app, cx| {
                         app.tree_row_click(&click_id, &visible, mode, shift, cx);
-                        if double_click {
+                        if app.click_opens(click_count, event.modifiers()) {
                             app.toggle_group(id, cx);
                         }
                         cx.notify();

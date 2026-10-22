@@ -742,7 +742,7 @@ impl AppView {
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
             this.hit_query(&click_key, event.click_count(), event.modifiers(), cx);
-            if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
+            if this.click_opens(event.click_count(), event.modifiers()) {
                 this.open_saved_query(index, cx);
             }
             cx.notify();
@@ -877,7 +877,7 @@ impl AppView {
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
             this.hit_query(&click_key, event.click_count(), event.modifiers(), cx);
-            if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2) {
+            if this.click_opens(event.click_count(), event.modifiers()) {
                 this.open_saved_query(index, cx);
             }
             cx.notify();

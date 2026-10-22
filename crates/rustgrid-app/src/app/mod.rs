@@ -2286,6 +2286,9 @@ pub struct AppView {
     /// Restore the previous session at startup: connections, query tabs, open databases and table
     /// tabs (Options → General, 启动时恢复). Read once at startup, like the settings themselves.
     restore_session: bool,
+    /// Open connections, databases, tables and the other tree/list objects with a single click
+    /// (Options → General, 单击模式; off means double-click, the default).
+    single_click_open: bool,
     /// The most statements one query run may execute, 0 for no limit (Options → General).
     max_statements_per_run: u32,
     /// Stop a script at its first failing statement (Options → General).
@@ -2369,6 +2372,8 @@ pub struct AppView {
     options_preserve_object_search: bool,
     /// The staged 常规 page toggle (restore the session at the next start), applied on OK.
     options_restore_session: bool,
+    /// The staged 常规 page toggle (single-click opens objects), applied on OK.
+    options_single_click_open: bool,
     /// The Users 详细列表's active sort (点击表头 column).
     users_sort: DetailSort,
     /// The Backup 详细列表's active sort (点击表头 column).
@@ -3015,6 +3020,7 @@ impl AppView {
             shortcuts: settings.shortcuts.clone(),
             preserve_object_search: settings.preserve_object_search,
             restore_session: settings.restore_session,
+            single_click_open: settings.single_click_open,
             max_statements_per_run: settings.max_statements_per_run,
             stop_on_error: settings.stop_on_error,
             query_info_editors: std::collections::HashMap::new(),
@@ -3087,6 +3093,7 @@ impl AppView {
             options_grid_show_types: settings.grid_show_types,
             options_preserve_object_search: settings.preserve_object_search,
             options_restore_session: settings.restore_session,
+            options_single_click_open: settings.single_click_open,
             users_sort: DetailSort::default(),
             backup_sort: DetailSort::default(),
             options_max_statements: settings.max_statements_per_run.to_string(),
@@ -3427,12 +3434,32 @@ impl AppView {
             shortcuts: self.shortcuts.clone(),
             preserve_object_search: self.preserve_object_search,
             restore_session: self.restore_session,
+            single_click_open: self.single_click_open,
             max_statements_per_run: self.max_statements_per_run,
             stop_on_error: self.stop_on_error,
         }) {
             // Preferences failing to persist is not worth a modal; note it in the log line only.
             let _ = error;
         }
+    }
+
+    /// Whether this click performs a row's "open" action (双击打开 normally, 单击打开 when
+    /// Options → General enables it). In single-click mode a Ctrl/Shift click only changes the
+    /// selection, and the second click of a double-click does nothing, so an object is never opened
+    /// twice.
+    pub(super) fn click_opens(&self, click_count: usize, modifiers: Modifiers) -> bool {
+        if self.single_click_open {
+            click_count == 1 && !modifiers.shift && !modifiers.control && !modifiers.platform
+        } else {
+            click_count >= 2
+        }
+    }
+
+    /// Whether a click should still run the row's plain single-click behaviour (showing info,
+    /// expanding a closed node). In single-click mode the extra click of a double-click is
+    /// ignored.
+    pub(super) fn click_is_plain(&self, click_count: usize) -> bool {
+        !self.single_click_open || click_count == 1
     }
 
     /// Whether the grid header shows each column's comment under its name.

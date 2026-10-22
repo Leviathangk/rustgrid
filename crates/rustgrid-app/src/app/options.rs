@@ -207,6 +207,7 @@ impl AppView {
         self.options_shortcuts = self.shortcuts.clone();
         self.options_preserve_object_search = self.preserve_object_search;
         self.options_restore_session = self.restore_session;
+        self.options_single_click_open = self.single_click_open;
         self.options_stop_on_error = self.stop_on_error;
         self.set_options_max_statements(self.max_statements_per_run.to_string(), cx);
         self.recording_shortcut = None;
@@ -404,6 +405,7 @@ impl AppView {
         self.shortcuts = self.options_shortcuts.clone();
         self.preserve_object_search = self.options_preserve_object_search;
         self.restore_session = self.options_restore_session;
+        self.single_click_open = self.options_single_click_open;
         self.stop_on_error = self.options_stop_on_error;
         // The 编辑器 settings reach the editors that are already open, not only the next one: the
         // font is rendered from the wrapper's options every frame, and 显示行号 / 自动换行 are
@@ -1041,6 +1043,25 @@ impl AppView {
             .child(
                 toggle_row(
                     self.theme,
+                    "options-single-click-open",
+                    t!("options.general.single_click_open").to_string(),
+                    self.options_single_click_open,
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.copy_label_menu(t!("options.general.single_click_open").to_string(), cx),
+                )
+                .tooltip(ui::text_tooltip(
+                    t!("options.general.single_click_open_hint").to_string(),
+                ))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.options_single_click_open = !this.options_single_click_open;
+                    cx.notify();
+                })),
+            )
+            .child(
+                toggle_row(
+                    self.theme,
                     "options-preserve-object-search",
                     t!("options.general.preserve_object_search").to_string(),
                     self.options_preserve_object_search,
@@ -1295,6 +1316,7 @@ impl AppView {
                     this.options_shortcuts.clear();
                     this.options_preserve_object_search = true;
                     this.options_restore_session = true;
+                    this.options_single_click_open = false;
                     this.options_stop_on_error = false;
                     this.set_options_max_statements(
                         rustgrid_config::DEFAULT_MAX_STATEMENTS.to_string(),

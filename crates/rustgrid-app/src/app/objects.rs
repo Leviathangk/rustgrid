@@ -1398,12 +1398,11 @@ impl ObjectPane {
             if editing_here {
                 return;
             }
-            let double_click =
-                matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+            let opens = this.click_opens(event.click_count(), event.modifiers(), cx);
             this.commit_pending_rename(cx);
             window.focus(&this.focus, cx);
             this.hit_object(&hit_key, event.modifiers(), cx);
-            if double_click {
+            if opens {
                 this.open_object_named(open_name.clone(), cx);
             }
         }))
@@ -1586,12 +1585,11 @@ impl ObjectPane {
             if editing_here {
                 return;
             }
-            let double_click =
-                matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+            let opens = this.click_opens(event.click_count(), event.modifiers(), cx);
             this.commit_pending_rename(cx);
             window.focus(&this.focus, cx);
             this.hit_object(&hit_key, event.modifiers(), cx);
-            if double_click {
+            if opens {
                 this.open_object_named(open_name.clone(), cx);
             }
         }))
@@ -1761,11 +1759,10 @@ impl ObjectPane {
             theme,
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            let double_click =
-                matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+            let opens = this.click_opens(event.click_count(), event.modifiers(), cx);
             window.focus(&this.focus, cx);
             this.hit_object(&hit_key, event.modifiers(), cx);
-            if double_click {
+            if opens {
                 this.open_routine_named(open_name.clone(), kind, cx);
             }
         }))
@@ -1925,11 +1922,10 @@ impl ObjectPane {
             width,
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            let double_click =
-                matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2);
+            let opens = this.click_opens(event.click_count(), event.modifiers(), cx);
             window.focus(&this.focus, cx);
             this.hit_object(&hit_key, event.modifiers(), cx);
-            if double_click {
+            if opens {
                 this.open_routine_named(open_name.clone(), kind, cx);
             }
         }))
@@ -2278,6 +2274,19 @@ impl ObjectPane {
             });
         }
         cx.notify();
+    }
+
+    /// Whether this click opens the object: double-click normally, a single click with 单击模式
+    /// enabled in Options → General.
+    fn click_opens(
+        &self,
+        click_count: usize,
+        modifiers: Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        self.app
+            .upgrade()
+            .is_some_and(|app| app.read(cx).click_opens(click_count, modifiers))
     }
 
     /// Open a table or view (used by the double-click handler).

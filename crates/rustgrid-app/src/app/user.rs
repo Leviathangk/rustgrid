@@ -866,7 +866,7 @@ impl AppView {
             self.users_selection.hit(&visible, key, mode);
         }
         self.on_selection_changed(MarqueeTarget::Users, cx);
-        if click_count >= 2 {
+        if self.click_opens(click_count, modifiers) {
             self.open_selected_user(cx);
         }
     }
