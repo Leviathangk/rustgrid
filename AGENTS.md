@@ -328,9 +328,18 @@ touching UI code.
   open that cell's editor. Inside a cell editor Up/Down (`DesignerRowUp`/`DesignerRowDown`, bound at
   `TableDesignerCell > Input`) commit and move one row and Left/Right stay with the caret; Enter
   commits and moves down. Focus returns to the designer root after the move, so the next arrow keeps
-  navigating. A gutter click is row mode (`field_rows` paints the name cells); a cell click is cell
-  mode (`selected_cell` paints only that cell). Tab must be claimed by a key binding rather than an
-  element's `on_key_down` (`ui::TextInput::on_tab`
+  navigating. The fields grid uses the table grid's own selection model (`CellSelection` /
+  `CellRange` in `field_selection`): a click selects one cell, drag or Shift-click extends a
+  rectangular range, Ctrl/Cmd-click toggles a range, Ctrl+A (`select_all_fields`) selects every
+  cell, and a press on the left gutter selects/extend whole rows. A click only selects; a second
+  click / double-click / Enter / F2 opens the cell's editor (`field_mouse_up`), exactly like the
+  table grid, and a drag never opens one. Painting is per cell (`CellSelection::contains`), not
+  from `selected_cell`, so a range shows every cell it covers. 删除字段, 上移 and 下移 act on every
+  row the selection touches (`selected_field_rows`); `move_field` moves those rows one slot as a
+  group (`moved_field_rows`), keeping their internal order. Ctrl+C (`designer.copy`) copies the
+  selected cells as TSV, using the table grid's convention: the selection's bounding rectangle,
+  with unselected cells in it empty. Tab must be claimed by a key binding
+  rather than an element's `on_key_down` (`ui::TextInput::on_tab`
   never fires for it: gpui dispatches a keystroke a binding matches as an action, and `Root` binds
   `tab`). The 类型 drop-down is driven from the keyboard: `type_highlight` marks a row, Up/Down
   (`ui::TextInput::on_arrow`) move it and `keep_type_highlight_visible` scrolls it in, Enter takes
@@ -788,7 +797,11 @@ shadcn chrome described above. Implemented today:
     list's entry, `clear_object_search` (Esc) clears just that one and
     `clear_object_search_unless_kept` clears every list on the page/database/schema/connection
     switches it guards. With the setting on each list's search survives all of those, so one search
-    covers the same table name in every environment; 用户 and 备份 already keep their own box. A
+    covers the same table name in every environment; 用户 and 备份 already keep their own box.
+    **Clicking a main tab always clears that tab's own search** (`clear_main_tab_search`; 表 / 视图
+    / 函数 / 查询 through `object_searches`, 用户 / 备份 through their own field), so re-entering a
+    list always shows every object — the setting only covers the database/schema/connection
+    switches. A
     `settings.json` written before this version had the old `false` default, so loading turns the
     setting on once; files this version writes keep the user's choice.
 
@@ -953,6 +966,11 @@ make more engines cheap later — do not build those features early.
   `sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&pool)`. Using `sqlx::query` prepares the
   statement and MySQL rejects it with `1295 ... not supported in the prepared statement
   protocol yet`. Reserve `sqlx::query` for parameterized DML/`SELECT`.
+- **A pure column reorder is invisible to the MySQL designer diff.** `ColumnDef` carries no
+  position, so `existing != column` is false when a field only moves; `schema_sql` therefore
+  compares the relative order of the columns present in both schemas
+  (`reordered_column_names`) and emits `MODIFY COLUMN ... FIRST` / `AFTER` for those. Without
+  that, 上移/下移 changes the grid but 保存 reports 暂无更改.
 - The query editor runs arbitrary SQL through `Connection::execute_query`
   (`rustgrid-mysql`), which uses the text protocol on a **pinned pooled connection** (so `USE db`
   and the statement share a session). Since MySQL cannot tell the caller whether a statement

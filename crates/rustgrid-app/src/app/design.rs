@@ -367,6 +367,38 @@ fn apply_row_selection(
     }
 }
 
+/// The destination indices of a whole-group field move: every selected row swaps with its
+/// neighbour in `delta`'s direction, preserving the group's internal order. `None` when the group
+/// is already against the edge in that direction (the move is refused as a whole, never partially).
+fn moved_field_rows(rows: &[usize], total: usize, delta: isize) -> Option<Vec<usize>> {
+    let delta = delta.signum();
+    if rows.is_empty() || total == 0 || delta == 0 {
+        return None;
+    }
+    if (delta < 0 && rows[0] == 0) || (delta > 0 && rows[rows.len() - 1] + 1 >= total) {
+        return None;
+    }
+    Some(if delta < 0 {
+        rows.iter().map(|row| row - 1).collect()
+    } else {
+        rows.iter().map(|row| row + 1).collect()
+    })
+}
+
+/// Swap the selected field rows one slot in `delta`'s direction. Callers check `moved_field_rows`
+/// first, so every selected row has a neighbour to swap with.
+fn move_columns(columns: &mut [ColumnDef], rows: &[usize], delta: isize) {
+    if delta < 0 {
+        for row in rows {
+            columns.swap(*row, *row - 1);
+        }
+    } else {
+        for row in rows.iter().rev() {
+            columns.swap(*row, *row + 1);
+        }
+    }
+}
+
 /// One row of the index field editor: a column of the table, whether it is a member of the index
 /// being edited, and — for a member — its own per-column options.
 #[derive(Clone)]
@@ -616,12 +648,24 @@ pub(super) struct TableDesignView {
     pub(super) original: Option<TableSchema>,
     pub(super) tab: DesignerTab,
     pub(super) selected_field: Option<usize>,
-    /// The one field cell the user last clicked (or tabbed into), painted selected like the table
-    /// grid's cell. `None` means row selection: the gutter's `field_rows` highlight the name cells.
+    /// The fields grid's active cell (the caret's cell), used for the detail panel and keyboard
+    /// navigation. Painting comes from `field_selection`, exactly like the table grid.
     pub(super) selected_cell: Option<(usize, FieldCell)>,
+    /// The fields grid's Excel-like selection: rectangular ranges of `(row, column)` cells, the
+    /// same model the table grid uses (click selects, drag/shift extend, Ctrl toggles, Ctrl+A all).
+    pub(super) field_selection: Option<CellSelection>,
+    /// A press is driving a fields-grid range extension.
+    pub(super) field_selecting: bool,
+    /// The cell the current press landed on (a click opens its editor on mouse-up when it was a
+    /// re-click or a double-click, like the table grid).
+    field_cell_press: Option<(usize, usize)>,
+    /// The press moved to another cell, so mouse-up must not open an editor.
+    field_cell_dragged: bool,
+    /// The pressed cell was already selected: a second click edits it.
+    field_cell_reselect: bool,
     pub(super) selected_index: Option<usize>,
-    /// Multi-row selections from each grid's left gutter.
-    pub(super) field_rows: RowSelection,
+    /// Multi-row selections from the designer's other grids' left gutters (index, foreign keys,
+    /// ...). The fields grid keeps its cell selection in `field_selection`.
     pub(super) index_rows: RowSelection,
     pub(super) fk_rows: RowSelection,
     pub(super) index_edit: Option<IndexEdit>,
@@ -891,8 +935,12 @@ impl TableDesignView {
             tab: DesignerTab::Fields,
             selected_field: None,
             selected_cell: None,
+            field_selection: None,
+            field_selecting: false,
+            field_cell_press: None,
+            field_cell_dragged: false,
+            field_cell_reselect: false,
             selected_index: None,
-            field_rows: RowSelection::default(),
             index_rows: RowSelection::default(),
             fk_rows: RowSelection::default(),
             index_edit: None,
@@ -1016,6 +1064,10 @@ impl TableDesignView {
                             Some(0)
                         };
                         view.selected_cell = view.selected_field.map(|row| (row, FieldCell::Name));
+                        view.field_selection =
+                            view.selected_field.map(|row| CellSelection::new(row, 0));
+                        view.field_selecting = false;
+                        view.field_cell_press = None;
                         view.sync_selected_input(cx);
                         view.sync_option_inputs(cx);
                     }
@@ -1341,39 +1393,416 @@ impl TableDesignView {
         cx.notify();
     }
 
-    pub(super) fn select_field(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        self.selected_field = Some(index);
-        // Row mode: a gutter click (or a field-level action) highlights the name cells. A cell
-        // click immediately replaces this with `selected_cell` (see `begin_edit`/`open_type_combo`).
-        self.selected_cell = None;
-        self.field_rows.rows.clear();
-        self.field_rows.rows.insert(index);
-        self.field_rows.anchor = Some(index);
+    /// The fields grid's column count: 列名, 类型 and the engine's own field columns.
+    pub(super) fn field_column_count(&self) -> usize {
+        2 + self.designer.field_columns.len()
+    }
+
+    /// The display column of an editable field cell.
+    fn field_cell_column(&self, cell: FieldCell) -> usize {
+        match cell {
+            FieldCell::Name => 0,
+            FieldCell::Type => 1,
+            FieldCell::Text(column) => {
+                2 + self
+                    .designer
+                    .field_columns
+                    .iter()
+                    .position(|kind| field_column_text(*kind) == Some(column))
+                    .unwrap_or(0)
+            }
+        }
+    }
+
+    /// The editable cell at a display column; `None` for a toggle or read-only column.
+    fn field_cell_at(&self, column: usize) -> Option<FieldCell> {
+        match column {
+            0 => Some(FieldCell::Name),
+            1 => Some(FieldCell::Type),
+            _ => self
+                .designer
+                .field_columns
+                .get(column - 2)
+                .and_then(|kind| field_column_text(*kind))
+                .map(FieldCell::Text),
+        }
+    }
+
+    /// The field rows the current cells cover — the rows 删除字段 / 上移 / 下移 act on. Falls back to
+    /// the active row when nothing is selected (a freshly loaded table starts that way).
+    pub(super) fn selected_field_rows(&self) -> Vec<usize> {
+        let rows = match &self.field_selection {
+            Some(selection) => selection.row_indices(),
+            None => self.selected_field.into_iter().collect(),
+        };
+        rows.into_iter()
+            .filter(|row| *row < self.schema.columns.len())
+            .collect()
+    }
+
+    /// Point `selected_field` / `selected_cell` at the selection's active cell and load the detail
+    /// panel for its row, exactly like the table grid's active cell.
+    fn sync_field_active(&mut self, cx: &mut Context<'_, Self>) {
+        let cursor = self
+            .field_selection
+            .as_ref()
+            .map(|selection| selection.active_cursor());
+        match cursor {
+            Some((row, column)) => {
+                self.selected_field = Some(row);
+                self.selected_cell = self.field_cell_at(column).map(|cell| (row, cell));
+            }
+            None => {
+                self.selected_field = None;
+                self.selected_cell = None;
+            }
+        }
+        self.sync_selected_input(cx);
+    }
+
+    /// Make one field row active from row-level navigation (the wheel, a gutter action) without
+    /// opening an editor; the cell selection lands on its 列名 cell.
+    pub(super) fn select_field(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        self.selected_field = Some(row);
+        self.selected_cell = Some((row, FieldCell::Name));
+        self.field_selection = Some(CellSelection::new(
+            row,
+            self.field_cell_column(FieldCell::Name),
+        ));
         self.default_menu_open = false;
         self.sync_selected_input(cx);
         cx.notify();
     }
 
-    /// Select one row (or extend/toggle the selection) from the field grid's left gutter.
-    pub(super) fn select_field_row(
+    /// Make one cell active (an editor opened or a keyboard move landed there). A cell inside the
+    /// current selection keeps the rest of the range; a cell outside it becomes the new selection.
+    pub(super) fn select_field_cell(
         &mut self,
         row: usize,
-        modifiers: &Modifiers,
+        cell: FieldCell,
         cx: &mut Context<'_, Self>,
     ) {
+        self.selected_field = Some(row);
+        self.selected_cell = Some((row, cell));
+        let column = self.field_cell_column(cell);
+        if !self
+            .field_selection
+            .as_ref()
+            .is_some_and(|selection| selection.contains(row, column))
+        {
+            self.field_selection = Some(CellSelection::new(row, column));
+        }
+        self.default_menu_open = false;
+        self.sync_selected_input(cx);
+        cx.notify();
+    }
+
+    /// Copy the selected cells as TSV, like the table grid: the selection's bounding rectangle,
+    /// with cells outside every range left empty. The text of one cell is what its editor shows
+    /// (a toggle contributes `1` when checked).
+    pub(super) fn copy_field_selection(&mut self, cx: &mut Context<'_, Self>) {
+        if self.tab != DesignerTab::Fields {
+            return;
+        }
+        let Some(selection) = self.field_selection.clone() else {
+            return;
+        };
+        if selection.ranges.is_empty() || self.schema.columns.is_empty() {
+            return;
+        }
+        let (start_row, end_row) = selection.rows();
+        let (start_col, end_col) = selection.cols();
+        let mut lines = Vec::new();
+        for row in start_row..=end_row {
+            let Some(column) = self.schema.columns.get(row) else {
+                continue;
+            };
+            let mut values = Vec::new();
+            for col in start_col..=end_col {
+                values.push(if selection.contains(row, col) {
+                    self.field_cell_copy_text(column, col)
+                } else {
+                    String::new()
+                });
+            }
+            lines.push(values.join("\t"));
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+        cx.notify();
+    }
+
+    /// The text a fields-grid cell contributes to a copy: the edited value for text cells, `1`
+    /// for a checked toggle (a generated column copies its expression instead).
+    fn field_cell_copy_text(&self, column: &ColumnDef, display_column: usize) -> String {
+        let Some(kind) = self
+            .designer
+            .field_columns
+            .get(display_column.wrapping_sub(2))
+        else {
+            return match display_column {
+                0 => column.name.clone(),
+                1 => column.data_type.clone(),
+                _ => String::new(),
+            };
+        };
+        if let Some(text_column) = field_column_text(*kind) {
+            return field_column_value(column, text_column);
+        }
+        match kind {
+            DesignerFieldColumn::NotNull => (if column.nullable { 0 } else { 1 }).to_string(),
+            DesignerFieldColumn::Generated | DesignerFieldColumn::Computed => {
+                column.generated.clone()
+            }
+            DesignerFieldColumn::Sparse => (if column.sparse { 1 } else { 0 }).to_string(),
+            DesignerFieldColumn::Key => (if column.primary_key { 1 } else { 0 }).to_string(),
+            _ => field_column_display(*kind, column),
+        }
+    }
+
+    /// Ctrl+A over the fields grid: select every field cell, like the table grid.
+    pub(super) fn select_all_fields(&mut self, cx: &mut Context<'_, Self>) {
+        if self.tab != DesignerTab::Fields || self.schema.columns.is_empty() {
+            return;
+        }
         self.edit = None;
         self.edit_blur = None;
         self.type_combo = None;
         self.default_menu_open = false;
-        self.selected_cell = None;
-        apply_row_selection(
-            &mut self.field_rows,
-            &mut self.selected_field,
-            row,
-            modifiers,
-        );
+        let rows = self.schema.columns.len();
+        let last_column = self.field_column_count().saturating_sub(1);
+        let active = self.selected_field.filter(|row| *row < rows).unwrap_or(0);
+        self.field_selection = Some(CellSelection::single((0, 0), (rows - 1, last_column)));
+        self.selected_field = Some(active);
+        self.selected_cell = Some((active, FieldCell::Name));
+        self.field_selecting = false;
+        self.field_cell_press = None;
+        self.field_cell_dragged = false;
         self.sync_selected_input(cx);
         cx.notify();
+    }
+
+    /// Press on one cell of the fields grid: click selects, Shift extends the active range, Ctrl
+    /// toggles a cell in/out — the table grid's mouse-down logic. A press that is a re-click or a
+    /// double-click opens the editor on mouse-up.
+    pub(super) fn field_cell_mouse_down(
+        &mut self,
+        row: usize,
+        column: usize,
+        modifiers: Modifiers,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.tab != DesignerTab::Fields || row >= self.schema.columns.len() {
+            return;
+        }
+        // The in-place editor owns mouse input inside its own cell (caret and text drag).
+        if self.edit.as_ref().is_some_and(|edit| {
+            edit.row == row && self.field_cell_column(field_cell_of(edit.column)) == column
+        }) {
+            self.field_selecting = false;
+            self.field_cell_press = None;
+            return;
+        }
+        self.edit = None;
+        self.edit_blur = None;
+        if self
+            .type_combo
+            .is_some_and(|open| open != row || column != 1)
+        {
+            self.type_combo = None;
+        }
+        self.default_menu_open = false;
+        self.field_cell_dragged = false;
+        let ctrl = modifiers.control || modifiers.platform;
+        self.field_selecting = true;
+        if modifiers.shift {
+            self.field_cell_press = None;
+            if let Some(selection) = self.field_selection.as_mut() {
+                let active = selection.active.min(selection.ranges.len() - 1);
+                selection.ranges[active].cursor = (row, column);
+            } else {
+                self.field_selection = Some(CellSelection::new(row, column));
+            }
+        } else if ctrl {
+            self.field_cell_press = None;
+            self.add_or_remove_field_range(row, column, row, column);
+        } else {
+            self.field_cell_reselect = self.field_selection.as_ref().is_some_and(|selection| {
+                selection.ranges.len() == 1
+                    && selection.active().anchor == (row, column)
+                    && selection.active().cursor == (row, column)
+            });
+            self.field_selection = Some(CellSelection::new(row, column));
+            self.field_cell_press = Some((row, column));
+        }
+        self.sync_field_active(cx);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Press on a row of the fields grid's left gutter: the whole row (all columns) is selected,
+    /// and dragging down the gutter extends whole rows — the same gesture as the table grid.
+    pub(super) fn field_gutter_mouse_down(
+        &mut self,
+        row: usize,
+        modifiers: Modifiers,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.tab != DesignerTab::Fields || row >= self.schema.columns.len() {
+            return;
+        }
+        self.edit = None;
+        self.edit_blur = None;
+        self.type_combo = None;
+        self.default_menu_open = false;
+        self.field_cell_dragged = false;
+        self.field_cell_press = None;
+        let last = self.field_column_count().saturating_sub(1);
+        let ctrl = modifiers.control || modifiers.platform;
+        self.field_selecting = true;
+        if modifiers.shift {
+            if let Some(selection) = self.field_selection.as_mut() {
+                let active = selection.active.min(selection.ranges.len() - 1);
+                selection.ranges[active].cursor = (row, last);
+            } else {
+                self.field_selection = Some(CellSelection::single((row, 0), (row, last)));
+            }
+        } else if ctrl {
+            self.add_or_remove_field_range(row, 0, row, last);
+        } else {
+            self.field_selection = Some(CellSelection::single((row, 0), (row, last)));
+        }
+        self.sync_field_active(cx);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Extend the active range to the cell under the pointer while the button is down.
+    pub(super) fn field_cell_mouse_move(
+        &mut self,
+        row: usize,
+        column: usize,
+        event: &MouseMoveEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.field_selecting
+            || event.pressed_button != Some(MouseButton::Left)
+            || row >= self.schema.columns.len()
+        {
+            return;
+        }
+        let mut changed = false;
+        if let Some(selection) = self.field_selection.as_mut()
+            && let Some(range) = selection.ranges.get_mut(selection.active)
+            && range.cursor != (row, column)
+        {
+            range.cursor = (row, column);
+            changed = true;
+        }
+        if self
+            .field_cell_press
+            .is_some_and(|press| press != (row, column))
+            && !self.field_cell_dragged
+        {
+            self.field_cell_dragged = true;
+            changed = true;
+        }
+        if changed {
+            self.sync_field_active(cx);
+            cx.notify();
+        }
+    }
+
+    /// Finish a fields-grid press: a re-click / double-click on the pressed cell opens its editor,
+    /// a drag leaves the range selected.
+    pub(super) fn field_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.field_selecting && self.field_cell_press.is_none() {
+            return;
+        }
+        self.field_selecting = false;
+        let press = self.field_cell_press.take();
+        let dragged = self.field_cell_dragged;
+        let reselect = std::mem::replace(&mut self.field_cell_reselect, false);
+        if let Some((row, column)) = press
+            && !dragged
+            && (event.click_count >= 2 || reselect)
+        {
+            self.begin_field_cell_edit(row, column, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether a drag is in progress, so a checkbox's click must not toggle under the range.
+    pub(super) fn field_drag_in_progress(&self) -> bool {
+        self.field_cell_dragged
+    }
+
+    /// Open the editor of one display column, if that column is editable.
+    fn begin_field_cell_edit(
+        &mut self,
+        row: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match column {
+            0 => self.begin_edit(row, FieldColumn::Name, window, cx),
+            1 => self.open_type_combo(row, window, cx),
+            _ => {
+                if let Some(FieldCell::Text(column)) = self.field_cell_at(column) {
+                    self.begin_edit(row, column, window, cx);
+                }
+            }
+        }
+    }
+
+    /// Add a range to the selection, or remove the range that already contains its anchor
+    /// (Ctrl-click toggle), exactly like the table grid.
+    fn add_or_remove_field_range(
+        &mut self,
+        anchor_row: usize,
+        anchor_col: usize,
+        cursor_row: usize,
+        cursor_col: usize,
+    ) {
+        if self.field_selection.is_none() {
+            self.field_selection = Some(CellSelection::single(
+                (anchor_row, anchor_col),
+                (cursor_row, cursor_col),
+            ));
+            return;
+        }
+        let empty = {
+            let Some(selection) = self.field_selection.as_mut() else {
+                return;
+            };
+            if let Some(position) = selection
+                .ranges
+                .iter()
+                .position(|range| range.contains(anchor_row, anchor_col))
+            {
+                selection.ranges.remove(position);
+            } else {
+                selection.ranges.push(CellRange {
+                    anchor: (anchor_row, anchor_col),
+                    cursor: (cursor_row, cursor_col),
+                });
+                selection.active = selection.ranges.len() - 1;
+            }
+            if !selection.ranges.is_empty() {
+                selection.active = selection.active.min(selection.ranges.len() - 1);
+            }
+            selection.ranges.is_empty()
+        };
+        if empty {
+            self.field_selection = None;
+        }
     }
 
     /// Drop every in-place editor and transient popup state of the designer. Scrolling and switching
@@ -1415,6 +1844,9 @@ impl TableDesignView {
 
     pub(super) fn select_tab(&mut self, tab: DesignerTab, cx: &mut Context<'_, Self>) {
         self.tab = tab;
+        self.field_selecting = false;
+        self.field_cell_press = None;
+        self.field_cell_dragged = false;
         self.clear_editors();
         if matches!(tab, DesignerTab::Options | DesignerTab::Comment) {
             self.sync_option_inputs(cx);
@@ -1460,8 +1892,7 @@ impl TableDesignView {
         self.type_combo = None;
         self.edit = None;
         self.edit_blur = None;
-        self.select_field(row, cx);
-        self.selected_cell = Some((row, field_cell_of(column)));
+        self.select_field_cell(row, field_cell_of(column), cx);
         self.edit_blur = Some(cx.on_blur(&focus, window, |this, _window, cx| this.finish_edit(cx)));
         self.edit = Some(FieldEdit { row, column, input });
         window.focus(&focus, cx);
@@ -1482,8 +1913,7 @@ impl TableDesignView {
     ) {
         self.edit = None;
         self.edit_blur = None;
-        self.select_field(row, cx);
-        self.selected_cell = Some((row, FieldCell::Type));
+        self.select_field_cell(row, FieldCell::Type, cx);
         if self.type_combo == Some(row) {
             self.type_combo = None;
             cx.notify();
@@ -1594,9 +2024,10 @@ impl TableDesignView {
             || self.edit.is_some()
             || self.type_combo.is_some()
             || !self.focus.is_focused(window)
-            || event.keystroke.modifiers.control
-            || event.keystroke.modifiers.platform
         {
+            return;
+        }
+        if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
             return;
         }
         let Some((row, cell)) = self
@@ -1659,9 +2090,12 @@ impl TableDesignView {
         }
         self.selected_field = Some(target_row);
         self.selected_cell = Some((target_row, target_cell));
-        self.field_rows.rows.clear();
-        self.field_rows.rows.insert(target_row);
-        self.field_rows.anchor = Some(target_row);
+        self.field_selection = Some(CellSelection::new(
+            target_row,
+            self.field_cell_column(target_cell),
+        ));
+        self.field_selecting = false;
+        self.field_cell_press = None;
         self.default_menu_open = false;
         self.reveal_design_row(target_row);
         self.sync_selected_input(cx);
@@ -1772,7 +2206,6 @@ impl TableDesignView {
         self.edit = None;
         self.edit_blur = None;
         self.type_combo = None;
-        self.select_field(row, cx);
         match cell {
             FieldCell::Name => self.begin_edit(row, FieldColumn::Name, window, cx),
             FieldCell::Type => self.open_type_combo(row, window, cx),
@@ -2699,9 +3132,7 @@ impl TableDesignView {
         self.schema.columns.insert(index, column);
         self.selected_field = Some(index);
         self.selected_cell = Some((index, FieldCell::Name));
-        self.field_rows.rows.clear();
-        self.field_rows.rows.insert(index);
-        self.field_rows.anchor = Some(index);
+        self.field_selection = Some(CellSelection::new(index, 0));
         self.reveal_design_row(index);
         self.sync_selected_input(cx);
         self.mark_dirty(cx);
@@ -2723,11 +3154,9 @@ impl TableDesignView {
     }
 
     pub(super) fn delete_field(&mut self, cx: &mut Context<'_, Self>) {
-        // Delete every gutter-selected row, falling back to the active one.
-        let mut targets: BTreeSet<usize> = self.field_rows.rows.clone();
-        if let Some(active) = self.selected_field {
-            targets.insert(active);
-        }
+        // Delete every field row the cell selection touches (the active row is the fallback when
+        // nothing is selected).
+        let mut targets: BTreeSet<usize> = self.selected_field_rows().into_iter().collect();
         targets.retain(|row| *row < self.schema.columns.len());
         if targets.is_empty() {
             return;
@@ -2795,11 +3224,11 @@ impl TableDesignView {
             Some(first.min(self.schema.columns.len() - 1))
         };
         self.selected_cell = self.selected_field.map(|row| (row, FieldCell::Name));
-        self.field_rows.rows.clear();
-        if let Some(active) = self.selected_field {
-            self.field_rows.rows.insert(active);
-            self.field_rows.anchor = Some(active);
-        }
+        self.field_selection = self
+            .selected_field
+            .map(|row| CellSelection::new(row, self.field_cell_column(FieldCell::Name)));
+        self.field_selecting = false;
+        self.field_cell_press = None;
         self.sync_selected_input(cx);
         self.mark_dirty(cx);
     }
@@ -2821,25 +3250,59 @@ impl TableDesignView {
         self.mark_dirty(cx);
     }
 
+    /// Move the selected field(s) one row up/down. A multi-row selection moves as one group:
+    /// every selected row swaps with its neighbour in that direction (so the group keeps its
+    /// internal order and steps over unselected rows), and the move is refused when the group is
+    /// already against that edge.
     pub(super) fn move_field(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
-        let Some(index) = self.selected_field else {
-            return;
-        };
-        let target = index as isize + delta;
-        if target < 0 || target as usize >= self.schema.columns.len() {
+        let total = self.schema.columns.len();
+        let delta = delta.signum();
+        let rows = self.selected_field_rows();
+        if rows.is_empty() || delta == 0 {
             return;
         }
-        let target = target as usize;
-        self.schema.columns.swap(index, target);
-        self.selected_field = Some(target);
-        self.field_rows.rows.clear();
-        self.field_rows.rows.insert(target);
-        self.field_rows.anchor = Some(target);
-        // Move the selected cell with its row, keeping the edited column (a length stays a length).
-        if let Some((row, cell)) = self.selected_cell
-            && row == index
-        {
-            self.selected_cell = Some((target, cell));
+        let Some(targets) = moved_field_rows(&rows, total, delta) else {
+            return;
+        };
+        move_columns(&mut self.schema.columns, &rows, delta);
+        let moved: BTreeSet<usize> = targets.into_iter().collect();
+
+        // Keep the active row on the same column it was on, and the cell selection with it.
+        let active = self
+            .selected_field
+            .map(|row| {
+                if delta < 0 {
+                    row.saturating_sub(1)
+                } else {
+                    row + 1
+                }
+            })
+            .filter(|row| moved.contains(row))
+            .or_else(|| moved.iter().next().copied());
+        self.selected_field = active;
+        if let Some((row, cell)) = self.selected_cell {
+            let target = if delta < 0 {
+                row.saturating_sub(1)
+            } else {
+                row + 1
+            };
+            self.selected_cell = (total > 0 && target < total).then_some((target, cell));
+        }
+        // The selected cells moved with their rows, so shift every range instead of collapsing the
+        // selection: the user keeps the same block on the moved fields.
+        if let Some(selection) = self.field_selection.as_mut() {
+            for range in &mut selection.ranges {
+                if delta < 0 {
+                    range.anchor.0 -= 1;
+                    range.cursor.0 -= 1;
+                } else {
+                    range.anchor.0 += 1;
+                    range.cursor.0 += 1;
+                }
+            }
+        }
+        if let Some(row) = active {
+            self.reveal_design_row(row);
         }
         self.mark_dirty(cx);
     }
@@ -3604,9 +4067,7 @@ impl TableDesignView {
     /// Ask the app to confirm deleting the current selection in one designer grid before it runs.
     pub(super) fn request_delete(&mut self, kind: DesignDeleteKind, cx: &mut Context<'_, Self>) {
         let deletable = match kind {
-            DesignDeleteKind::Fields => {
-                !self.field_rows.rows.is_empty() || self.selected_field.is_some()
-            }
+            DesignDeleteKind::Fields => !self.selected_field_rows().is_empty(),
             DesignDeleteKind::Indexes => {
                 let mut targets: BTreeSet<usize> = self.index_rows.rows.clone();
                 if let Some(active) = self.selected_index {
@@ -4372,5 +4833,42 @@ mod tests {
         // Down wraps to its top and Up steps to the row before its last.
         assert_eq!(next_type_highlight(2, Some(7), true), Some(0));
         assert_eq!(next_type_highlight(2, Some(7), false), Some(0));
+    }
+
+    #[test]
+    fn a_group_move_shifts_every_selected_field_one_slot() {
+        assert_eq!(moved_field_rows(&[2, 3], 5, -1), Some(vec![1, 2]));
+        assert_eq!(moved_field_rows(&[1, 3], 5, 1), Some(vec![2, 4]));
+        // Against the edge the whole group stays put instead of moving part of itself.
+        assert_eq!(moved_field_rows(&[0, 3], 5, -1), None);
+        assert_eq!(moved_field_rows(&[1, 4], 5, 1), None);
+        assert_eq!(moved_field_rows(&[], 5, 1), None);
+    }
+
+    #[test]
+    fn a_group_move_swaps_the_selected_columns() {
+        let mut columns: Vec<ColumnDef> = ["id", "password", "uid", "sex", "avatar"]
+            .into_iter()
+            .map(|name| ColumnDef {
+                name: name.to_string(),
+                ..ColumnDef::default()
+            })
+            .collect();
+        // uid / sex / avatar move above password, keeping their own order.
+        move_columns(&mut columns, &[2, 3, 4], -1);
+        let names: Vec<&str> = columns.iter().map(|column| column.name.as_str()).collect();
+        assert_eq!(names, ["id", "uid", "sex", "avatar", "password"]);
+
+        move_columns(&mut columns, &[1, 2, 3], 1);
+        let names: Vec<&str> = columns.iter().map(|column| column.name.as_str()).collect();
+        assert_eq!(names, ["id", "password", "uid", "sex", "avatar"]);
+    }
+
+    #[test]
+    fn a_cell_selection_reports_the_field_rows_it_touches() {
+        let selection = CellSelection::single((2, 1), (4, 1));
+        assert_eq!(selection.row_indices(), vec![2, 3, 4]);
+        assert!(selection.contains(3, 1));
+        assert!(!selection.contains(3, 0));
     }
 }

@@ -182,7 +182,9 @@ gpui::actions!(
         NextDesignerCell,
         PrevDesignerCell,
         DesignerRowUp,
-        DesignerRowDown
+        DesignerRowDown,
+        DesignerSelectAll,
+        DesignerCopy
     ]
 );
 

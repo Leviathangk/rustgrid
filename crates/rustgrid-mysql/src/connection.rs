@@ -1635,6 +1635,8 @@ fn schema_sql(
         }
     }
 
+    let reordered = reordered_column_names(original, modified);
+
     for (position, column) in modified.columns.iter().enumerate() {
         let existing = original
             .columns
@@ -1647,7 +1649,9 @@ fn schema_sql(
                 clause.push_str(&position_clause(modified, position));
                 clauses.push(clause);
             }
-            Some(existing) if existing != column => {
+            Some(existing) if existing != column || reordered.contains(column.name.as_str()) => {
+                // A pure re-order leaves the definition untouched, so the position clause is what
+                // makes the move reach the server (`MODIFY ... AFTER` / `FIRST`).
                 let mut clause = format!("MODIFY COLUMN {definition}");
                 clause.push_str(&position_clause(modified, position));
                 clauses.push(clause);
@@ -1811,6 +1815,49 @@ fn position_clause(schema: &TableSchema, position: usize) -> String {
         Some(previous) => format!(" AFTER {}", quote_identifier(&previous.name)),
         None => String::new(),
     }
+}
+
+/// Columns present in both schemas whose relative order changed. Added or dropped columns do not
+/// count: their own `ADD`/`DROP` clauses already establish their place.
+fn reordered_column_names(
+    original: &TableSchema,
+    modified: &TableSchema,
+) -> std::collections::HashSet<String> {
+    let modified_names: std::collections::HashSet<&str> = modified
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    let shared: std::collections::HashSet<&str> = original
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .filter(|name| modified_names.contains(name))
+        .collect();
+    let original_prev = column_predecessors(&original.columns, &shared);
+    let modified_prev = column_predecessors(&modified.columns, &shared);
+    shared
+        .into_iter()
+        .filter(|name| original_prev.get(*name) != modified_prev.get(*name))
+        .map(str::to_string)
+        .collect()
+}
+
+/// For every shared column, the shared column immediately before it (owned, so the two schemas'
+/// lifetimes do not have to line up).
+fn column_predecessors(
+    columns: &[ColumnDef],
+    shared: &std::collections::HashSet<&str>,
+) -> std::collections::HashMap<String, Option<String>> {
+    let mut map = std::collections::HashMap::new();
+    let mut previous: Option<String> = None;
+    for column in columns {
+        if shared.contains(column.name.as_str()) {
+            map.insert(column.name.clone(), previous.clone());
+            previous = Some(column.name.clone());
+        }
+    }
+    map
 }
 
 fn primary_columns(schema: &TableSchema) -> Vec<String> {
@@ -3208,6 +3255,52 @@ mod tests {
         assert!(sql.starts_with("ALTER TABLE `db`.`t`"));
         assert!(sql.contains("MODIFY COLUMN `name` varchar(100) NULL AFTER `id`"));
         assert!(sql.contains("ADD COLUMN `age` int NULL AFTER `name`"));
+    }
+
+    #[test]
+    fn builds_alter_for_a_pure_column_reorder() {
+        let original = TableSchema {
+            columns: ["id", "password", "uid", "sex", "avatar"]
+                .into_iter()
+                .map(|name| ColumnDef {
+                    name: name.to_string(),
+                    data_type: "varchar".to_string(),
+                    length: "10".to_string(),
+                    nullable: true,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut modified = original.clone();
+        modified.columns = vec![
+            original.columns[0].clone(),
+            original.columns[2].clone(),
+            original.columns[3].clone(),
+            original.columns[4].clone(),
+            original.columns[1].clone(),
+        ];
+
+        // The definitions are identical, so only the position change can make the SQL non-empty.
+        let sql = schema_sql(Engine::MySql, "db", "t", Some(&original), &modified);
+        assert!(!sql.trim().is_empty());
+        assert!(sql.contains("MODIFY COLUMN `uid` varchar(10) NULL AFTER `id`"));
+        assert!(sql.contains("MODIFY COLUMN `password` varchar(10) NULL AFTER `avatar`"));
+
+        // Adding a column in front moves no existing one, so it must not emit MODIFY clauses.
+        let mut added = original.clone();
+        added.columns.insert(
+            0,
+            ColumnDef {
+                name: "age".to_string(),
+                data_type: "int".to_string(),
+                nullable: true,
+                ..Default::default()
+            },
+        );
+        let sql = schema_sql(Engine::MySql, "db", "t", Some(&original), &added);
+        assert!(sql.contains("ADD COLUMN"));
+        assert!(!sql.contains("MODIFY COLUMN"), "{sql}");
     }
 
     #[test]

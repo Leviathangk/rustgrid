@@ -51,6 +51,12 @@ impl TableDesignView {
             .track_focus(&self.focus)
             .key_context(DESIGNER_CONTEXT)
             .on_action(cx.listener(|this, _: &SaveDesign, _window, cx| this.save(cx)))
+            .on_action(
+                cx.listener(|this, _: &DesignerSelectAll, _window, cx| this.select_all_fields(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &DesignerCopy, _window, cx| this.copy_field_selection(cx)),
+            )
             .on_action(cx.listener(|this, _: &NextDesignerCell, window, cx| {
                 this.tab_designer_cell(false, window, cx)
             }))
@@ -110,7 +116,8 @@ impl TableDesignView {
         }))
         .on_mouse_up(
             MouseButton::Left,
-            cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+            cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                this.field_mouse_up(event, window, cx);
                 let h = this.hscroll_grab.take().is_some();
                 let v = this.vscroll_grab.take().is_some();
                 if h || v {
@@ -131,11 +138,13 @@ impl TableDesignView {
         let excludes = self.tab == DesignerTab::Excludes && !self.loading;
         let rules = self.tab == DesignerTab::Rules && !self.loading;
         let selected = self.selected_field.is_some();
-        let can_up = self.selected_field.map(|index| index > 0).unwrap_or(false);
-        let can_down = self
-            .selected_field
-            .map(|index| index + 1 < self.schema.columns.len())
-            .unwrap_or(false);
+        // The move/delete controls act on every field row the cell selection touches.
+        let selected_rows = self.selected_field_rows();
+        let has_selected_rows = !selected_rows.is_empty();
+        let can_up = selected_rows.first().is_some_and(|index| *index > 0);
+        let can_down = selected_rows
+            .last()
+            .is_some_and(|index| index + 1 < self.schema.columns.len());
         let can_delete_index = self
             .selected_index
             .and_then(|row| self.schema.indexes.get(row))
@@ -185,7 +194,7 @@ impl TableDesignView {
                     "design-delete-field",
                     "icons/delete_field.svg",
                     t!("design.delete_field").to_string(),
-                    fields && selected,
+                    fields && has_selected_rows,
                     theme,
                     cx.listener(|this, _event, _window, cx| {
                         this.request_delete(DesignDeleteKind::Fields, cx)
@@ -528,10 +537,9 @@ impl TableDesignView {
 
         let columns = self.schema.columns.clone();
         let selected = self.selected_field;
-        // The cell last clicked/tabbed into wins over the row selection, exactly like the table
-        // grid: editing 长度 must not paint the 列名 cell as if that was what was selected.
-        let selected_cell = self.selected_cell;
-        let field_rows = self.field_rows.clone();
+        // Cell-range selection, painted exactly like the table grid: a cell is selected when one
+        // of the ranges contains it.
+        let selection = self.field_selection.clone();
         let edit = self
             .edit
             .as_ref()
@@ -539,125 +547,157 @@ impl TableDesignView {
         let weak = self.self_weak.clone();
         let combo_anchor = self.combo_anchor.clone();
         let row_widths = widths.clone();
+        let last_column = self.field_column_count().saturating_sub(1);
 
-        let list = uniform_list(
-            SharedString::from(format!("design-fields-{}", self.id)),
-            columns.len().max(1),
-            move |range, _window, _cx| {
-                let spec_columns = spec_columns.clone();
-                range
-                    .map(|row| {
-                        if row >= columns.len() {
-                            return placeholder_row(
-                                PlaceholderKind::Field,
-                                &row_widths,
-                                theme,
-                                &weak,
-                            );
-                        }
-                        let column = &columns[row];
-                        // Row mode (a gutter selection) highlights the name cells; cell mode
-                        // highlights only the cell the user is working in.
-                        let row_selected = selected_cell.is_none() && field_rows.contains(row);
-                        let row_active = selected == Some(row);
-                        let row_background = if row % 2 == 1 {
-                            theme.row_alt_bg
-                        } else {
-                            theme.editor_bg
-                        };
+        let list = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.field_mouse_up(event, window, cx);
+                }),
+            )
+            .child(
+                uniform_list(
+                    SharedString::from(format!("design-fields-{}", self.id)),
+                    columns.len().max(1),
+                    move |range, _window, _cx| {
+                        let spec_columns = spec_columns.clone();
+                        range
+                            .map(|row| {
+                                if row >= columns.len() {
+                                    return placeholder_row(
+                                        PlaceholderKind::Field,
+                                        &row_widths,
+                                        theme,
+                                        &weak,
+                                    );
+                                }
+                                let column = &columns[row];
+                                let row_active = selected == Some(row);
+                                let row_background = if row % 2 == 1 {
+                                    theme.row_alt_bg
+                                } else {
+                                    theme.editor_bg
+                                };
+                                let cell_selected = |column_index: usize| {
+                                    selection.as_ref().is_some_and(|selection| {
+                                        selection.contains(row, column_index)
+                                    })
+                                };
 
-                        let editor_for = |target: FieldColumn| {
-                            edit.as_ref()
-                                .filter(|(row_index, column_kind, _)| {
-                                    *row_index == row && *column_kind == target
-                                })
-                                .map(|(_, _, input)| input.clone())
-                        };
-                        let gutter_weak = weak.clone();
+                                let editor_for = |target: FieldColumn| {
+                                    edit.as_ref()
+                                        .filter(|(row_index, column_kind, _)| {
+                                            *row_index == row && *column_kind == target
+                                        })
+                                        .map(|(_, _, input)| input.clone())
+                                };
+                                let gutter_weak = weak.clone();
 
-                        let mut row_element = div()
-                            .flex()
-                            .flex_row()
-                            .h(px(DESIGN_ROW_HEIGHT))
-                            .bg(rgb(row_background))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("design-gutter-{row}")))
+                                let mut row_element = div()
                                     .flex()
-                                    .items_center()
-                                    .justify_center()
+                                    .flex_row()
                                     .h(px(DESIGN_ROW_HEIGHT))
-                                    .w(px(DESIGN_GUTTER_WIDTH))
-                                    .flex_none()
-                                    .border_r_1()
-                                    .border_color(rgb(theme.grid_line))
-                                    .cursor_pointer()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        move |event: &MouseDownEvent, window, cx| {
-                                            let _ = gutter_weak.update(cx, |view, cx| {
-                                                view.select_field_row(row, &event.modifiers, cx);
-                                                // The row surface, not an input, now owns the keys,
-                                                // so arrow navigation works straight away.
-                                                window.focus(&view.focus, cx);
-                                            });
-                                        },
+                                    .bg(rgb(row_background))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("design-gutter-{row}")))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .h(px(DESIGN_ROW_HEIGHT))
+                                            .w(px(DESIGN_GUTTER_WIDTH))
+                                            .flex_none()
+                                            .border_r_1()
+                                            .border_color(rgb(theme.grid_line))
+                                            .cursor_pointer()
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                move |event: &MouseDownEvent, window, cx| {
+                                                    let _ = gutter_weak.update(cx, |view, cx| {
+                                                        view.field_gutter_mouse_down(
+                                                            row,
+                                                            event.modifiers,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                },
+                                            )
+                                            .on_mouse_move({
+                                                let gutter_weak = weak.clone();
+                                                move |event: &MouseMoveEvent, _window, cx| {
+                                                    let _ = gutter_weak.update(cx, |view, cx| {
+                                                        view.field_cell_mouse_move(
+                                                            row,
+                                                            last_column,
+                                                            event,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            })
+                                            .when(row_active, |gutter| {
+                                                gutter.child(
+                                                    svg()
+                                                        .path("icons/row_marker.svg")
+                                                        .w(px(7.0))
+                                                        .h(px(7.0))
+                                                        .flex_none()
+                                                        .text_color(rgb(theme.primary)),
+                                                )
+                                            }),
                                     )
-                                    .when(row_active, |gutter| {
-                                        gutter.child(
-                                            svg()
-                                                .path("icons/row_marker.svg")
-                                                .w(px(7.0))
-                                                .h(px(7.0))
-                                                .flex_none()
-                                                .text_color(rgb(theme.primary)),
-                                        )
-                                    }),
-                            )
-                            .child(design_edit_cell(
-                                SharedString::from(format!("design-name-{row}")),
-                                FIELD_NAME_WIDTH,
-                                column.name.clone(),
-                                theme,
-                                row_selected || selected_cell == Some((row, FieldCell::Name)),
-                                &weak,
-                                row,
-                                FieldColumn::Name,
-                                editor_for(FieldColumn::Name),
-                            ))
-                            .child(design_type_cell(
-                                SharedString::from(format!("design-type-{row}")),
-                                FIELD_TYPE_WIDTH,
-                                column.data_type.clone(),
-                                theme,
-                                selected_cell == Some((row, FieldCell::Type)),
-                                &weak,
-                                row,
-                                combo_anchor.clone(),
-                            ));
-                        for kind in &spec_columns {
-                            let cell_selected = field_column_text(*kind).is_some_and(|cell| {
-                                selected_cell == Some((row, FieldCell::Text(cell)))
-                            });
-                            row_element = row_element.child(design_field_column_cell(
-                                *kind,
-                                row,
-                                column,
-                                field_column_width(*kind),
-                                theme,
-                                cell_selected,
-                                &weak,
-                                field_column_text(*kind).and_then(editor_for),
-                            ));
-                        }
-                        row_element
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .track_scroll(&self.list_scroll)
-        .flex_1()
-        .min_h(px(0.0));
+                                    .child(design_edit_cell(
+                                        SharedString::from(format!("design-name-{row}")),
+                                        FIELD_NAME_WIDTH,
+                                        column.name.clone(),
+                                        theme,
+                                        0,
+                                        cell_selected(0),
+                                        &weak,
+                                        row,
+                                        editor_for(FieldColumn::Name),
+                                    ))
+                                    .child(design_type_cell(
+                                        SharedString::from(format!("design-type-{row}")),
+                                        FIELD_TYPE_WIDTH,
+                                        column.data_type.clone(),
+                                        theme,
+                                        1,
+                                        cell_selected(1),
+                                        &weak,
+                                        row,
+                                        combo_anchor.clone(),
+                                    ));
+                                for (offset, kind) in spec_columns.iter().enumerate() {
+                                    let column_index = 2 + offset;
+                                    row_element = row_element.child(design_field_column_cell(
+                                        *kind,
+                                        row,
+                                        column,
+                                        field_column_width(*kind),
+                                        theme,
+                                        column_index,
+                                        cell_selected(column_index),
+                                        &weak,
+                                        field_column_text(*kind).and_then(editor_for),
+                                    ));
+                                }
+                                row_element
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .track_scroll(&self.list_scroll)
+                .flex_1()
+                .min_h(px(0.0)),
+            );
 
         let header = self.render_field_header(theme, &widths);
         let grid = self.render_grid_scaffold(cx, header, list, content_width);
@@ -3606,10 +3646,10 @@ fn design_edit_cell(
     width: f32,
     text: String,
     theme: Theme,
+    grid_column: usize,
     selected: bool,
     weak: &WeakEntity<TableDesignView>,
     row: usize,
-    column: FieldColumn,
     editor: Option<Entity<TextInput>>,
 ) -> AnyElement {
     let cell = design_cell(id, width, theme, selected)
@@ -3640,12 +3680,25 @@ fn design_edit_cell(
             )
             .into_any_element();
     }
-    let weak = weak.clone();
+    let down = weak.clone();
+    let moved = weak.clone();
     cell.pl(px(DESIGN_CELL_INSET))
         .pr(px(4.0))
         .cursor_text()
-        .on_click(move |_event, window, cx| {
-            let _ = weak.update(cx, |view, cx| view.begin_edit(row, column, window, cx));
+        // Click selects (the table grid's model); the mouse-up on the grid opens this cell's
+        // editor on a re-click or double-click.
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, window, cx| {
+                let _ = down.update(cx, |view, cx| {
+                    view.field_cell_mouse_down(row, grid_column, event.modifiers, window, cx);
+                });
+            },
+        )
+        .on_mouse_move(move |event: &MouseMoveEvent, _window, cx| {
+            let _ = moved.update(cx, |view, cx| {
+                view.field_cell_mouse_move(row, grid_column, event, cx);
+            });
         })
         .child(text)
         .into_any_element()
@@ -3806,12 +3859,14 @@ fn design_type_cell(
     width: f32,
     text: String,
     theme: Theme,
+    grid_column: usize,
     selected: bool,
     weak: &WeakEntity<TableDesignView>,
     row: usize,
     anchor: Rc<RefCell<BTreeMap<usize, Point<Pixels>>>>,
 ) -> AnyElement {
-    let weak = weak.clone();
+    let down = weak.clone();
+    let moved = weak.clone();
     div()
         .flex()
         .items_center()
@@ -3839,8 +3894,18 @@ fn design_type_cell(
             }
         })
         .id(id)
-        .on_click(move |_event, window, cx| {
-            let _ = weak.update(cx, |view, cx| view.open_type_combo(row, window, cx));
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, window, cx| {
+                let _ = down.update(cx, |view, cx| {
+                    view.field_cell_mouse_down(row, grid_column, event.modifiers, window, cx);
+                });
+            },
+        )
+        .on_mouse_move(move |event: &MouseMoveEvent, _window, cx| {
+            let _ = moved.update(cx, |view, cx| {
+                view.field_cell_mouse_move(row, grid_column, event, cx);
+            });
         })
         .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(text))
         .child(
@@ -3858,44 +3923,103 @@ fn design_type_cell(
         .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn design_check_cell(
     id: SharedString,
     width: f32,
     checked: bool,
     theme: Theme,
-    toggle: Option<(WeakEntity<TableDesignView>, usize)>,
+    grid_column: usize,
+    selected: bool,
+    weak: &WeakEntity<TableDesignView>,
+    row: usize,
+    toggle: Option<usize>,
 ) -> AnyElement {
-    let cell = design_cell(id, width, theme, false)
+    let down = weak.clone();
+    let moved = weak.clone();
+    let click = weak.clone();
+    let mut cell = design_cell(id, width, theme, selected)
+        .when(selected, |cell| cell.bg(rgb(theme.grid_selection_bg)))
         .px(px(DESIGN_CELL_INSET))
-        .child(checkbox_box(checked, theme));
-    let Some((weak, row)) = toggle else {
-        return cell.into_any_element();
-    };
-    cell.cursor_pointer()
-        .on_click(move |_event, _window, cx| {
-            let _ = weak.update(cx, |view, cx| view.toggle_not_null(row, cx));
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, window, cx| {
+                let _ = down.update(cx, |view, cx| {
+                    view.field_cell_mouse_down(row, grid_column, event.modifiers, window, cx);
+                });
+            },
+        )
+        .on_mouse_move(move |event: &MouseMoveEvent, _window, cx| {
+            let _ = moved.update(cx, |view, cx| {
+                view.field_cell_mouse_move(row, grid_column, event, cx);
+            });
         })
-        .into_any_element()
+        .child(checkbox_box(checked, theme));
+    if let Some(toggle_row) = toggle {
+        cell = cell
+            .cursor_pointer()
+            .on_click(move |event: &ClickEvent, _window, cx| {
+                if event.click_count() > 1 {
+                    return;
+                }
+                let _ = click.update(cx, |view, cx| {
+                    // A drag that ends over the check box must not flip it.
+                    if !view.field_drag_in_progress() {
+                        view.toggle_not_null(toggle_row, cx);
+                    }
+                });
+            });
+    }
+    cell.into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn design_key_cell(
     id: SharedString,
     width: f32,
     primary_key: bool,
     theme: Theme,
-    toggle: Option<(WeakEntity<TableDesignView>, usize)>,
+    grid_column: usize,
+    selected: bool,
+    weak: &WeakEntity<TableDesignView>,
+    row: usize,
+    toggle: Option<usize>,
 ) -> AnyElement {
-    let cell = design_cell(id, width, theme, false)
+    let down = weak.clone();
+    let moved = weak.clone();
+    let click = weak.clone();
+    let mut cell = design_cell(id, width, theme, selected)
+        .when(selected, |cell| cell.bg(rgb(theme.grid_selection_bg)))
         .px(px(DESIGN_CELL_INSET))
-        .child(checkbox_box(primary_key, theme));
-    let Some((weak, row)) = toggle else {
-        return cell.into_any_element();
-    };
-    cell.cursor_pointer()
-        .on_click(move |_event, _window, cx| {
-            let _ = weak.update(cx, |view, cx| view.toggle_field_primary_key(row, cx));
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, window, cx| {
+                let _ = down.update(cx, |view, cx| {
+                    view.field_cell_mouse_down(row, grid_column, event.modifiers, window, cx);
+                });
+            },
+        )
+        .on_mouse_move(move |event: &MouseMoveEvent, _window, cx| {
+            let _ = moved.update(cx, |view, cx| {
+                view.field_cell_mouse_move(row, grid_column, event, cx);
+            });
         })
-        .into_any_element()
+        .child(checkbox_box(primary_key, theme));
+    if let Some(toggle_row) = toggle {
+        cell = cell
+            .cursor_pointer()
+            .on_click(move |event: &ClickEvent, _window, cx| {
+                if event.click_count() > 1 {
+                    return;
+                }
+                let _ = click.update(cx, |view, cx| {
+                    if !view.field_drag_in_progress() {
+                        view.toggle_field_primary_key(toggle_row, cx);
+                    }
+                });
+            });
+    }
+    cell.into_any_element()
 }
 
 /// One row's cell for an engine-declared field-list column. The cell is a text editor, a toggle or
@@ -3908,6 +4032,7 @@ fn design_field_column_cell(
     column: &ColumnDef,
     width: f32,
     theme: Theme,
+    grid_column: usize,
     selected: bool,
     weak: &WeakEntity<TableDesignView>,
     editor: Option<Entity<TextInput>>,
@@ -3919,10 +4044,10 @@ fn design_field_column_cell(
             width,
             field_column_value(column, text_column),
             theme,
+            grid_column,
             selected,
             weak,
             row,
-            text_column,
             editor,
         );
     }
@@ -3932,20 +4057,47 @@ fn design_field_column_cell(
             width,
             !column.nullable,
             theme,
-            Some((weak.clone(), row)),
+            grid_column,
+            selected,
+            weak,
+            row,
+            Some(row),
         ),
-        DesignerFieldColumn::Generated | DesignerFieldColumn::Computed => {
-            design_check_cell(id, width, !column.generated.trim().is_empty(), theme, None)
-        }
-        DesignerFieldColumn::Sparse => design_check_cell(id, width, column.sparse, theme, None),
+        DesignerFieldColumn::Generated | DesignerFieldColumn::Computed => design_check_cell(
+            id,
+            width,
+            !column.generated.trim().is_empty(),
+            theme,
+            grid_column,
+            selected,
+            weak,
+            row,
+            None,
+        ),
+        DesignerFieldColumn::Sparse => design_check_cell(
+            id,
+            width,
+            column.sparse,
+            theme,
+            grid_column,
+            selected,
+            weak,
+            row,
+            None,
+        ),
         DesignerFieldColumn::Key => design_key_cell(
             id,
             width,
             column.primary_key,
             theme,
-            Some((weak.clone(), row)),
+            grid_column,
+            selected,
+            weak,
+            row,
+            Some(row),
         ),
-        _ => design_cell(id, width, theme, false)
+        _ => design_cell(id, width, theme, selected)
+            .when(selected, |cell| cell.bg(rgb(theme.grid_selection_bg)))
             .px(px(DESIGN_CELL_INSET))
             .child(field_column_display(kind, column))
             .into_any_element(),
