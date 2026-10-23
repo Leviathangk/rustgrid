@@ -541,6 +541,9 @@ impl AppView {
 
     pub(super) fn select_main_tab(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
         self.main_tab = tab;
+        // Clicking a main tab clears that list's own search even while 保留对象搜索 is on (the
+        // setting keeps searches across database/connection switches, not a re-entry into the tab).
+        self.clear_main_tab_search(tab, cx);
         // The sync page's 选项 popover and the New Connection menu are page-scoped.
         self.sync.options_open = false;
         self.connect_menu_open = false;

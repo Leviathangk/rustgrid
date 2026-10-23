@@ -862,6 +862,43 @@ impl AppView {
         cx.notify();
     }
 
+    /// Clear one main tab's own search. Every click on a main tab runs this, so re-entering 表
+    /// after filtering shows the whole list again — Navicat's behaviour — no matter what
+    /// 保留对象搜索 says. That setting now only decides whether a database/connection switch keeps
+    /// the searches; it no longer makes a tab's box impossible to clear.
+    pub(super) fn clear_main_tab_search(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
+        let page = match tab {
+            MainTab::Tables => Some(VIEW_PAGE_TABLES),
+            MainTab::Views => Some(VIEW_PAGE_VIEWS),
+            MainTab::Functions => Some(VIEW_PAGE_FUNCTIONS),
+            MainTab::Queries => Some(VIEW_PAGE_QUERIES),
+            _ => None,
+        };
+        if let Some(page) = page {
+            let had = self.object_searches.remove(page).is_some();
+            if self.search_box_page == Some(page) {
+                self.object_search_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+            }
+            if had {
+                self.notify_object_pane(cx);
+                cx.notify();
+            }
+        }
+        if tab == MainTab::Users && !self.user_search.is_empty() {
+            self.user_search.clear();
+            self.user_search_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            cx.notify();
+        }
+        if tab == MainTab::Backups && !self.backup_search.is_empty() {
+            self.backup_search.clear();
+            self.backup_search_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            cx.notify();
+        }
+    }
+
     /// The content of the object status shown in the window's bottom status bar: item count on the
     /// left, connection and database on the right (Navicat layout).
     pub(super) fn render_object_status(
