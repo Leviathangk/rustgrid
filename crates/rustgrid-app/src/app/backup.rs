@@ -19,6 +19,9 @@ use rustgrid_core::{BackupObjectKind, ObjectKind, SavedBackup};
 /// Rows in the New Backup dialog's object tree are `26px` tall.
 const BACKUP_OBJECT_ROW_HEIGHT: f32 = 26.0;
 
+/// How often the Backup/Restore window repaints its live elapsed clock while a run is going.
+const BACKUP_CLOCK_TICK_MS: u64 = 1000;
+
 impl AppView {
     // ----- List state -------------------------------------------------------------------------
 
@@ -201,7 +204,7 @@ impl AppView {
             self.backups_selection
                 .hit(&visible, key, selection_mode(modifiers));
         }
-        self.sync_backup_selected();
+        self.sync_backup_selected(cx);
         cx.notify();
     }
 
@@ -238,23 +241,40 @@ impl AppView {
     }
 
     /// Keep the single-selection mirror (`backup_selected`) in step with the multi-selection.
-    fn sync_backup_selected(&mut self) {
-        self.backup_selected = match self.backups_selection.single() {
-            Some(key) => match backup_entry_from_key(key) {
-                Some(BackupEntry::File(_)) => self
-                    .backup_files
-                    .iter()
-                    .position(|file| backup_file_key(&file.name) == key)
-                    .map(BackupSelection::File),
-                Some(BackupEntry::Config(_)) => self
-                    .backup_configs
-                    .iter()
-                    .position(|config| backup_config_key(&config.name) == key)
-                    .map(BackupSelection::Config),
-                None => None,
-            },
-            None => None,
+    /// It resolves through the visible entries (see [`Self::selected_backup_entries`]), so the
+    /// mirror never names a file the list is not showing.
+    fn sync_backup_selected(&mut self, cx: &App) {
+        let (files, configs) = self.selected_backup_entries(cx);
+        self.backup_selected = match (files.as_slice(), configs.as_slice()) {
+            ([file], []) => Some(BackupSelection::File(*file)),
+            ([], [config]) => Some(BackupSelection::Config(*config)),
+            _ => None,
         };
+    }
+
+    /// Whether one of the backup window's runs is in progress. The log summary measures the
+    /// elapsed time live from the run's start instant, so the window has to repaint for the clock
+    /// to move; a run can spend minutes inside a single large table without emitting progress.
+    pub(super) fn backup_run_in_progress(&self) -> bool {
+        self.new_backup_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.running)
+            || self
+                .restore_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.running)
+            || self
+                .extract_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.running)
+            || self
+                .dump_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.running)
+            || self
+                .run_sql_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.running)
     }
 
     // ----- Rendering --------------------------------------------------------------------------
@@ -368,7 +388,10 @@ impl AppView {
     fn render_backup_toolbar(&self, cx: &mut Context<'_, Self>) -> Div {
         let theme = self.theme;
         let in_scope = self.backup_scope(cx).is_some();
-        let has_file = in_scope && self.backup_single_selection().is_some_and(|s| s.is_file());
+        let has_file = in_scope
+            && self
+                .backup_single_selection(cx)
+                .is_some_and(|s| s.is_file());
         let (selected_files, selected_configs) = self.selected_backup_entries(cx);
         let has_selection = in_scope && !(selected_files.is_empty() && selected_configs.is_empty());
         let can_create = in_scope;
@@ -447,23 +470,15 @@ impl AppView {
     /// The single selected backup entry, or `None` when zero or several are selected.
     ///
     /// The selection key only names the row (`file:<name>` / `config:<name>`), so its index has to
-    /// be resolved back into `backup_files` / `backup_configs`. Returning the key's placeholder
-    /// index made every single-selection action (F2 rename, copy, double-click restore) act on the
-    /// first row instead of the selected one.
-    fn backup_single_selection(&self) -> Option<BackupEntry> {
-        let key = self.backups_selection.single()?;
-        let (kind, name) = key.split_once(':')?;
-        match kind {
-            "file" => self
-                .backup_files
-                .iter()
-                .position(|file| file.name == name)
-                .map(BackupEntry::File),
-            "config" => self
-                .backup_configs
-                .iter()
-                .position(|config| config.name == name)
-                .map(BackupEntry::Config),
+    /// be resolved back into `backup_files` / `backup_configs`. The resolution goes through the
+    /// *visible* (scoped) entries, so a key left over from another database — or one whose name
+    /// also exists in another scope (backup names are timestamps to the second) — can never point
+    /// an action at a file this list does not show.
+    fn backup_single_selection(&self, cx: &App) -> Option<BackupEntry> {
+        let (files, configs) = self.selected_backup_entries(cx);
+        match (files.as_slice(), configs.as_slice()) {
+            ([file], []) => Some(BackupEntry::File(*file)),
+            ([], [config]) => Some(BackupEntry::Config(*config)),
             _ => None,
         }
     }
@@ -497,7 +512,7 @@ impl AppView {
             .track_focus(&self.backup_focus)
             .key_context(BACKUP_LIST_CONTEXT)
             .on_action(cx.listener(|this, _: &RenameBackupFile, window, cx| {
-                if let Some(entry) = this.backup_single_selection() {
+                if let Some(entry) = this.backup_single_selection(cx) {
                     let target = match entry {
                         BackupEntry::File(index) => BackupSelection::File(index),
                         BackupEntry::Config(index) => BackupSelection::Config(index),
@@ -506,7 +521,7 @@ impl AppView {
                 }
             }))
             .on_action(cx.listener(|this, _: &CopyBackupFile, _window, cx| {
-                if let Some(BackupEntry::File(index)) = this.backup_single_selection() {
+                if let Some(BackupEntry::File(index)) = this.backup_single_selection(cx) {
                     this.copy_backup_file(index);
                     cx.notify();
                 }
@@ -735,7 +750,7 @@ impl AppView {
         .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
             this.hit_backup(&click_key, event.click_count(), event.modifiers(), cx);
             if this.click_opens(event.click_count(), event.modifiers())
-                && let Some(BackupEntry::File(index)) = this.backup_single_selection()
+                && let Some(BackupEntry::File(index)) = this.backup_single_selection(cx)
             {
                 this.open_restore_backup(index, cx);
             }
@@ -989,7 +1004,7 @@ impl AppView {
                     cx.stop_propagation();
                     if !this.backups_selection.contains(&menu_key) {
                         this.backups_selection.select_one(menu_key.clone());
-                        this.sync_backup_selected();
+                        this.sync_backup_selected(cx);
                     }
                     this.context_menu = Some(ContextMenu {
                         target: match entry {
@@ -1047,13 +1062,13 @@ impl AppView {
     // ----- Actions ----------------------------------------------------------------------------
 
     fn restore_selected_backup(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(BackupSelection::File(index)) = self.backup_selected {
+        if let Some(BackupEntry::File(index)) = self.backup_single_selection(cx) {
             self.open_restore_backup(index, cx);
         }
     }
 
     fn extract_selected_backup(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(BackupSelection::File(index)) = self.backup_selected {
+        if let Some(BackupEntry::File(index)) = self.backup_single_selection(cx) {
             self.open_extract_sql(index, cx);
         }
     }
@@ -1095,15 +1110,24 @@ impl AppView {
         match std::fs::copy(&clipboard.path, &dest) {
             Ok(_) => {
                 self.refresh_backups(cx);
-                self.backup_selected = self
-                    .backup_files
-                    .iter()
-                    .position(|file| file.path == dest)
-                    .map(BackupSelection::File);
+                self.select_backup_file(&dest, cx);
             }
             Err(error) => self.error_dialog = Some(error.to_string()),
         }
         cx.notify();
+    }
+
+    /// Select one backup file by its path — after a run wrote it, or a paste copied it — so both
+    /// the multi-selection (the highlighted row and the toolbar's 删除备份) and the
+    /// single-selection mirror (the info pane) name it. The file only becomes selectable once it
+    /// is part of the visible scope's list, which is what the toolbar reads.
+    fn select_backup_file(&mut self, path: &std::path::Path, cx: &App) {
+        let Some(index) = self.backup_files.iter().position(|file| file.path == path) else {
+            return;
+        };
+        let key = backup_file_key(&self.backup_files[index].name);
+        self.backups_selection.select_one(key);
+        self.sync_backup_selected(cx);
     }
 
     /// Start the in-place "rename" editor on the given entry's row.
@@ -1311,42 +1335,36 @@ impl AppView {
     pub(super) fn select_all_backups(&mut self, cx: &mut Context<'_, Self>) {
         let visible = self.backup_visible_keys(cx);
         self.backups_selection.select_all(&visible);
-        self.sync_backup_selected();
+        self.sync_backup_selected(cx);
         cx.notify();
     }
 
     /// The selected backup files and saved profiles that belong to the current scope. A scope
     /// change can leave stale keys in the selection, so the toolbar and delete always re-filter.
+    ///
+    /// Each key is resolved **inside the visible (scoped) list** rather than against the whole
+    /// `backup_files` / `backup_configs` arrays. A key is only the file's name, and a backup is
+    /// named after the second it was created, so two databases can hold a same-named file; looking
+    /// the key up globally picked the first of them, which put the selection outside the scope and
+    /// left 删除备份 greyed out for the row that was actually selected.
     fn selected_backup_entries(&self, cx: &App) -> (Vec<usize>, Vec<usize>) {
-        let file_scope: std::collections::HashSet<usize> =
-            self.visible_backup_files(cx).into_iter().collect();
-        let config_scope: std::collections::HashSet<usize> =
-            self.visible_backup_configs(cx).into_iter().collect();
+        let visible_files = self.visible_backup_files(cx);
+        let visible_configs = self.visible_backup_configs(cx);
         let mut files = Vec::new();
         let mut configs = Vec::new();
         for key in self.backups_selection.items() {
-            match backup_entry_from_key(&key) {
-                Some(BackupEntry::File(_)) => {
-                    if let Some(index) = self
-                        .backup_files
-                        .iter()
-                        .position(|file| backup_file_key(&file.name) == key)
-                        && file_scope.contains(&index)
-                    {
-                        files.push(index);
-                    }
-                }
-                Some(BackupEntry::Config(_)) => {
-                    if let Some(index) = self
-                        .backup_configs
-                        .iter()
-                        .position(|config| backup_config_key(&config.name) == key)
-                        && config_scope.contains(&index)
-                    {
-                        configs.push(index);
-                    }
-                }
-                None => {}
+            if let Some(index) = visible_files.iter().copied().find(|index| {
+                self.backup_files
+                    .get(*index)
+                    .is_some_and(|file| backup_file_key(&file.name) == key)
+            }) {
+                files.push(index);
+            } else if let Some(index) = visible_configs.iter().copied().find(|index| {
+                self.backup_configs
+                    .get(*index)
+                    .is_some_and(|config| backup_config_key(&config.name) == key)
+            }) {
+                configs.push(index);
             }
         }
         (files, configs)
@@ -1356,13 +1374,19 @@ impl AppView {
     /// profiles). A lone selection keeps the specific "delete this file/config" wording.
     pub(super) fn confirm_delete_backup(&mut self, cx: &mut Context<'_, Self>) {
         let (mut files, mut configs) = self.selected_backup_entries(cx);
-        // A right-click on a row that was not already selected replaces the selection first, but
-        // fall back to the single-selection mirror if the keys did not resolve.
+        // The context menu's 删除 sets the single-selection mirror instead of clicking the row, so
+        // fall back to it — but only for an entry the list actually shows.
         if files.is_empty() && configs.is_empty() {
+            let visible_files = self.visible_backup_files(cx);
+            let visible_configs = self.visible_backup_configs(cx);
             match self.backup_selected {
-                Some(BackupSelection::File(index)) => files.push(index),
-                Some(BackupSelection::Config(index)) => configs.push(index),
-                None => return,
+                Some(BackupSelection::File(index)) if visible_files.contains(&index) => {
+                    files.push(index)
+                }
+                Some(BackupSelection::Config(index)) if visible_configs.contains(&index) => {
+                    configs.push(index)
+                }
+                _ => return,
             }
         }
         self.delete_confirm = if files.len() == 1 && configs.is_empty() {
@@ -2221,6 +2245,7 @@ impl AppView {
         };
 
         let executor = cx.background_executor().clone();
+        let created_path = path.clone();
         cx.spawn(async move |this, cx| {
             let mut fatal: Option<String> = None;
             for (kind, name) in selected {
@@ -2342,7 +2367,7 @@ impl AppView {
                 if cancelled {
                     app.backup_log(t!("backup.log.cancelled").to_string(), cx);
                 }
-                app.finish_backup(fatal, cx)
+                app.finish_backup(fatal, Some(created_path.clone()), cx)
             });
         })
         .detach();
@@ -2437,7 +2462,12 @@ impl AppView {
         cx.notify();
     }
 
-    fn finish_backup(&mut self, fatal: Option<String>, cx: &mut Context<'_, Self>) {
+    fn finish_backup(
+        &mut self,
+        fatal: Option<String>,
+        created: Option<PathBuf>,
+        cx: &mut Context<'_, Self>,
+    ) {
         if let Some(dialog) = self.new_backup_dialog.as_mut() {
             dialog.running = false;
             dialog.paused = false;
@@ -2475,8 +2505,10 @@ impl AppView {
             .unwrap_or(0);
         if fatal.is_none() && success > 0 {
             self.refresh_backups(cx);
-            if !self.backup_files.is_empty() {
-                self.backup_selected = Some(BackupSelection::File(0));
+            // Select the file this run wrote. Picking index 0 (the oldest backup on disk) left the
+            // info pane on a different backup than the one just created.
+            if let Some(created) = created {
+                self.select_backup_file(&created, cx);
             }
         }
         cx.notify();
@@ -4101,6 +4133,35 @@ impl BackupWindow {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let subscription = cx.observe(app_entity, |_, _, cx| cx.notify());
+        // The log summary reads the elapsed time live from the run's start instant, so it only
+        // advances when the window repaints. A run can spend minutes inside one large table with
+        // no progress event to repaint on, which froze the clock; tick once a second while
+        // something is running. The task is tied to this window, so closing it stops the ticking.
+        let executor = cx.background_executor().clone();
+        let clock_app = app.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor
+                    .timer(Duration::from_millis(BACKUP_CLOCK_TICK_MS))
+                    .await;
+                let Some(app) = clock_app.upgrade() else {
+                    return;
+                };
+                let running = app.update(cx, |app, _| app.backup_run_in_progress());
+                // `this.update` fails once the window is released, which ends the task.
+                if this
+                    .update(cx, |_, cx| {
+                        if running {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
         Self {
             app,
             _subscription: subscription,
@@ -4302,16 +4363,6 @@ fn backup_file_key(name: &str) -> String {
 /// The selection key of a saved backup configuration row.
 fn backup_config_key(name: &str) -> String {
     format!("config:{name}")
-}
-
-/// The kind of a backup selection key, if it is well formed.
-fn backup_entry_from_key(key: &str) -> Option<BackupEntry> {
-    let (kind, _) = key.split_once(':')?;
-    match kind {
-        "file" => Some(BackupEntry::File(0)),
-        "config" => Some(BackupEntry::Config(0)),
-        _ => None,
-    }
 }
 
 /// Wrap a row element so it publishes its window-space rectangle for the marquee.
