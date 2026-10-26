@@ -12,12 +12,27 @@ Russian ones.
 
 ## [0.1.2] - 2026-10-26
 
+### Added
+
+- The table designer selects fields like the data grid: drag or Shift extends a range, Ctrl toggles
+  cells, Ctrl+A selects all, a click on the row header selects whole rows, and Ctrl+C copies the
+  selection.
+
 ### Changed
 
 - The data grid's right-click menu no longer offers "Insert Row".
+- Delete, Move Up and Move Down in the table designer act on every selected field row.
 
 ### Fixed
 
+- Reordering a table's fields in the designer is saved instead of reported as no changes.
+- Clicking a main tab clears that list's search, so the list shows every object again; "Keep the
+  object search" now only covers database and connection switches.
+- Backup: Delete, Restore and Extract act on the selected row in the current database, so a
+  same-named file in another database is never targeted.
+- Backup: the elapsed time keeps counting during a long run.
+- Backup: a finished run selects the file it just wrote, and pasting a file keeps the list
+  selection.
 - Pasting copied records keeps their `NULL` values, so numeric columns save instead of failing with
   an incorrect-value error.
 - Saving a table's edits confirms success, and Save / Ctrl+S reports when there is nothing to save.
