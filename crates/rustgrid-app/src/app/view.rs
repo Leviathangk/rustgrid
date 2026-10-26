@@ -471,7 +471,8 @@ impl AppView {
             let app = cx.weak_entity();
             let runtime = self.runtime.clone();
             let theme = self.theme;
-            let entity = cx.new(|cx| GridView::new(state, app, runtime, theme, cx));
+            let clipboard = self.grid_clipboard.clone();
+            let entity = cx.new(|cx| GridView::new(state, app, runtime, theme, clipboard, cx));
             self.grids.push(entity);
             if let Some(view) = self
                 .queries

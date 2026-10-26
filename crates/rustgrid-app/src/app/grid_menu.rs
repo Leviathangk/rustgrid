@@ -2,7 +2,7 @@
 //!
 //! The menu itself is drawn by `AppView` (like every other context menu), so this module owns the
 //! grid-side behaviour the menu items call into: copying the selected cells to the OS clipboard
-//! (and an in-app clipboard that remembers NULLs), building `INSERT` statements, and pasting a
+//! (and an app-wide clipboard that remembers NULLs), building `INSERT` statements, and pasting a
 //! copied block into the selected records.
 
 use super::*;
@@ -135,8 +135,11 @@ impl GridView {
         }
         let text = lines.join("\n");
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-        self.clipboard = Some(block);
-        self.clipboard_text = Some(text);
+        {
+            let mut clipboard = self.clipboard.borrow_mut();
+            clipboard.block = Some(block);
+            clipboard.text = Some(text);
+        }
         cx.notify();
     }
 
@@ -182,8 +185,11 @@ impl GridView {
         cx.write_to_clipboard(ClipboardItem::new_string(sql.clone()));
         // An INSERT copy is not a cell block; make paste treat the matching OS text as unusable
         // rather than replaying the previous cell copy.
-        self.clipboard = None;
-        self.clipboard_text = Some(sql);
+        {
+            let mut clipboard = self.clipboard.borrow_mut();
+            clipboard.block = None;
+            clipboard.text = Some(sql);
+        }
         cx.notify();
     }
 
@@ -195,12 +201,23 @@ impl GridView {
             return;
         }
         // Prefer the OS clipboard when it changed since our own copy (so external / other-app
-        // data pastes); otherwise use the in-app block, which preserves NULLs.
+        // data pastes); otherwise use the in-app block, which preserves NULLs. The comparison
+        // normalises line endings: the platform may hand our own text back with CRLF (or a
+        // trailing newline), which would otherwise look external and turn NULLs into `''`.
+        let (own_block, own_text) = {
+            let clipboard = self.clipboard.borrow();
+            (clipboard.block.clone(), clipboard.text.clone())
+        };
         let system_text = cx.read_from_clipboard().and_then(|item| item.text());
         let block = match system_text {
-            Some(text) if Some(&text) == self.clipboard_text.as_ref() => self.clipboard.clone(),
+            Some(text)
+                if Some(normalize_clipboard_text(&text))
+                    == own_text.as_deref().map(normalize_clipboard_text) =>
+            {
+                own_block
+            }
             Some(text) => Some(parse_clipboard_text(&text)),
-            None => self.clipboard.clone(),
+            None => own_block,
         };
         let Some(block) = block else {
             return;
@@ -270,6 +287,17 @@ impl GridView {
         value: &Option<String>,
         action: &mut EditAction,
     ) {
+        // An empty clipboard cell is "no value". A numeric/temporal column cannot store `''`
+        // (MySQL rejects it with 1366), so pasting one must stage SQL NULL rather than an empty
+        // string; text columns keep an explicit empty string.
+        let null = None;
+        let value = if value.as_deref() == Some("")
+            && empty_paste_is_null(&self.state.columns[col].data_type)
+        {
+            &null
+        } else {
+            value
+        };
         let data_rows = self.state.rows.len();
         if row < data_rows {
             let previous = self.state.edits.get(&(row, col)).cloned();
@@ -292,6 +320,49 @@ fn sql_literal(value: &Option<String>) -> String {
     }
 }
 
+/// Normalize clipboard text for the "is this our own copy?" comparison. Windows and clipboard
+/// managers may hand CRLF (or a trailing line break) back for text written with LF; without this
+/// the own block is skipped and its `NULL` cells are re-read from text as empty strings.
+fn normalize_clipboard_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_end_matches('\n')
+        .to_string()
+}
+
+/// Whether an empty pasted cell must become SQL `NULL` for this column type: numeric and temporal
+/// columns reject `''`, while text columns can hold an explicit empty string. Unknown types keep
+/// the empty string (the conservative choice, since the engine may accept it).
+fn empty_paste_is_null(data_type: &str) -> bool {
+    let kind = data_type.to_ascii_lowercase();
+    if kind.contains("char") || kind.contains("text") || kind.contains("clob") {
+        return false;
+    }
+    [
+        "int",
+        "decimal",
+        "numeric",
+        "number",
+        "float",
+        "double",
+        "real",
+        "money",
+        "bit",
+        "bool",
+        "year",
+        "date",
+        "time",
+        "interval",
+        "serial",
+        "identity",
+        "uniqueidentifier",
+        "uuid",
+        "json",
+    ]
+    .iter()
+    .any(|marker| kind.contains(marker))
+}
+
 /// Parse pasted text into rows of cells: newline-separated rows, tab-separated columns. A literal
 /// `NULL` cell becomes SQL `NULL`.
 fn parse_clipboard_text(text: &str) -> Vec<Vec<Option<String>>> {
@@ -311,4 +382,42 @@ fn parse_clipboard_text(text: &str) -> Vec<Vec<Option<String>>> {
                 .collect()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn our_own_copy_is_recognised_after_line_ending_normalisation() {
+        // What the app writes (LF) and what Windows / a clipboard manager can hand back (CRLF,
+        // trailing newline) must compare equal, or the NULL-preserving block is skipped.
+        let written = "1\tNULL\n2\tx";
+        let read_back = "1\tNULL\r\n2\tx\r\n";
+        assert_eq!(
+            normalize_clipboard_text(written),
+            normalize_clipboard_text(read_back)
+        );
+    }
+
+    #[test]
+    fn parsed_text_keeps_nulls_and_empty_cells_apart() {
+        let block = parse_clipboard_text("NULL\t\r\n\tx");
+        assert_eq!(block[0][0], None);
+        assert_eq!(block[0][1], Some(String::new()));
+    }
+
+    #[test]
+    fn an_empty_paste_is_null_only_for_non_text_columns() {
+        assert!(empty_paste_is_null("int"));
+        assert!(empty_paste_is_null("bigint unsigned"));
+        assert!(empty_paste_is_null("decimal(10,2)"));
+        assert!(empty_paste_is_null("timestamp without time zone"));
+        assert!(empty_paste_is_null("uniqueidentifier"));
+        assert!(empty_paste_is_null("jsonb"));
+        assert!(!empty_paste_is_null("varchar(64)"));
+        assert!(!empty_paste_is_null("nvarchar(max)"));
+        assert!(!empty_paste_is_null("longtext"));
+        assert!(!empty_paste_is_null("enum('a','b')"));
+    }
 }

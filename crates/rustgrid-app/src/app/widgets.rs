@@ -1207,10 +1207,11 @@ impl AppView {
                     ));
             }
             ContextTarget::Grid { grid_id } => {
+                let grid_id = *grid_id;
                 let grid = self
                     .grids
                     .iter()
-                    .find(|grid| grid.read(cx).state.id == *grid_id)
+                    .find(|grid| grid.read(cx).state.id == grid_id)
                     .cloned();
                 if let Some(grid) = grid {
                     let (has_selection, editable, deletable) = {
@@ -1228,7 +1229,6 @@ impl AppView {
                     let for_insert = grid.clone();
                     let for_paste = grid.clone();
                     let for_refresh = grid.clone();
-                    let for_insert_row = grid.clone();
                     let for_null = grid.clone();
                     items = items.child(if deletable {
                         self.context_item(
@@ -1236,7 +1236,16 @@ impl AppView {
                             t!("grid.delete_rows").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                for_delete.update(cx, |grid, cx| grid.open_delete_confirm(cx));
+                                // The listener already runs inside `AppView::update`: take the
+                                // rows from the grid and set the confirmation here. Letting the
+                                // grid update `AppView` (as `open_delete_confirm` does) would
+                                // re-enter this entity's update and abort the app.
+                                let rows =
+                                    for_delete.update(cx, |grid, cx| grid.take_delete_rows(cx));
+                                if let Some(rows) = rows {
+                                    this.delete_confirm =
+                                        Some(DeleteConfirm::Rows { grid_id, rows });
+                                }
                                 cx.notify();
                             }),
                         )
@@ -1296,25 +1305,6 @@ impl AppView {
                         self.context_item_disabled("grid-ctx-paste", t!("grid.paste").to_string())
                             .into_any_element()
                     });
-                    items = items.child(if editable {
-                        self.context_item(
-                            "grid-ctx-insert-row",
-                            t!("grid.insert_row").to_string(),
-                            cx.listener(move |this, _event, window, cx| {
-                                this.context_menu = None;
-                                for_insert_row
-                                    .update(cx, |grid, cx| grid.add_insert_row(window, cx));
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element()
-                    } else {
-                        self.context_item_disabled(
-                            "grid-ctx-insert-row",
-                            t!("grid.insert_row").to_string(),
-                        )
-                        .into_any_element()
-                    });
                     items = items.child(if editable && has_selection {
                         self.context_item(
                             "grid-ctx-null",
@@ -1335,9 +1325,15 @@ impl AppView {
                         .child(self.context_item(
                             "grid-ctx-refresh",
                             t!("grid.refresh").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
+                            cx.listener(move |this, _event, window, cx| {
                                 this.context_menu = None;
-                                for_refresh.update(cx, |grid, cx| grid.refresh(cx));
+                                // Deferred: `refresh` asks for the unsaved-changes confirmation
+                                // through `AppView`, and this listener is already inside an
+                                // `AppView::update` (a direct call would re-enter it and panic).
+                                let grid = for_refresh.clone();
+                                cx.defer_in(window, move |_this, _window, cx| {
+                                    grid.update(cx, |grid, cx| grid.refresh(cx));
+                                });
                                 cx.notify();
                             }),
                         ));

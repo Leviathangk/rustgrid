@@ -291,6 +291,9 @@ impl GridView {
             let _ = this.update(cx, |grid, cx| {
                 grid.state.loading = false;
                 grid.state.elapsed = Some(elapsed);
+                // Consume the explicit-refresh marker now, so a fetch that replaces this one does
+                // not leave a stale "refreshed" confirmation behind.
+                let refreshed = std::mem::take(&mut grid.refresh_feedback);
                 match result {
                     Ok(page) => {
                         // The widths carry over by column name when the user has dragged column
@@ -336,6 +339,13 @@ impl GridView {
                         }
                         if reset_scroll {
                             grid.reset_scroll();
+                        }
+                        if refreshed {
+                            grid.show_toast(
+                                ToastKind::Success,
+                                t!("grid.refreshed").to_string(),
+                                cx,
+                            );
                         }
                     }
                     Err(error) => {
@@ -428,6 +438,7 @@ impl GridView {
             let _ = this.update(cx, |grid, cx| {
                 grid.state.loading = false;
                 grid.state.elapsed = Some(elapsed);
+                let refreshed = std::mem::take(&mut grid.refresh_feedback);
                 match result {
                     Ok(mut query_result) => {
                         if let Some(catalog_columns) = catalog_columns {
@@ -454,6 +465,13 @@ impl GridView {
                         grid.state.error = None;
                         if reset_scroll {
                             grid.reset_scroll();
+                        }
+                        if refreshed {
+                            grid.show_toast(
+                                ToastKind::Success,
+                                t!("grid.refreshed").to_string(),
+                                cx,
+                            );
                         }
                     }
                     Err(error) => grid.state.error = Some(error.to_string()),
@@ -578,6 +596,13 @@ impl GridView {
         if self.guard_pending(GridNav::Refresh, cx) {
             return;
         }
+        self.refresh_now(cx);
+    }
+
+    /// Run the fetch of an explicit refresh and remember to confirm it once it lands, so the
+    /// toolbar / context-menu / F5 refresh never looks like a dropped click.
+    fn refresh_now(&mut self, cx: &mut Context<'_, Self>) {
+        self.refresh_feedback = true;
         self.reload_after_write(cx);
     }
 
@@ -1286,7 +1311,7 @@ impl GridView {
                 self.load_page(cx);
             }
             GridNav::Filter => self.filter_apply_now(cx),
-            GridNav::Refresh => self.reload_after_write(cx),
+            GridNav::Refresh => self.refresh_now(cx),
             GridNav::PageSize => self.page_size_apply_now(cx),
         }
     }

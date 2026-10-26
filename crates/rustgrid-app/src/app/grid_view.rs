@@ -8,6 +8,7 @@ impl GridView {
         app: WeakEntity<AppView>,
         runtime: Arc<Runtime>,
         theme: Theme,
+        clipboard: Rc<RefCell<GridClipboard>>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let page_input = (state.page_index + 1).to_string();
@@ -37,8 +38,8 @@ impl GridView {
             column_resize: None,
             sort_hover: None,
             sort_field_combos: BTreeMap::new(),
-            clipboard: None,
-            clipboard_text: None,
+            clipboard,
+            refresh_feedback: false,
             filter_value_inputs: BTreeMap::new(),
             filter_field_combos: BTreeMap::new(),
             filter_operator_combos: BTreeMap::new(),

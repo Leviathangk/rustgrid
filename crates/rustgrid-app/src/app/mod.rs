@@ -1567,6 +1567,16 @@ enum GridTextField {
     PageSize,
 }
 
+/// The app-wide cell clipboard: the last block copied from any grid, with the SQL `NULL`s the OS
+/// clipboard text cannot represent, plus the exact text written with it so a paste can tell our
+/// own copy from an external one. Shared by every grid (`Rc`), so copying a record in one table
+/// and pasting it in another keeps its `NULL`s.
+#[derive(Default)]
+struct GridClipboard {
+    block: Option<Vec<Vec<Option<String>>>>,
+    text: Option<String>,
+}
+
 /// A single open grid (a table page or a SQL result) as an isolated child view. Owns the grid
 /// data (`GridState`) and every piece of interaction state (scroll handles, cell editor, date
 /// picker, sort popup, page inputs), so grid-local interactions re-render only this view.
@@ -1612,11 +1622,12 @@ struct GridView {
     /// The shared column dropdowns of the sort panel, keyed by draft rule index.
     sort_field_combos: BTreeMap<usize, Entity<ComboBox>>,
     /// Rows copied with Ctrl+C / the context menu's 复制, for 粘贴 to write into the selected
-    /// records. Each cell is `None` for SQL `NULL`.
-    clipboard: Option<Vec<Vec<Option<String>>>>,
-    /// The exact text last written to the OS clipboard by a cell copy, so paste can tell an
-    /// external clipboard change from our own and fall back to `clipboard` (which keeps NULLs).
-    clipboard_text: Option<String>,
+    /// records. Each cell is `None` for SQL `NULL`. Shared by every grid, so a copy survives a
+    /// tab switch and keeps its `NULL`s when pasted into another table.
+    clipboard: Rc<RefCell<GridClipboard>>,
+    /// Set by an explicit 刷新 (toolbar / context menu / F5) so the fetch that follows confirms
+    /// itself with a toast; page turns and post-write reloads leave it off.
+    refresh_feedback: bool,
 
     /// The single-line editors of the filter builder's value fields, keyed by `(node path, slot)`.
     /// Rebuilt after any structural change so the paths stay valid. A real [`TextInput`] gives the
@@ -2315,6 +2326,8 @@ pub struct AppView {
     backup_objects_scroll: ScrollHandle,
     delete_confirm: Option<DeleteConfirm>,
     error_dialog: Option<String>,
+    /// The cell clipboard every grid shares (see [`GridClipboard`]).
+    grid_clipboard: Rc<RefCell<GridClipboard>>,
     /// Transient notifications queued for the next frame, which has the window needed to hand
     /// them to `Root`.
     pending_toasts: Vec<(ToastKind, String)>,
@@ -3066,6 +3079,7 @@ impl AppView {
             },
             delete_confirm: None,
             error_dialog: None,
+            grid_clipboard: Rc::new(RefCell::new(GridClipboard::default())),
             pending_toasts: Vec::new(),
             unsaved_confirm: None,
             dialog_focus_done: false,

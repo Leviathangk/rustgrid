@@ -48,13 +48,13 @@ impl GridView {
         }
         let inserts = self.collect_inserts();
         let updates = self.collect_updates();
-        self.flush_changes(inserts, updates, cx);
+        self.flush_changes(inserts, updates, true, cx);
     }
 
     /// Auto-commit the pending edits to existing rows (single-cell edits), without inserts.
     pub(super) fn commit_edits(&mut self, cx: &mut Context<'_, Self>) {
         let updates = self.collect_updates();
-        self.flush_changes(Vec::new(), updates, cx);
+        self.flush_changes(Vec::new(), updates, false, cx);
     }
 
     /// Build the pending insert rows as engine-agnostic [`RowInsert`]s.
@@ -118,13 +118,19 @@ impl GridView {
     }
 
     /// Write the pending inserts and updates in one transaction-ish pass, then reload the page.
+    /// `notify_saved` is set by the explicit Save path (button / Ctrl+S), never by the silent
+    /// auto-commit of a single cell edit, so a save always confirms itself.
     fn flush_changes(
         &mut self,
         inserts: Vec<RowInsert>,
         updates: Vec<RowUpdate>,
+        notify_saved: bool,
         cx: &mut Context<'_, Self>,
     ) {
         if inserts.is_empty() && updates.is_empty() {
+            if notify_saved {
+                self.show_toast(ToastKind::Info, t!("grid.no_changes").to_string(), cx);
+            }
             return;
         }
 
@@ -151,7 +157,12 @@ impl GridView {
             };
 
             let _ = this.update(cx, |grid, cx| match result {
-                Ok(()) => grid.reload_after_write(cx),
+                Ok(()) => {
+                    if notify_saved {
+                        grid.show_toast(ToastKind::Success, t!("grid.saved").to_string(), cx);
+                    }
+                    grid.reload_after_write(cx);
+                }
                 Err(error) => {
                     let message = match error {
                         Error::Query(text) => text,
@@ -179,15 +190,30 @@ impl GridView {
     }
 
     pub(super) fn open_delete_confirm(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(rows) = self.take_delete_rows(cx) else {
+            return;
+        };
+        let grid_id = self.state.id;
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, cx| {
+                app.delete_confirm = Some(DeleteConfirm::Rows { grid_id, rows });
+                cx.notify();
+            });
+        }
+    }
+
+    /// Stage the delete for the current selection: drop the selected pending insert rows and
+    /// return the selected database rows, or `None` when nothing is left to delete. Kept apart
+    /// from [`Self::open_delete_confirm`] so a context-menu handler, which already runs inside
+    /// `AppView::update`, can build the confirmation without re-entering `AppView` — that
+    /// re-entrant update aborted the app when 删除记录 was clicked.
+    pub(super) fn take_delete_rows(&mut self, cx: &mut Context<'_, Self>) -> Option<Vec<usize>> {
         // Deletion needs a real target table, which only editable grids (a table page, or a query
         // grid with an inferred single table) have.
         if !self.state.editable {
-            return;
+            return None;
         }
-        let selected_rows = match self.state.selection.as_ref() {
-            Some(selection) => selection.row_indices(),
-            None => return,
-        };
+        let selected_rows = self.state.selection.as_ref()?.row_indices();
         // Pending insert rows are not in the database yet: discard the selected ones outright
         // (highest index first so the remaining indices stay valid).
         let data_rows = self.state.rows.len();
@@ -209,14 +235,16 @@ impl GridView {
             if removed {
                 cx.notify();
             }
-            return;
+            return None;
         }
-        let grid_id = self.state.id;
+        Some(rows)
+    }
+
+    /// Surface a transient notification through the app. Safe from a grid update: `AppView` is a
+    /// different entity, and the notification reaches the window on the next render.
+    pub(super) fn show_toast(&self, kind: ToastKind, message: String, cx: &mut Context<'_, Self>) {
         if let Some(app) = self.app.upgrade() {
-            app.update(cx, |app, cx| {
-                app.delete_confirm = Some(DeleteConfirm::Rows { grid_id, rows });
-                cx.notify();
-            });
+            app.update(cx, |app, cx| app.toast(kind, message, cx));
         }
     }
 
