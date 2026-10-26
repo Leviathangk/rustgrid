@@ -10,6 +10,20 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.2] - 2026-10-26
+
+### Changed
+
+- The data grid's right-click menu no longer offers "Insert Row".
+
+### Fixed
+
+- Pasting copied records keeps their `NULL` values, so numeric columns save instead of failing with
+  an incorrect-value error.
+- Saving a table's edits confirms success, and Save / Ctrl+S reports when there is nothing to save.
+- Refreshing a table confirms that it finished.
+- Deleting records from the data grid's right-click menu no longer closes the app.
+
 ## [0.1.1] - 2026-10-22
 
 ### Added
