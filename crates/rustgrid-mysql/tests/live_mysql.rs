@@ -76,6 +76,91 @@ async fn live_catalog_and_page() {
     connection.close().await.expect("close");
 }
 
+/// A `TIMESTAMP` column read through the binary protocol (`fetch_page`) must decode to the same
+/// wall-clock text the text protocol returns, and the session must keep the server's own time zone
+/// (sqlx otherwise forces `+00:00`, which shows `TIMESTAMP` values in UTC while other clients show
+/// them in the server zone).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a live MySQL server (set RUSTGRID_MYSQL_PASSWORD)"]
+async fn live_timestamps_keep_the_session_wall_clock() {
+    let driver = rustgrid_mysql::MysqlDriver::new();
+    let connection = driver
+        .connect(&config())
+        .await
+        .expect("connect to the live server");
+
+    let database = "rustgrid_live";
+    connection
+        .execute_query(None, &format!("CREATE DATABASE IF NOT EXISTS `{database}`"))
+        .await
+        .expect("create the scratch database");
+    let table = "rustgrid_timestamps";
+    let _ = connection.drop_table(database, table).await;
+    connection
+        .execute_query(
+            Some(database),
+            &format!(
+                "CREATE TABLE `{table}` (\
+                 `id` int NOT NULL PRIMARY KEY, \
+                 `created_at` timestamp NULL, \
+                 `updated_at` datetime NULL)"
+            ),
+        )
+        .await
+        .expect("create the timestamp table");
+    connection
+        .execute_query(
+            Some(database),
+            &format!(
+                "INSERT INTO `{table}` VALUES \
+                 (1, '2026-04-22 13:51:51', '2026-04-22 13:51:51')"
+            ),
+        )
+        .await
+        .expect("insert a timestamp");
+
+    // The driver must not override the server's session time zone: forcing UTC makes every
+    // TIMESTAMP read differ from what the server and other clients report.
+    let zone = connection
+        .execute_query(None, "SELECT @@session.time_zone")
+        .await
+        .expect("read the session time zone");
+    assert_eq!(
+        zone.rows[0][0].as_display(),
+        "SYSTEM",
+        "the MySQL driver must keep the server's session time zone"
+    );
+
+    let page = connection
+        .fetch_page(database, table, PageRequest::new(0, 10))
+        .await
+        .expect("fetch page");
+    assert!(
+        matches!(page.rows[0][1], rustgrid_core::CellValue::Text(_)),
+        "TIMESTAMP must decode to text, got {:?}",
+        page.rows[0][1]
+    );
+    assert_eq!(page.rows[0][1].as_display(), "2026-04-22 13:51:51");
+    assert_eq!(page.rows[0][2].as_display(), "2026-04-22 13:51:51");
+
+    let result = connection
+        .execute_query(
+            Some(database),
+            &format!("SELECT `created_at`, `updated_at` FROM `{table}`"),
+        )
+        .await
+        .expect("query the timestamps");
+    assert_eq!(
+        result.rows[0][0].as_display(),
+        page.rows[0][1].as_display(),
+        "the binary and text protocols must agree"
+    );
+    assert_eq!(result.rows[0][1].as_display(), page.rows[0][2].as_display());
+
+    let _ = connection.drop_table(database, table).await;
+    connection.close().await.expect("close");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a live MySQL server (set RUSTGRID_MYSQL_PASSWORD)"]
 async fn live_table_statuses_report_exact_row_counts() {

@@ -192,6 +192,13 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
         options = options.password(password);
     }
 
+    // sqlx defaults to forcing `time_zone='+00:00'` so `DateTime<Utc>` values are unambiguous.
+    // RustGrid shows the values the server reports, like any plain client: forcing UTC made every
+    // `TIMESTAMP` column read differently from Navicat and the server's own `SELECT` whenever the
+    // server's time zone is not UTC. Keep the server's session time zone instead (and still let
+    // the profile's init SQL override it).
+    options = options.timezone(None::<String>);
+
     // TLS / SSL.
     options = options.ssl_mode(match settings.tls.mode {
         TlsMode::Disabled => MySqlSslMode::Disabled,

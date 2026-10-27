@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use futures_util::TryStreamExt;
 use rustgrid_core::{
     BackupObjectKind, CellValue, CheckDef, ColumnDef, ColumnInfo, Connection, DatabaseInfo,
@@ -655,10 +655,10 @@ impl Connection for MysqlConnection {
             let name: String = row.try_get(0).map_err(map_query_error)?;
             let engine: Option<String> = row.try_get(1).unwrap_or(None);
             let updated = row
-                .try_get::<Option<chrono::NaiveDateTime>, _>(4)
+                .try_get::<Option<DateTime<Utc>>, _>(4)
                 .ok()
                 .flatten()
-                .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string());
+                .map(|value| value.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string());
             statuses.push((
                 name,
                 TableStatus {
@@ -2205,8 +2205,8 @@ pub(crate) fn column_text(row: &MySqlRow, names: &[&str]) -> Option<String> {
         if let Ok(value) = row.try_get::<Option<String>, _>(index) {
             return value;
         }
-        if let Ok(value) = row.try_get::<Option<chrono::NaiveDateTime>, _>(index) {
-            return value.map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string());
+        if let Ok(value) = row.try_get::<Option<DateTime<Utc>>, _>(index) {
+            return value.map(|value| value.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string());
         }
     }
     None
@@ -2931,8 +2931,13 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
         return CellValue::Float(value);
     }
 
-    if let Ok(value) = row.try_get::<NaiveDateTime, _>(index) {
-        return CellValue::Text(value.to_string());
+    // `DateTime<Utc>` accepts both `DATETIME` and `TIMESTAMP`, while sqlx only considers
+    // `NaiveDateTime` compatible with `DATETIME`. Without this, a `TIMESTAMP` read over the binary
+    // protocol (the table grid's `fetch_page`) falls through to the raw bytes and shows as hex; the
+    // query editor's text protocol hides that by returning an ASCII date. `naive_utc()` is the
+    // wall-clock value the session returned, which is what the grid must show.
+    if let Ok(value) = row.try_get::<DateTime<Utc>, _>(index) {
+        return CellValue::Text(value.naive_utc().to_string());
     }
 
     if let Ok(value) = row.try_get::<NaiveDate, _>(index) {
