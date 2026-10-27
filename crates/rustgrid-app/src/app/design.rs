@@ -4381,6 +4381,9 @@ impl AppView {
         is_view: bool,
         cx: &mut Context<'_, Self>,
     ) {
+        if !self.driver_supports_table_designer(connection_index) {
+            return;
+        }
         let Some(connection) = self.connection_arc(connection_index) else {
             return;
         };
@@ -4443,6 +4446,9 @@ impl AppView {
         database: String,
         cx: &mut Context<'_, Self>,
     ) {
+        if !self.driver_supports_table_designer(connection_index) {
+            return;
+        }
         let Some(connection) = self.connection_arc(connection_index) else {
             return;
         };

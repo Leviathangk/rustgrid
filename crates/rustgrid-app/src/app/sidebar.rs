@@ -24,6 +24,9 @@ struct TreeConnection {
     /// Whether the engine has schemas; when false the flat category tree is used and the
     /// schema create/drop actions are not offered.
     supports_schemas: bool,
+    /// Whether the connection supports `.rgbak` backup/restore; when false the Backups category is
+    /// hidden (the MySQL driver's StarRocks compatibility mode turns this off).
+    supports_backups: bool,
     status: TreeStatus,
     /// The error from the last failed connect, shown as a tooltip on the node.
     failed_error: Option<String>,
@@ -216,12 +219,9 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 icon_style: descriptor
                     .as_ref()
                     .map_or(DriverIconStyle::Plain, |descriptor| descriptor.icon_style),
-                supports_routines: descriptor.as_ref().is_none_or(|descriptor| {
-                    descriptor.capabilities.has(DriverCapability::Routines)
-                }),
-                supports_schemas: descriptor.as_ref().is_some_and(|descriptor| {
-                    descriptor.capabilities.has(DriverCapability::Schemas)
-                }),
+                supports_routines: app.driver_supports(index, DriverCapability::Routines),
+                supports_schemas: app.driver_supports(index, DriverCapability::Schemas),
+                supports_backups: app.driver_supports_backup(index),
                 status,
                 failed_error,
                 expanded: node.expanded,
@@ -866,6 +866,7 @@ impl TreePane {
                                 &connection.saved_queries,
                                 connection.supports_routines,
                                 connection.supports_schemas,
+                                connection.supports_backups,
                                 cx,
                             ));
                         }
@@ -878,6 +879,7 @@ impl TreePane {
         body.child(sub)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_database(
         &self,
         connection_index: usize,
@@ -885,6 +887,7 @@ impl TreePane {
         saved_queries: &[TreeSavedQuery],
         supports_routines: bool,
         supports_schemas: bool,
+        supports_backups: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -1023,6 +1026,9 @@ impl TreePane {
                             if category == Category::Functions && !supports_routines {
                                 continue;
                             }
+                            if category == Category::Backups && !supports_backups {
+                                continue;
+                            }
                             sub = sub.child(self.render_category(
                                 connection_index,
                                 database_index,
@@ -1042,6 +1048,7 @@ impl TreePane {
                                 schema,
                                 saved_queries,
                                 supports_routines,
+                                supports_backups,
                                 cx,
                             ));
                         }
@@ -1065,6 +1072,7 @@ impl TreePane {
         schema: &str,
         saved_queries: &[TreeSavedQuery],
         supports_routines: bool,
+        supports_backups: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -1180,6 +1188,9 @@ impl TreePane {
                 let mut sub = sub;
                 for category in Category::ALL {
                     if category == Category::Functions && !supports_routines {
+                        continue;
+                    }
+                    if category == Category::Backups && !supports_backups {
                         continue;
                     }
                     sub = sub.child(self.render_category(

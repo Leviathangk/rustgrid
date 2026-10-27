@@ -632,7 +632,7 @@ impl AppView {
                                 this.confirm_delete_view(ci, di, view_drop_name.clone(), cx);
                             }),
                         ));
-                } else {
+                } else if self.driver_supports_table_designer(ci) {
                     items = items.child(self.context_item(
                         "table-design",
                         t!("object.design_table").to_string(),
@@ -791,19 +791,22 @@ impl AppView {
                 let di = *database_index;
                 let _ = schema;
                 let new_database = self.database_name(ci, di);
+                if self.driver_supports_table_designer(ci) {
+                    items = items
+                        .child(self.context_item(
+                            "tablecat-new",
+                            t!("object.new_table").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                let Some(database) = new_database.clone() else {
+                                    return;
+                                };
+                                this.open_new_table(ci, database, cx);
+                            }),
+                        ))
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)));
+                }
                 items = items
-                    .child(self.context_item(
-                        "tablecat-new",
-                        t!("object.new_table").to_string(),
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.context_menu = None;
-                            let Some(database) = new_database.clone() else {
-                                return;
-                            };
-                            this.open_new_table(ci, database, cx);
-                        }),
-                    ))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                     .child(self.context_item(
                         "tablecat-import",
                         t!("object.import_wizard").to_string(),

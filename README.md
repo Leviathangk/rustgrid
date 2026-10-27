@@ -59,10 +59,12 @@ Create a **MySQL** connection, use your FE query port (normally `9030`), and sel
 connections use **Default (MySQL)**; MariaDB initialization is unchanged. The option
 is saved with the connection and applies to every pooled connection.
 
-This addresses connection initialization and uses the text protocol for database
-listing. It does not provide full StarRocks support for MySQL-specific table design,
-users, routines, or backup/restore. Session initialization SQL runs after driver
-login, so it cannot work around a failure in the driver's own login SQL.
+This keeps connection initialization and table data working through the text protocol.
+StarRocks does not implement MySQL's account model, stored routines, table DDL or
+RustGrid's `.rgbak` restore, so the Users, Functions, table designer and Backup/Restore
+features are hidden for a StarRocks connection. The SQL editor and the table grid
+(browse and in-place editing) remain available. Session initialization SQL runs after
+driver login, so it cannot work around a failure in the driver's own login SQL.
 
 ## Features
 

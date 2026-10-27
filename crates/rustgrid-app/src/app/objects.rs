@@ -212,8 +212,9 @@ impl AppView {
         if category == Category::Views {
             return self.render_view_object_toolbar(pane, cx);
         }
-        let design_enabled = category == Category::Tables && open_enabled;
-        let new_enabled = category == Category::Tables;
+        let designer_enabled = self.driver_supports_table_designer(connection_index);
+        let design_enabled = category == Category::Tables && open_enabled && designer_enabled;
+        let new_enabled = category == Category::Tables && designer_enabled;
         // Deleting works off the multi-selection: enabled when at least one row is selected, even
         // if more than one (`pane.selected` is the single-selection mirror and is `None` for a
         // multi-row selection).

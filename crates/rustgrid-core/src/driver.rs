@@ -5,9 +5,9 @@ use crate::descriptor::{ConnectionFormSpec, DriverDescriptor, DriverIconStyle, T
 use crate::dialect::DriverDialect;
 use crate::error::{Error, Result};
 use crate::model::{
-    BackupObjectKind, ColumnInfo, ConnectionConfig, DatabaseInfo, DatabaseOptions, DriverId,
-    ObjectDump, PageRequest, QueryResult, RowInsert, RowUpdate, TableInfo, TablePage, TableSchema,
-    TableStatus,
+    BackupObjectKind, ColumnInfo, ConnectionConfig, ConnectionProfile, DatabaseInfo,
+    DatabaseOptions, DriverId, ObjectDump, PageRequest, QueryResult, RowInsert, RowUpdate,
+    TableInfo, TablePage, TableSchema, TableStatus,
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use crate::user::{
@@ -62,6 +62,29 @@ pub trait Driver: Send + Sync {
     /// `database`.
     fn is_file_based(&self) -> bool {
         false
+    }
+
+    /// The capabilities of one saved connection.
+    ///
+    /// `descriptor()` describes the driver as a whole. A driver whose server software can run in
+    /// more than one mode (the MySQL driver's StarRocks compatibility mode) overrides this so the
+    /// UI hides the features that mode cannot provide. The default is the descriptor's static set.
+    fn capabilities_for(&self, _profile: &ConnectionProfile) -> DriverCapabilities {
+        self.descriptor().capabilities
+    }
+
+    /// Whether this connection may open the table designer. A compatibility mode whose server
+    /// cannot execute the engine's table DDL (MySQL's StarRocks mode) returns `false`, so the UI
+    /// hides the designer and its 新建表 action instead of opening a page whose save would fail.
+    fn supports_table_designer(&self, _profile: &ConnectionProfile) -> bool {
+        true
+    }
+
+    /// Whether this connection may use RustGrid's `.rgbak` backup/restore. A server that cannot
+    /// replay the engine's table DDL (MySQL's StarRocks mode) returns `false`, so the Backup tab
+    /// and the tree's 备份 category stay unavailable.
+    fn supports_backup(&self, _profile: &ConnectionProfile) -> bool {
+        true
     }
 
     /// The SQL dialect the engine speaks, used by the UI to pick engine-specific data (today the

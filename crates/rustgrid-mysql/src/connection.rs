@@ -20,7 +20,7 @@ use crate::engine::Engine;
 
 pub struct MysqlConnection {
     pub(crate) pool: MySqlPool,
-    /// Which MySQL-protocol engine (MySQL or MariaDB) this connection targets.
+    /// Which MySQL-protocol engine (MySQL, MariaDB or StarRocks) this connection targets.
     engine: Engine,
     /// Whether `INFORMATION_SCHEMA.COLUMNS` has `GENERATION_EXPRESSION` (MySQL 5.7.6+ / MariaDB
     /// 10.2+). Older servers reject the whole column query with `1054`, so the first failure flips
@@ -304,20 +304,31 @@ impl Connection for MysqlConnection {
             .ok()
         };
 
-        let page_sql = format!(
-            "SELECT * FROM {qualified}{where_clause}{} LIMIT ? OFFSET ?",
-            order_clause(&page)
-        );
+        // StarRocks rejects a bound parameter in LIMIT/OFFSET ("using parameter(?) as limit or
+        // offset not supported"). The values are internal page numbers, never user SQL, so write
+        // them into the statement for that engine; MySQL/MariaDB keep the prepared form.
+        let starrocks = self.engine == Engine::StarRocks;
+        let page_sql = if starrocks {
+            format!(
+                "SELECT * FROM {qualified}{where_clause}{} LIMIT {} OFFSET {}",
+                order_clause(&page),
+                page.page_size,
+                page.offset()
+            )
+        } else {
+            format!(
+                "SELECT * FROM {qualified}{where_clause}{} LIMIT ? OFFSET ?",
+                order_clause(&page)
+            )
+        };
         let mut query = sqlx::query(sqlx::AssertSqlSafe(page_sql));
         for bind in &binds {
             query = query.bind(bind);
         }
-        let rows = query
-            .bind(page.page_size as i64)
-            .bind(page.offset() as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_query_error)?;
+        if !starrocks {
+            query = query.bind(page.page_size as i64).bind(page.offset() as i64);
+        }
+        let rows = query.fetch_all(&self.pool).await.map_err(map_query_error)?;
 
         let mut decoded = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -343,6 +354,48 @@ impl Connection for MysqlConnection {
         }
 
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+
+        // StarRocks rejects prepared INSERT/UPDATE/DELETE (`1295 ... not supported in the
+        // prepared statement protocol yet`) and does not report transactions the way sqlx's
+        // `begin()` expects. Run each row as a plain text statement instead: the values are
+        // already decoded cell strings, so quoting them is safe and keeps the same semantics.
+        if self.engine == Engine::StarRocks {
+            for update in updates {
+                if update.set.is_empty() {
+                    continue;
+                }
+                let set_clause = update
+                    .set
+                    .iter()
+                    .map(|(column, value)| {
+                        format!("{} = {}", quote_identifier(column), edit_value_sql(value))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let where_clause = if update.keys.is_empty() {
+                    "1 = 1".to_string()
+                } else {
+                    update
+                        .keys
+                        .iter()
+                        .map(|(column, value)| match value {
+                            Some(_) => {
+                                format!("{} = {}", quote_identifier(column), edit_value_sql(value))
+                            }
+                            None => format!("{} IS NULL", quote_identifier(column)),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                };
+                let sql = format!("UPDATE {qualified} SET {set_clause} WHERE {where_clause}");
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(&self.pool)
+                    .await
+                    .map_err(map_query_error)?;
+            }
+            return Ok(());
+        }
+
         let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
 
         for update in updates {
@@ -396,6 +449,40 @@ impl Connection for MysqlConnection {
         }
 
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+
+        // See `update_rows`: StarRocks does not accept prepared DML, so insert each row through
+        // the text protocol with quoted literals.
+        if self.engine == Engine::StarRocks {
+            for row in rows {
+                if row.values.is_empty() {
+                    let sql = format!("INSERT INTO {qualified} () VALUES ()");
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                        .execute(&self.pool)
+                        .await
+                        .map_err(map_query_error)?;
+                    continue;
+                }
+                let columns = row
+                    .values
+                    .iter()
+                    .map(|(column, _)| quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let values = row
+                    .values
+                    .iter()
+                    .map(|(_, value)| edit_value_sql(value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!("INSERT INTO {qualified} ({columns}) VALUES ({values})");
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(&self.pool)
+                    .await
+                    .map_err(map_query_error)?;
+            }
+            return Ok(());
+        }
+
         let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
 
         for row in rows {
@@ -443,6 +530,33 @@ impl Connection for MysqlConnection {
         }
 
         let qualified = format!("{}.{}", quote_identifier(database), quote_identifier(table));
+
+        // See `update_rows`: use the text protocol for StarRocks.
+        if self.engine == Engine::StarRocks {
+            for row_keys in keys {
+                if row_keys.is_empty() {
+                    return Err(Error::Query("delete requires key columns".to_string()));
+                }
+                let where_clause = row_keys
+                    .iter()
+                    .map(|(column, value)| match value {
+                        Some(_) => {
+                            format!("{} = {}", quote_identifier(column), edit_value_sql(value))
+                        }
+                        None => format!("{} IS NULL", quote_identifier(column)),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                // StarRocks rejects `DELETE ... LIMIT`; the key columns already identify the row.
+                let sql = format!("DELETE FROM {qualified} WHERE {where_clause}");
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(&self.pool)
+                    .await
+                    .map_err(map_query_error)?;
+            }
+            return Ok(());
+        }
+
         let mut transaction = self.pool.begin().await.map_err(map_query_error)?;
 
         for row_keys in keys {
@@ -2022,7 +2136,7 @@ fn check_sql(check: &CheckDef) -> String {
 /// Drop a named check. MySQL spells it `DROP CHECK`; MariaDB spells it `DROP CONSTRAINT`.
 fn drop_check_sql(engine: Engine, name: &str) -> String {
     let verb = match engine {
-        Engine::MySql => "DROP CHECK",
+        Engine::MySql | Engine::StarRocks => "DROP CHECK",
         Engine::MariaDb => "DROP CONSTRAINT",
     };
     format!("{verb} {}", quote_identifier(name))
@@ -2401,6 +2515,15 @@ fn render_literal(value: &CellValue, column_type: &str) -> String {
             hex
         }
     }
+}
+
+/// Render one already-decoded cell string as a SQL literal for the text protocol. `None` is SQL
+/// `NULL` (never an empty string), matching the grid's `CellValue::as_edit_value` contract.
+fn edit_value_sql(value: &Option<String>) -> String {
+    value
+        .as_deref()
+        .map(quote_mysql_string)
+        .unwrap_or_else(|| "NULL".to_string())
 }
 
 /// Quote a string as a MySQL literal, escaping the characters MySQL treats specially inside

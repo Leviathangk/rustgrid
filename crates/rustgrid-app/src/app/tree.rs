@@ -1035,6 +1035,9 @@ impl AppView {
         {
             return;
         }
+        if category == Category::Backups && !self.driver_supports_backup(connection_index) {
+            return;
+        }
         self.clear_info_selection();
         if category == Category::Backups {
             // Selecting the Backups category scopes the Backup main tab to this database. The

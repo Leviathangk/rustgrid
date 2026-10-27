@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rustgrid_core::{
     Connection, ConnectionConfig, ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec,
-    ConnectionFormSpec, ConnectionPage, DatabaseEditorSpec, DesignerTab, Driver,
+    ConnectionFormSpec, ConnectionPage, ConnectionProfile, DatabaseEditorSpec, DesignerTab, Driver,
     DriverCapabilities, DriverCapability, DriverDescriptor, DriverDialect, DriverIconStyle,
     DriverId, Error, Result, TableDesignerSpec, TlsMode,
 };
@@ -110,6 +110,25 @@ impl Driver for MysqlDriver {
         DriverDialect::Mysql
     }
 
+    /// StarRocks keeps the MySQL wire protocol but cannot execute RustGrid's MySQL account model,
+    /// stored-routine catalog or table DDL. Its compatibility mode therefore advertises only the
+    /// features that actually work and hides the rest in the UI.
+    fn capabilities_for(&self, profile: &ConnectionProfile) -> DriverCapabilities {
+        if is_starrocks(&profile.options) {
+            DriverCapabilities::none().with(DriverCapability::DatabaseManagement)
+        } else {
+            self.descriptor().capabilities
+        }
+    }
+
+    fn supports_table_designer(&self, profile: &ConnectionProfile) -> bool {
+        !is_starrocks(&profile.options)
+    }
+
+    fn supports_backup(&self, profile: &ConnectionProfile) -> bool {
+        !is_starrocks(&profile.options)
+    }
+
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
         connect(config, Engine::MySql).await
     }
@@ -186,6 +205,7 @@ impl Driver for MariaDbDriver {
 /// the pool setup, TLS, tunnel and session initialization are identical; only the engine-specific
 /// session SQL differs.
 async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Connection>> {
+    let mut engine = engine;
     let settings = &config.settings;
 
     // Route through the tunnel (if any): the connection then points at the local forwarder,
@@ -204,16 +224,11 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
         .port(port)
         .username(&config.username);
 
-    if engine == Engine::MySql
-        && config
-            .options
-            .get("mysql.compatibility")
-            .map(String::as_str)
-            == Some("starrocks")
-    {
+    if engine == Engine::MySql && is_starrocks(&config.options) {
         // StarRocks rejects SQLx's SET sql_mode=(SELECT CONCAT(...)) before after_connect
         // can run. Disable both additions, leaving the server's existing sql_mode intact.
         options = options.pipes_as_concat(false).no_engine_substitution(false);
+        engine = Engine::StarRocks;
     }
 
     if let Some(database) = &config.database {
@@ -318,6 +333,11 @@ async fn connect(config: &ConnectionConfig, engine: Engine) -> Result<Box<dyn Co
 /// short `wait_timeout` settings some servers use (under a minute).
 const DEFAULT_IDLE_SECONDS: u64 = 20;
 
+/// Whether the connection options select the StarRocks compatibility mode.
+fn is_starrocks(options: &std::collections::BTreeMap<String, String>) -> bool {
+    options.get("mysql.compatibility").map(String::as_str) == Some("starrocks")
+}
+
 fn map_connect_error(error: sqlx::Error) -> Error {
     if let sqlx::Error::Database(database_error) = &error
         && let Some(mysql_error) =
@@ -339,4 +359,61 @@ fn is_unknown_system_variable(error: &sqlx::Error) -> bool {
         return mysql_error.number() == 1193;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustgrid_core::ConnectionOptions;
+
+    fn profile(mode: Option<&str>) -> ConnectionProfile {
+        let mut options = std::collections::BTreeMap::new();
+        if let Some(mode) = mode {
+            options.insert("mysql.compatibility".to_string(), mode.to_string());
+        }
+        ConnectionProfile {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            driver: DriverId::new("mysql"),
+            host: "127.0.0.1".to_string(),
+            port: 9030,
+            username: "root".to_string(),
+            database: None,
+            options,
+            settings: ConnectionOptions::default(),
+        }
+    }
+
+    #[test]
+    fn starrocks_compatibility_hides_the_unsupported_features() {
+        let driver = MysqlDriver::new();
+        let starrocks = profile(Some("starrocks"));
+        assert!(
+            driver
+                .capabilities_for(&starrocks)
+                .has(DriverCapability::DatabaseManagement)
+        );
+        assert!(
+            !driver
+                .capabilities_for(&starrocks)
+                .has(DriverCapability::Users)
+        );
+        assert!(
+            !driver
+                .capabilities_for(&starrocks)
+                .has(DriverCapability::Routines)
+        );
+        assert!(!driver.supports_table_designer(&starrocks));
+        assert!(!driver.supports_backup(&starrocks));
+
+        let mysql = profile(None);
+        assert!(driver.capabilities_for(&mysql).has(DriverCapability::Users));
+        assert!(
+            driver
+                .capabilities_for(&mysql)
+                .has(DriverCapability::Routines)
+        );
+        assert!(driver.supports_table_designer(&mysql));
+        assert!(driver.supports_backup(&mysql));
+    }
 }

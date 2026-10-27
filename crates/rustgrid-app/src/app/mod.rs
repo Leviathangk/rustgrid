@@ -3673,7 +3673,30 @@ impl AppView {
         let Some(driver) = self.registry.get(&node.profile.driver) else {
             return true;
         };
-        driver.descriptor().capabilities.has(capability)
+        driver.capabilities_for(&node.profile).has(capability)
+    }
+
+    /// Whether the connection may open the table designer (the MySQL driver's StarRocks
+    /// compatibility mode cannot run MySQL table DDL, so it turns this off).
+    fn driver_supports_table_designer(&self, connection_index: usize) -> bool {
+        let Some(node) = self.connections.get(connection_index) else {
+            return true;
+        };
+        let Some(driver) = self.registry.get(&node.profile.driver) else {
+            return true;
+        };
+        driver.supports_table_designer(&node.profile)
+    }
+
+    /// Whether the connection may use RustGrid's `.rgbak` backup/restore.
+    fn driver_supports_backup(&self, connection_index: usize) -> bool {
+        let Some(node) = self.connections.get(connection_index) else {
+            return true;
+        };
+        let Some(driver) = self.registry.get(&node.profile.driver) else {
+            return true;
+        };
+        driver.supports_backup(&node.profile)
     }
 
     /// The SQL dialect of the driver behind `connection_index` (generic when unknown).
@@ -4310,6 +4333,12 @@ fn install_editor_highlight_theme(theme: Theme, cx: &mut App) {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.track_session(cx);
+        // A disabled main tab (Users/Functions on an engine without them, Backups on a StarRocks
+        // compatibility connection) must not stay active after the connection scope changes.
+        let main_tab = self.main_tab;
+        if !self.main_tab_usable(main_tab, cx) {
+            self.main_tab = MainTab::Tables;
+        }
         self.theme = Theme::resolve(self.theme_setting, window.appearance());
         // Keep gpui-kit's own theme in lockstep with the app palette so its components (and the
         // shadcn tokens they read) follow the user's Light/Dark/System setting.

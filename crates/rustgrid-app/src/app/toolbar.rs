@@ -387,7 +387,7 @@ impl AppView {
 
     /// Whether a main tab applies to the connection it would read from. Users/Functions are
     /// disabled on engines without accounts or stored routines (SQLite).
-    fn main_tab_usable(&self, tab: MainTab, cx: &App) -> bool {
+    pub(super) fn main_tab_usable(&self, tab: MainTab, cx: &App) -> bool {
         match tab {
             MainTab::Users => self
                 .users_connection_index(cx)
@@ -399,6 +399,21 @@ impl AppView {
                 .map(|pane| pane.read(cx).connection_index)
                 .map(|index| self.driver_supports(index, DriverCapability::Routines))
                 .unwrap_or(false),
+            MainTab::Backups => {
+                let index = self.backup_scope(cx).map(|(index, _)| index).or_else(|| {
+                    let selected = self.tree_pane.read(cx).selected.clone()?;
+                    parse_tree_scope(&selected)
+                        .map(|(index, _, _)| index)
+                        .or_else(|| parse_scope_id(&selected).map(|(index, _)| index))
+                        .or_else(|| {
+                            selected
+                                .strip_prefix("conn-")
+                                .and_then(|rest| rest.split('-').next())
+                                .and_then(|value| value.parse().ok())
+                        })
+                });
+                index.is_none_or(|index| self.driver_supports_backup(index))
+            }
             _ => true,
         }
     }
@@ -540,6 +555,9 @@ impl AppView {
     }
 
     pub(super) fn select_main_tab(&mut self, tab: MainTab, cx: &mut Context<'_, Self>) {
+        if !self.main_tab_usable(tab, cx) {
+            return;
+        }
         self.main_tab = tab;
         // Clicking a main tab clears that list's own search even while 保留对象搜索 is on (the
         // setting keeps searches across database/connection switches, not a re-entry into the tab).
