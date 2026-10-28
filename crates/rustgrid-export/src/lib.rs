@@ -371,6 +371,47 @@ impl TableWriter {
     }
 }
 
+/// One result set written into a multi-sheet `.xlsx` workbook by [`write_workbook`].
+pub struct WorkbookSheet<'a> {
+    /// The sheet title; sanitised and made unique within the workbook.
+    pub name: &'a str,
+    pub columns: &'a [String],
+    pub rows: &'a [Vec<CellValue>],
+}
+
+/// Write several result sets into one `.xlsx` file, one worksheet per result. Used when a query
+/// run produced multiple result sets and the user exports them together: Excel's sheet model is
+/// the natural container, so the user gets one file instead of one file per result.
+pub fn write_workbook(
+    path: &Path,
+    sheets: &[WorkbookSheet<'_>],
+    options: ExportOptions,
+) -> Result<()> {
+    let mut workbook = Workbook::new();
+    let header = Format::new().set_bold();
+    let mut names: Vec<String> = Vec::with_capacity(sheets.len());
+    for sheet in sheets {
+        let worksheet = workbook.add_worksheet();
+        worksheet.set_name(unique_sheet_name(sheet.name, &mut names))?;
+        let mut row = 0u32;
+        if options.include_header {
+            for (col, name) in sheet.columns.iter().enumerate() {
+                worksheet.write_string_with_format(row, col as u16, name, &header)?;
+            }
+            row += 1;
+        }
+        for cells in sheet.rows {
+            for (col, value) in cells.iter().enumerate() {
+                write_xlsx_cell(worksheet, row, col, value)?;
+            }
+            row += 1;
+        }
+        worksheet.autofit();
+    }
+    workbook.save(path)?;
+    Ok(())
+}
+
 /// Write a `.xlsx` workbook. rust_xlsxwriter buffers every row until `save`, so this is the only
 /// sink whose memory use grows with the table.
 struct XlsxSink {
@@ -475,6 +516,25 @@ fn sheet_name(table: &str) -> String {
         trimmed.to_string()
     };
     name.chars().take(31).collect()
+}
+
+/// Make `name` a valid, case-insensitively unique Excel sheet name. Excel rejects duplicates and
+/// matches names case-insensitively, so `结果1` / `结果1` would make `save` fail.
+fn unique_sheet_name(name: &str, used: &mut Vec<String>) -> String {
+    let base = sheet_name(name);
+    let mut candidate = base.clone();
+    let mut number = 2u32;
+    while used
+        .iter()
+        .any(|seen| seen.eq_ignore_ascii_case(&candidate))
+    {
+        let suffix = format!(" ({number})");
+        let keep = 31usize.saturating_sub(suffix.chars().count());
+        candidate = format!("{}{}", base.chars().take(keep).collect::<String>(), suffix);
+        number += 1;
+    }
+    used.push(candidate.clone());
+    candidate
 }
 
 fn truncate(value: &str) -> String {
@@ -844,6 +904,34 @@ mod tests {
         .unwrap();
         writer.write_rows(&rows()).unwrap();
         writer.finish().unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn workbook_writes_one_sheet_per_result() {
+        let path = temp_file("xlsx");
+        let first_rows = rows();
+        let second_rows = vec![vec![CellValue::Int(2), CellValue::Text("b".to_string())]];
+        let first_columns = columns();
+        let second_columns = columns();
+        write_workbook(
+            &path,
+            &[
+                WorkbookSheet {
+                    name: "Result 1",
+                    columns: &first_columns,
+                    rows: &first_rows,
+                },
+                WorkbookSheet {
+                    name: "Result 1",
+                    columns: &second_columns,
+                    rows: &second_rows,
+                },
+            ],
+            ExportOptions::default(),
+        )
+        .unwrap();
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
         std::fs::remove_file(&path).ok();
     }

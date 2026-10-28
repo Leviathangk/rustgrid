@@ -14,13 +14,21 @@ use std::rc::Rc;
 
 use rfd::AsyncFileDialog;
 use rustgrid_core::{DriverDialect, ObjectKind, PageRequest, SortColumn};
-use rustgrid_export::{ExportOptions, SqlDialect, TableWriter, default_output_path};
+use rustgrid_export::{
+    ExportOptions, SqlDialect, TableWriter, WorkbookSheet, default_output_path, write_workbook,
+};
 
 use super::*;
 
 /// Rows fetched per page while exporting. Large enough to keep round trips low, small enough to
 /// bound the memory a single page holds.
 const EXPORT_PAGE_SIZE: u64 = 5_000;
+
+/// Whether the wizard is writing several query results into one workbook. Only `.xlsx` has
+/// sheets; the other formats keep one file per result.
+fn combined_workbook(wizard: &ExportWizard) -> bool {
+    wizard.combined && wizard.format == ExportFormat::Xlsx
+}
 
 impl AppView {
     // ----- Opening -----------------------------------------------------------------------------
@@ -83,6 +91,7 @@ impl AppView {
             tables,
             fields: BTreeMap::new(),
             snapshots: BTreeMap::new(),
+            combined: false,
             field_table,
             field_combo: None,
             dir_input: Some(dir_input),
@@ -119,10 +128,12 @@ impl AppView {
             t!("export.all_records").to_string(),
             t!("export.current_records", count = rows).to_string(),
         ];
+        self.export_choice_combo = None;
         self.export_choice = Some(ExportChoice {
             message: t!("export.scope_table").to_string(),
             options,
-            selected: 0,
+            selected: vec![true, false],
+            multiple: false,
             target: ExportChoiceTarget::TablePage {
                 connection_index,
                 database_index,
@@ -133,7 +144,7 @@ impl AppView {
         cx.notify();
     }
 
-    /// Open the 导出 confirmation for a query tab: one of its result sets, or all of them.
+    /// Open the 导出 confirmation for a query tab: one or more of its result sets.
     pub(super) fn open_query_export_choice(
         &mut self,
         query_index: usize,
@@ -183,13 +194,45 @@ impl AppView {
             self.open_export_wizard_snapshots(connection_index, database, dialect, results, cx);
             return;
         }
-        let mut options: Vec<String> = results.iter().map(|result| result.name.clone()).collect();
-        options.push(t!("export.all_results").to_string());
-        let selected = if active < results.len() { active } else { 0 };
+        let options: Vec<String> = results.iter().map(|result| result.name.clone()).collect();
+        // Open on the result the user was looking at; every row can then be ticked in the
+        // multi-select dropdown. This keeps the previous default while allowing many results.
+        let mut selected = vec![false; results.len()];
+        if let Some(active) = selected.get_mut(active) {
+            *active = true;
+        }
+        let initial: Vec<String> = selected
+            .iter()
+            .enumerate()
+            .filter(|(_, selected)| **selected)
+            .map(|(index, _)| index.to_string())
+            .collect();
+        let weak = cx.weak_entity();
+        let theme = self.theme;
+        let combo_options: Vec<ComboOption> = results
+            .iter()
+            .enumerate()
+            .map(|(index, result)| ComboOption::new(index.to_string(), result.name.clone()))
+            .collect();
+        let combo = cx.new(move |cx| {
+            ComboBox::new(theme, combo_options, String::new(), 360.0, cx)
+                .multiple(true)
+                .full_width()
+                .height(24.0)
+                .text_size(12.0)
+                .on_select_many(Rc::new(move |values: &[String], _window, cx| {
+                    if let Some(app) = weak.upgrade() {
+                        app.update(cx, |app, cx| app.export_choice_set_values(values, cx));
+                    }
+                }))
+        });
+        combo.update(cx, |combo, cx| combo.set_selected_values(initial, cx));
+        self.export_choice_combo = Some(combo);
         self.export_choice = Some(ExportChoice {
             message: t!("export.scope_query").to_string(),
             options,
             selected,
+            multiple: true,
             target: ExportChoiceTarget::QueryResults {
                 connection_index,
                 database,
@@ -203,15 +246,55 @@ impl AppView {
     /// The 取消 / 确定 footer of the export scope dialog.
     pub(super) fn cancel_export_choice(&mut self, cx: &mut Context<'_, Self>) {
         self.export_choice = None;
+        self.export_choice_combo = None;
         cx.notify();
     }
 
-    /// Highlight one option of the export scope dialog.
+    /// Highlight one option of the table scope radio list.
     pub(super) fn export_choice_select(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if let Some(choice) = self.export_choice.as_mut()
+            && !choice.multiple
             && index < choice.options.len()
         {
-            choice.selected = index;
+            for (position, selected) in choice.selected.iter_mut().enumerate() {
+                *selected = position == index;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Tick or clear every query result in the multi-select dialog.
+    pub(super) fn export_choice_select_all(&mut self, selected: bool, cx: &mut Context<'_, Self>) {
+        let Some(choice) = self.export_choice.as_mut() else {
+            return;
+        };
+        if !choice.multiple {
+            return;
+        }
+        choice.selected.fill(selected);
+        let values: Vec<String> = if selected {
+            (0..choice.options.len())
+                .map(|index| index.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(combo) = self.export_choice_combo.clone() {
+            combo.update(cx, |combo, cx| combo.set_selected_values(values, cx));
+        }
+        cx.notify();
+    }
+
+    /// Adopt the values picked in the query-results dropdown.
+    fn export_choice_set_values(&mut self, values: &[String], cx: &mut Context<'_, Self>) {
+        let Some(choice) = self.export_choice.as_mut() else {
+            return;
+        };
+        if !choice.multiple {
+            return;
+        }
+        for (index, selected) in choice.selected.iter_mut().enumerate() {
+            *selected = values.iter().any(|value| value == &index.to_string());
         }
         cx.notify();
     }
@@ -221,6 +304,7 @@ impl AppView {
         let Some(choice) = self.export_choice.take() else {
             return;
         };
+        self.export_choice_combo = None;
         match choice.target {
             ExportChoiceTarget::TablePage {
                 connection_index,
@@ -228,7 +312,7 @@ impl AppView {
                 table,
                 page,
             } => {
-                if choice.selected == 0 {
+                if choice.selected.first() == Some(&true) {
                     self.open_export_wizard(
                         connection_index,
                         database_index,
@@ -252,11 +336,15 @@ impl AppView {
                 dialect,
                 results,
             } => {
-                let chosen = if choice.selected < results.len() {
-                    vec![results[choice.selected].clone()]
-                } else {
-                    results
-                };
+                let chosen: Vec<ExportSnapshot> = results
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, _)| choice.selected.get(*index) == Some(&true))
+                    .map(|(_, result)| result)
+                    .collect();
+                if chosen.is_empty() {
+                    return;
+                }
                 self.open_export_wizard_snapshots(connection_index, database, dialect, chosen, cx);
             }
         }
@@ -296,6 +384,7 @@ impl AppView {
                 )
             })
             .collect();
+        let combined = sources.len() > 1;
         let snapshots: BTreeMap<String, ExportSnapshot> = sources
             .into_iter()
             .map(|source| (source.name.clone(), source))
@@ -310,6 +399,7 @@ impl AppView {
             step: ExportStep::Format,
             format,
             output_dir,
+            combined,
             tables,
             fields,
             snapshots,
@@ -595,6 +685,9 @@ impl AppView {
     // ----- P2: tables and paths ----------------------------------------------------------------
 
     pub(super) fn export_toggle_table(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if self.export_wizard.as_ref().is_some_and(combined_workbook) {
+            return;
+        }
         let format = self
             .export_wizard
             .as_ref()
@@ -622,6 +715,9 @@ impl AppView {
         let Some(wizard) = self.export_wizard.as_mut() else {
             return;
         };
+        if combined_workbook(wizard) {
+            return;
+        }
         let format = wizard.format;
         let output_dir = wizard.output_dir.clone();
         for table in wizard.tables.iter_mut() {
@@ -1009,6 +1105,11 @@ impl AppView {
             self.set_export_error(t!("export.no_path").to_string(), cx);
             return;
         }
+        let combined = combined_workbook(wizard);
+        let workbook_path = plans
+            .first()
+            .map(|plan| plan.path.clone())
+            .unwrap_or_default();
         let connection_index = wizard.connection_index;
         let database = wizard.database.clone();
         let dialect = wizard.dialect;
@@ -1074,51 +1175,38 @@ impl AppView {
             let mut exported = 0usize;
             let mut failed = 0usize;
             let cancel_flag = cancel.clone();
-            for plan in plans {
-                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                let ExportPlan {
-                    name,
-                    path,
-                    columns,
-                    column_types,
-                    order_by,
-                    snapshot,
-                } = plan;
-                let created = TableWriter::create(
-                    Path::new(&path),
-                    &name,
-                    &columns,
-                    &column_types,
-                    format,
-                    options,
-                    sql_dialect,
-                );
-                let mut writer = match created {
-                    Ok(writer) => writer,
-                    Err(error) => {
+            if combined {
+                // One workbook, one sheet per selected query result. All sources are already in
+                // memory, so the sheet data is projected here and written in one `save`.
+                let mut sheets_data: Vec<(String, Vec<String>, Vec<Vec<CellValue>>)> = Vec::new();
+                let mut stop = false;
+                for plan in plans {
+                    if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let ExportPlan {
+                        name,
+                        columns,
+                        snapshot,
+                        ..
+                    } = plan;
+                    let Some(snapshot) = snapshot else {
                         let message = t!(
                             "export.log.table_failed",
                             name = name.clone(),
-                            error = error.to_string()
+                            error = t!("export.not_connected").to_string()
                         )
                         .to_string();
                         let _ = this.update(cx, |app, cx| app.export_log(message, cx));
                         failed += 1;
                         if !continue_on_error {
+                            stop = true;
                             break;
                         }
                         continue;
-                    }
-                };
-
-                let mut table_rows = 0usize;
-                let mut error: Option<String> = None;
-                if let Some(snapshot) = snapshot {
-                    // In-memory source: write exactly the rows the grid showed (filtered, sorted,
-                    // current page) or the query result set.
+                    };
                     let mut indices = Vec::with_capacity(columns.len());
+                    let mut missing = None;
                     for column in &columns {
                         match snapshot
                             .columns
@@ -1127,186 +1215,330 @@ impl AppView {
                         {
                             Some(index) => indices.push(index),
                             None => {
-                                error = Some(format!("column `{column}` is missing"));
+                                missing = Some(column.clone());
                                 break;
                             }
                         }
                     }
-                    if error.is_none() {
-                        let total = snapshot.rows.len();
-                        let identity = indices.len() == snapshot.columns.len()
-                            && indices
-                                .iter()
-                                .enumerate()
-                                .all(|(position, index)| position == *index);
-                        let write = if identity {
-                            writer.write_rows(&snapshot.rows)
-                        } else {
-                            let rows: Vec<Vec<CellValue>> = snapshot
-                                .rows
-                                .iter()
-                                .map(|row| {
-                                    indices
-                                        .iter()
-                                        .filter_map(|index| row.get(*index).cloned())
-                                        .collect()
-                                })
-                                .collect();
-                            writer.write_rows(&rows)
-                        };
-                        match write {
-                            Ok(()) => {
-                                table_rows = total;
-                                let _ = this.update(cx, |app, cx| {
-                                    if let Some(wizard) = app.export_wizard.as_mut() {
-                                        wizard.rows_done += total;
-                                        wizard.log_scroll.scroll_to_bottom();
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                            Err(write_error) => error = Some(write_error.to_string()),
-                        }
-                    }
-                } else {
-                    let Some(connection) = connection.clone() else {
-                        error = Some(t!("export.not_connected").to_string());
-                        failed += 1;
+                    if let Some(column) = missing {
                         let message = t!(
                             "export.log.table_failed",
                             name = name.clone(),
-                            error = error.clone().unwrap_or_default()
+                            error = format!("column `{column}` is missing")
                         )
                         .to_string();
                         let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                        failed += 1;
                         if !continue_on_error {
+                            stop = true;
                             break;
                         }
                         continue;
-                    };
-                    let mut page_index = 0u64;
-                    let mut projection: Option<Vec<usize>> = None;
-                    let mut identity = false;
-                    loop {
-                        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                            error = Some(t!("export.log.cancelled").to_string());
-                            break;
-                        }
-                        let connection = connection.clone();
-                        let database = database.clone();
-                        let table = name.clone();
-                        let request = PageRequest::new(page_index, EXPORT_PAGE_SIZE)
-                            .with_order_by(order_by.clone());
-                        let result = runtime
-                            .spawn(async move {
-                                connection.fetch_page(&database, &table, request).await
-                            })
-                            .await;
-                        let page = match result {
-                            Ok(Ok(page)) => page,
-                            Ok(Err(err)) => {
-                                error = Some(err.to_string());
-                                break;
-                            }
-                            Err(err) => {
-                                error = Some(err.to_string());
-                                break;
-                            }
-                        };
-                        let fetched = page.rows.len();
-                        if page_index == 0
-                            && let Some(total) = page.total_rows
-                        {
-                            let total = total as usize;
-                            let _ = this.update(cx, |app, cx| {
-                                if let Some(wizard) = app.export_wizard.as_mut() {
-                                    wizard.rows_total += total;
-                                }
-                                cx.notify();
-                            });
-                        }
-                        if projection.is_none() {
-                            let mut indices = Vec::with_capacity(columns.len());
-                            for column in &columns {
-                                match page.columns.iter().position(|info| &info.name == column) {
-                                    Some(index) => indices.push(index),
-                                    None => {
-                                        error = Some(format!("column `{column}` is missing"));
-                                        break;
-                                    }
-                                }
-                            }
-                            if error.is_some() {
-                                break;
-                            }
-                            identity = indices.len() == page.columns.len()
-                                && indices
-                                    .iter()
-                                    .enumerate()
-                                    .all(|(position, index)| position == *index);
-                            projection = Some(indices);
-                        }
-                        let rows = match (&projection, identity) {
-                            (Some(indices), false) => page
-                                .rows
-                                .into_iter()
-                                .map(|row| {
-                                    indices
-                                        .iter()
-                                        .filter_map(|index| row.get(*index).cloned())
-                                        .collect()
-                                })
-                                .collect(),
-                            _ => page.rows,
-                        };
-                        if let Err(write_error) = writer.write_rows(&rows) {
-                            error = Some(write_error.to_string());
-                            break;
-                        }
-                        table_rows += fetched;
-                        let _ = this.update(cx, |app, cx| {
-                            if let Some(wizard) = app.export_wizard.as_mut() {
-                                wizard.rows_done += fetched;
-                                wizard.log_scroll.scroll_to_bottom();
-                            }
-                            cx.notify();
-                        });
-                        if (fetched as u64) < EXPORT_PAGE_SIZE {
-                            break;
-                        }
-                        page_index += 1;
                     }
+                    let identity = indices.len() == snapshot.columns.len()
+                        && indices
+                            .iter()
+                            .enumerate()
+                            .all(|(position, index)| position == *index);
+                    let rows: Vec<Vec<CellValue>> = if identity {
+                        snapshot.rows.as_ref().clone()
+                    } else {
+                        snapshot
+                            .rows
+                            .iter()
+                            .map(|row| {
+                                indices
+                                    .iter()
+                                    .filter_map(|index| row.get(*index).cloned())
+                                    .collect()
+                            })
+                            .collect()
+                    };
+                    let written = rows.len();
+                    sheets_data.push((name, columns, rows));
+                    let _ = this.update(cx, |app, cx| {
+                        if let Some(wizard) = app.export_wizard.as_mut() {
+                            wizard.rows_done += written;
+                            wizard.log_scroll.scroll_to_bottom();
+                        }
+                        cx.notify();
+                    });
                 }
                 let cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
                 if cancelled {
                     let message = t!("export.log.cancelled").to_string();
                     let _ = this.update(cx, |app, cx| app.export_log(message, cx));
-                    break;
-                }
-
-                let finish = match error {
-                    Some(error) => Err(error),
-                    None => writer.finish().map_err(|error| error.to_string()),
-                };
-                match finish {
-                    Ok(()) => {
-                        exported += 1;
-                        let message =
-                            t!("export.log.table", name = name.clone(), rows = table_rows)
-                                .to_string();
-                        let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                } else if !stop && !sheets_data.is_empty() {
+                    let sheets: Vec<WorkbookSheet<'_>> = sheets_data
+                        .iter()
+                        .map(|(name, columns, rows)| WorkbookSheet {
+                            name,
+                            columns,
+                            rows,
+                        })
+                        .collect();
+                    match write_workbook(Path::new(&workbook_path), &sheets, options) {
+                        Ok(()) => {
+                            exported = sheets_data.len();
+                            for (name, _, rows) in &sheets_data {
+                                let message =
+                                    t!("export.log.table", name = name.clone(), rows = rows.len())
+                                        .to_string();
+                                let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                            }
+                        }
+                        Err(error) => {
+                            failed = sheets_data.len();
+                            let file = Path::new(&workbook_path)
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| workbook_path.clone());
+                            let message = t!(
+                                "export.log.table_failed",
+                                name = file,
+                                error = error.to_string()
+                            )
+                            .to_string();
+                            let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                        }
                     }
-                    Err(error) => {
-                        failed += 1;
-                        let message = t!(
-                            "export.log.table_failed",
-                            name = name.clone(),
-                            error = error
-                        )
-                        .to_string();
+                }
+            } else {
+                for plan in plans {
+                    if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let ExportPlan {
+                        name,
+                        path,
+                        columns,
+                        column_types,
+                        order_by,
+                        snapshot,
+                    } = plan;
+                    let created = TableWriter::create(
+                        Path::new(&path),
+                        &name,
+                        &columns,
+                        &column_types,
+                        format,
+                        options,
+                        sql_dialect,
+                    );
+                    let mut writer = match created {
+                        Ok(writer) => writer,
+                        Err(error) => {
+                            let message = t!(
+                                "export.log.table_failed",
+                                name = name.clone(),
+                                error = error.to_string()
+                            )
+                            .to_string();
+                            let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                            failed += 1;
+                            if !continue_on_error {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+
+                    let mut table_rows = 0usize;
+                    let mut error: Option<String> = None;
+                    if let Some(snapshot) = snapshot {
+                        // In-memory source: write exactly the rows the grid showed (filtered, sorted,
+                        // current page) or the query result set.
+                        let mut indices = Vec::with_capacity(columns.len());
+                        for column in &columns {
+                            match snapshot
+                                .columns
+                                .iter()
+                                .position(|info| &info.name == column)
+                            {
+                                Some(index) => indices.push(index),
+                                None => {
+                                    error = Some(format!("column `{column}` is missing"));
+                                    break;
+                                }
+                            }
+                        }
+                        if error.is_none() {
+                            let total = snapshot.rows.len();
+                            let identity = indices.len() == snapshot.columns.len()
+                                && indices
+                                    .iter()
+                                    .enumerate()
+                                    .all(|(position, index)| position == *index);
+                            let write = if identity {
+                                writer.write_rows(&snapshot.rows)
+                            } else {
+                                let rows: Vec<Vec<CellValue>> = snapshot
+                                    .rows
+                                    .iter()
+                                    .map(|row| {
+                                        indices
+                                            .iter()
+                                            .filter_map(|index| row.get(*index).cloned())
+                                            .collect()
+                                    })
+                                    .collect();
+                                writer.write_rows(&rows)
+                            };
+                            match write {
+                                Ok(()) => {
+                                    table_rows = total;
+                                    let _ = this.update(cx, |app, cx| {
+                                        if let Some(wizard) = app.export_wizard.as_mut() {
+                                            wizard.rows_done += total;
+                                            wizard.log_scroll.scroll_to_bottom();
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                                Err(write_error) => error = Some(write_error.to_string()),
+                            }
+                        }
+                    } else {
+                        let Some(connection) = connection.clone() else {
+                            error = Some(t!("export.not_connected").to_string());
+                            failed += 1;
+                            let message = t!(
+                                "export.log.table_failed",
+                                name = name.clone(),
+                                error = error.clone().unwrap_or_default()
+                            )
+                            .to_string();
+                            let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                            if !continue_on_error {
+                                break;
+                            }
+                            continue;
+                        };
+                        let mut page_index = 0u64;
+                        let mut projection: Option<Vec<usize>> = None;
+                        let mut identity = false;
+                        loop {
+                            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                error = Some(t!("export.log.cancelled").to_string());
+                                break;
+                            }
+                            let connection = connection.clone();
+                            let database = database.clone();
+                            let table = name.clone();
+                            let request = PageRequest::new(page_index, EXPORT_PAGE_SIZE)
+                                .with_order_by(order_by.clone());
+                            let result = runtime
+                                .spawn(async move {
+                                    connection.fetch_page(&database, &table, request).await
+                                })
+                                .await;
+                            let page = match result {
+                                Ok(Ok(page)) => page,
+                                Ok(Err(err)) => {
+                                    error = Some(err.to_string());
+                                    break;
+                                }
+                                Err(err) => {
+                                    error = Some(err.to_string());
+                                    break;
+                                }
+                            };
+                            let fetched = page.rows.len();
+                            if page_index == 0
+                                && let Some(total) = page.total_rows
+                            {
+                                let total = total as usize;
+                                let _ = this.update(cx, |app, cx| {
+                                    if let Some(wizard) = app.export_wizard.as_mut() {
+                                        wizard.rows_total += total;
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                            if projection.is_none() {
+                                let mut indices = Vec::with_capacity(columns.len());
+                                for column in &columns {
+                                    match page.columns.iter().position(|info| &info.name == column)
+                                    {
+                                        Some(index) => indices.push(index),
+                                        None => {
+                                            error = Some(format!("column `{column}` is missing"));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if error.is_some() {
+                                    break;
+                                }
+                                identity = indices.len() == page.columns.len()
+                                    && indices
+                                        .iter()
+                                        .enumerate()
+                                        .all(|(position, index)| position == *index);
+                                projection = Some(indices);
+                            }
+                            let rows = match (&projection, identity) {
+                                (Some(indices), false) => page
+                                    .rows
+                                    .into_iter()
+                                    .map(|row| {
+                                        indices
+                                            .iter()
+                                            .filter_map(|index| row.get(*index).cloned())
+                                            .collect()
+                                    })
+                                    .collect(),
+                                _ => page.rows,
+                            };
+                            if let Err(write_error) = writer.write_rows(&rows) {
+                                error = Some(write_error.to_string());
+                                break;
+                            }
+                            table_rows += fetched;
+                            let _ = this.update(cx, |app, cx| {
+                                if let Some(wizard) = app.export_wizard.as_mut() {
+                                    wizard.rows_done += fetched;
+                                    wizard.log_scroll.scroll_to_bottom();
+                                }
+                                cx.notify();
+                            });
+                            if (fetched as u64) < EXPORT_PAGE_SIZE {
+                                break;
+                            }
+                            page_index += 1;
+                        }
+                    }
+                    let cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
+                    if cancelled {
+                        let message = t!("export.log.cancelled").to_string();
                         let _ = this.update(cx, |app, cx| app.export_log(message, cx));
-                        if !continue_on_error {
-                            break;
+                        break;
+                    }
+
+                    let finish = match error {
+                        Some(error) => Err(error),
+                        None => writer.finish().map_err(|error| error.to_string()),
+                    };
+                    match finish {
+                        Ok(()) => {
+                            exported += 1;
+                            let message =
+                                t!("export.log.table", name = name.clone(), rows = table_rows)
+                                    .to_string();
+                            let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                        }
+                        Err(error) => {
+                            failed += 1;
+                            let message = t!(
+                                "export.log.table_failed",
+                                name = name.clone(),
+                                error = error
+                            )
+                            .to_string();
+                            let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                            if !continue_on_error {
+                                break;
+                            }
                         }
                     }
                 }
@@ -1488,6 +1720,7 @@ impl AppView {
                 ))
         };
 
+        let combined = combined_workbook(wizard);
         let mut list = div()
             .id("export-table-list")
             .flex()
@@ -1513,32 +1746,25 @@ impl AppView {
                     )
                     .child(div().flex_1().child(t!("export.export_to").to_string())),
             );
-        for (index, table) in wizard.tables.iter().enumerate() {
-            let name = table.name.clone();
-            let selected = table.selected;
-            // An unticked row has no output path, so a directory change never leaves a stale path
-            // behind on a table that is not being exported.
-            let path = if selected {
-                table.path.clone()
-            } else {
-                String::new()
-            };
+        if combined {
+            // Multiple query results become sheets of one workbook, so P2 has one output file
+            // rather than one path per result.
+            let name = t!("export.workbook_label", count = wizard.tables.len()).to_string();
+            let path = wizard
+                .tables
+                .first()
+                .map(|table| table.path.clone())
+                .unwrap_or_default();
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("export-table-{index}")))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
                     .px_3()
                     .h(px(24.0))
-                    .cursor_pointer()
-                    .when(selected, move |style| style.bg(rgb(theme.tree_hover_bg)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.export_toggle_table(index, cx);
-                    }))
-                    .child(checkbox_box(selected, theme))
-                    .child(tree_icon("icons/tables.svg", theme.icon_table))
+                    .bg(rgb(theme.tree_hover_bg))
+                    .child(tree_icon("icons/export.svg", theme.icon_views))
                     .child(
                         div()
                             .w(px(180.0))
@@ -1559,35 +1785,96 @@ impl AppView {
                             .child(path),
                     )
                     .child(export_small_button(
-                        format!("export-file-{index}"),
-                        selected,
+                        "export-file-0".to_string(),
+                        true,
                         theme,
-                        cx.listener(move |this, _event, _window, cx| {
+                        cx.listener(|this, _event, _window, cx| {
                             cx.stop_propagation();
-                            this.export_browse_file(index, cx);
+                            this.export_browse_file(0, cx);
                         }),
                     )),
             );
+        } else {
+            for (index, table) in wizard.tables.iter().enumerate() {
+                let name = table.name.clone();
+                let selected = table.selected;
+                // An unticked row has no output path, so a directory change never leaves a stale
+                // path behind on a table that is not being exported.
+                let path = if selected {
+                    table.path.clone()
+                } else {
+                    String::new()
+                };
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("export-table-{index}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .h(px(24.0))
+                        .cursor_pointer()
+                        .when(selected, move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.export_toggle_table(index, cx);
+                        }))
+                        .child(checkbox_box(selected, theme))
+                        .child(tree_icon("icons/tables.svg", theme.icon_table))
+                        .child(
+                            div()
+                                .w(px(180.0))
+                                .flex_none()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(12.0))
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme.text_muted))
+                                .child(path),
+                        )
+                        .child(export_small_button(
+                            format!("export-file-{index}"),
+                            selected,
+                            theme,
+                            cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.export_browse_file(index, cx);
+                            }),
+                        )),
+                );
+            }
         }
 
-        let buttons = div()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .child(self.dialog_button(
-                "export-select-all-tables",
-                t!("export.select_all").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.export_set_all_tables(true, cx)),
-            ))
-            .child(self.dialog_button(
-                "export-select-none-tables",
-                t!("export.select_none").to_string(),
-                false,
-                cx.listener(|this, _event, _window, cx| this.export_set_all_tables(false, cx)),
-            ));
+        let buttons = if combined {
+            div()
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .child(self.dialog_button(
+                    "export-select-all-tables",
+                    t!("export.select_all").to_string(),
+                    false,
+                    cx.listener(|this, _event, _window, cx| this.export_set_all_tables(true, cx)),
+                ))
+                .child(self.dialog_button(
+                    "export-select-none-tables",
+                    t!("export.select_none").to_string(),
+                    false,
+                    cx.listener(|this, _event, _window, cx| this.export_set_all_tables(false, cx)),
+                ))
+        };
 
         div()
             .flex()

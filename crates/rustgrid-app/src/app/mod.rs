@@ -853,12 +853,16 @@ struct ExportSnapshot {
 }
 
 /// The 导出 confirmation shown before the wizard opens: a table grid chooses between the whole
-/// table and the rows currently on screen; a query tab chooses one result set or all of them.
+/// table and the rows currently on screen; a query tab chooses one or more result sets.
 struct ExportChoice {
     message: String,
-    /// The choice labels, in order (radio list).
+    /// The choice labels, in order.
     options: Vec<String>,
-    selected: usize,
+    /// One flag per option. Single-select choices keep exactly one true; the query-result choice
+    /// is a multi-select and may have several.
+    selected: Vec<bool>,
+    /// Whether the options are a multi-select dropdown (query results) instead of a radio list.
+    multiple: bool,
     target: ExportChoiceTarget,
 }
 
@@ -894,6 +898,9 @@ struct ExportWizard {
     /// In-memory sources, keyed by the same name as `tables`. A table without an entry is paged
     /// from the server while the export runs.
     snapshots: BTreeMap<String, ExportSnapshot>,
+    /// Several result sets opened from one query tab. When the format is `.xlsx` they are written
+    /// into one workbook, one sheet per result, instead of one file each.
+    combined: bool,
     /// The table whose fields P3 shows, as an index into `tables`.
     field_table: usize,
     /// The P3 source-table dropdown (drawn only when more than one table is selected).
@@ -2670,8 +2677,11 @@ pub struct AppView {
     /// The open export wizard, if any.
     export_wizard: Option<ExportWizard>,
     /// The 导出 scope confirmation waiting for the user (table page vs all records, or which
-    /// query result), shown before the wizard window opens.
+    /// query results), shown before the wizard window opens.
     export_choice: Option<ExportChoice>,
+    /// The multi-select dropdown of [`ExportChoice`] when the choice is over query results. It is
+    /// an entity of its own so the popup keeps its state across the dialog's per-frame renders.
+    export_choice_combo: Option<Entity<ComboBox>>,
     /// The OS window hosting the export wizard, if open.
     export_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The open import wizard, if any.
@@ -3345,6 +3355,7 @@ impl AppView {
             backup_window: None,
             export_wizard: None,
             export_choice: None,
+            export_choice_combo: None,
             export_window: None,
             import_wizard: None,
             import_window: None,

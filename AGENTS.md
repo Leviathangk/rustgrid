@@ -613,7 +613,9 @@ shadcn chrome described above. Implemented today:
    chosen connection + database, `Explain`, and a result grid that reuses the table grid
    (controls, scrollbars, status, and in-place editing when a single table can be inferred).
    **导出结果** exports the result sets through the Export Wizard: one result set directly, or a
-   prompt (结果1 / 结果2 / … / 全部结果) when the last run produced several.
+   multi-select dropdown (结果1 / 结果2 / … plus 全选) when the last run produced several. Several
+   selected results are written into **one `.xlsx` workbook**, one worksheet per result; other
+   formats keep one file per result.
 6. Right-clicking a table (in the object list or the connection tree) offers Open/Design plus Drop
    Table, Empty Table (`DELETE FROM`), Truncate Table and Rename; Drop/Empty/Truncate go through
    the shared confirm dialog, while Rename (or `F2` on the selection) edits the name **in place**

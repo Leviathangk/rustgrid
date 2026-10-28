@@ -25,6 +25,9 @@ use crate::theme::Theme;
 /// Called with the chosen option's value after the user picks it.
 pub(crate) type ComboSelectCallback = Rc<dyn Fn(&str, &mut Window, &mut App) + 'static>;
 
+/// Called with every selected value after a multi-select dropdown changes.
+pub(crate) type ComboSelectManyCallback = Rc<dyn Fn(&[String], &mut Window, &mut App) + 'static>;
+
 /// One selectable row: `value` is the machine value, `label` is what the user sees.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ComboOption {
@@ -113,9 +116,14 @@ pub(crate) struct ComboBox {
     enabled: bool,
     placeholder: SharedString,
     icon: Option<(&'static str, u32)>,
+    /// Whether the dropdown keeps the popup open and toggles items (used by the query-result
+    /// export picker) instead of replacing the selection.
+    multiple: bool,
     selected: String,
+    selected_values: Vec<String>,
     options: Vec<ComboOption>,
     on_select: Option<ComboSelectCallback>,
+    on_select_many: Option<ComboSelectManyCallback>,
     /// The gpui-kit state, created on the first render.
     state: Option<Entity<ComboState>>,
     subscriptions: Vec<Subscription>,
@@ -124,6 +132,9 @@ pub(crate) struct ComboBox {
     /// The value the user last picked from the popup, cleared when the host adopts it through
     /// [`Self::set_selected`]. See [`Self::picked_value`].
     picked: Option<String>,
+    /// The values the user last picked in multi-select mode; cleared by
+    /// [`Self::set_selected_values`].
+    picked_values: Vec<String>,
 }
 
 impl ComboBox {
@@ -145,19 +156,34 @@ impl ComboBox {
             enabled: true,
             placeholder: SharedString::default(),
             icon: None,
+            multiple: false,
             selected: selected.into(),
+            selected_values: Vec::new(),
             options,
             on_select: None,
+            on_select_many: None,
             state: None,
             subscriptions: Vec::new(),
             pending_options: false,
             pending_selected: false,
             picked: None,
+            picked_values: Vec::new(),
         }
+    }
+
+    /// Makes the dropdown a multi-select: clicking an item toggles it and the popup stays open.
+    pub(crate) fn multiple(mut self, multiple: bool) -> Self {
+        self.multiple = multiple;
+        self
     }
 
     pub(crate) fn on_select(mut self, callback: ComboSelectCallback) -> Self {
         self.on_select = Some(callback);
+        self
+    }
+
+    pub(crate) fn on_select_many(mut self, callback: ComboSelectManyCallback) -> Self {
+        self.on_select_many = Some(callback);
         self
     }
 
@@ -213,6 +239,17 @@ impl ComboBox {
         // The host has adopted a value of its own (normally the pick the callback just delivered),
         // so no pick is left waiting to be applied.
         self.picked = None;
+        self.pending_selected = true;
+        cx.notify();
+    }
+
+    /// Sets the multi-select values. The kit applies them on the next render.
+    pub(crate) fn set_selected_values(&mut self, values: Vec<String>, cx: &mut Context<Self>) {
+        if self.selected_values == values {
+            return;
+        }
+        self.selected_values = values;
+        self.picked_values.clear();
         self.pending_selected = true;
         cx.notify();
     }
@@ -279,7 +316,7 @@ impl ComboBox {
         let items = SearchableVec::new(self.options.clone());
         let state = cx.new(|cx| {
             ComboboxState::new(items, vec![], window, cx)
-                .multiple(false)
+                .multiple(self.multiple)
                 .searchable(true)
         });
         // Deliver the pick immediately rather than on the next render. A host that reads its own
@@ -290,12 +327,17 @@ impl ComboBox {
             &state,
             window,
             |this, _state, event: &ComboboxEvent<ComboDelegate>, window, cx| {
-                if let ComboboxEvent::Change(values) = event
-                    && let Some(value) = values.first()
-                {
-                    this.picked = Some(value.clone());
-                    if let Some(callback) = this.on_select.clone() {
-                        callback(value, window, cx);
+                if let ComboboxEvent::Change(values) = event {
+                    if this.multiple {
+                        this.picked_values = values.clone();
+                        if let Some(callback) = this.on_select_many.clone() {
+                            callback(values, window, cx);
+                        }
+                    } else if let Some(value) = values.first() {
+                        this.picked = Some(value.clone());
+                        if let Some(callback) = this.on_select.clone() {
+                            callback(value, window, cx);
+                        }
                     }
                 }
             },
@@ -319,8 +361,14 @@ impl ComboBox {
         if self.pending_selected {
             self.pending_selected = false;
             let selected = self.selected.clone();
+            let selected_values = self.selected_values.clone();
+            let multiple = self.multiple;
             state.update(cx, |state, cx| {
-                state.set_selected_values(std::slice::from_ref(&selected), window, cx);
+                if multiple {
+                    state.set_selected_values(&selected_values, window, cx);
+                } else {
+                    state.set_selected_values(std::slice::from_ref(&selected), window, cx);
+                }
             });
         }
     }

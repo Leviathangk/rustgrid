@@ -246,9 +246,9 @@ impl AppView {
         });
     }
 
-    /// The 导出 scope prompt: a radio list of sources plus 取消 / 确定. It sits in front of the
-    /// Export Wizard, so the user decides between the whole table and the rows on screen (or which
-    /// query result) before a file path is chosen.
+    /// The 导出 scope prompt: a radio list for the table scope, or a multi-select dropdown for
+    /// query results, plus 取消 / 确定. It sits in front of the Export Wizard, so the user decides
+    /// which rows or result sets to export before a file path is chosen.
     fn open_export_choice_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -265,29 +265,43 @@ impl AppView {
                 .title(t!("export.confirm_title").to_string())
                 .margin_top(centered_margin_top(window, 230.0))
                 .content(move |content, _window, cx| {
-                    let (message, options, selected) =
-                        content_app.update(cx, |app, _| match app.export_choice.as_ref() {
-                            Some(choice) => (
-                                choice.message.clone(),
-                                choice.options.clone(),
-                                choice.selected,
-                            ),
-                            None => (String::new(), Vec::new(), 0),
+                    let (message, options, selected, multiple, combo) =
+                        content_app.update(cx, |app, _cx| {
+                            let (message, options, selected, multiple) =
+                                match app.export_choice.as_ref() {
+                                    Some(choice) => (
+                                        choice.message.clone(),
+                                        choice.options.clone(),
+                                        choice.selected.clone(),
+                                        choice.multiple,
+                                    ),
+                                    None => (String::new(), Vec::new(), Vec::new(), false),
+                                };
+                            (
+                                message,
+                                options,
+                                selected,
+                                multiple,
+                                app.export_choice_combo.clone(),
+                            )
                         });
-                    let select = content_app.clone();
-                    let mut list = div()
-                        .id("export-choice-list")
+                    let all_selected =
+                        !selected.is_empty() && selected.iter().all(|selected| *selected);
+                    let mut body = div()
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .max_h(px(300.0))
-                        .overflow_y_scroll();
-                    for (index, label) in options.iter().enumerate() {
-                        let label = label.clone();
-                        let select = select.clone();
-                        list = list.child(
+                        .gap_2()
+                        .child(div().text_size(px(12.0)).child(message));
+                    if multiple {
+                        // A hundred result tabs must not stretch the dialog: the dropdown keeps
+                        // one row of chrome and scrolls its own list.
+                        if let Some(combo) = combo {
+                            body = body.child(div().h(px(24.0)).w_full().child(combo));
+                        }
+                        let select_all = content_app.clone();
+                        body = body.child(
                             div()
-                                .id(SharedString::from(format!("export-choice-{index}")))
+                                .id("export-choice-select-all")
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -295,24 +309,57 @@ impl AppView {
                                 .h(px(22.0))
                                 .cursor_pointer()
                                 .on_click(move |_event, _window, cx| {
-                                    select.update(cx, |app, cx| {
-                                        app.export_choice_select(index, cx);
+                                    select_all.update(cx, |app, cx| {
+                                        app.export_choice_select_all(!all_selected, cx);
                                     });
                                 })
-                                .child(ui::radio_box(index == selected, theme))
-                                .child(div().text_size(px(12.0)).child(label)),
+                                .child(ui::checkbox_box(all_selected, theme))
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .child(t!("export.select_all").to_string()),
+                                ),
                         );
-                    }
-                    content.child(
-                        div()
+                    } else {
+                        let select = content_app.clone();
+                        let mut list = div()
+                            .id("export-choice-list")
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .child(div().text_size(px(12.0)).child(message))
-                            .child(list),
-                    )
+                            .gap_1()
+                            .max_h(px(300.0))
+                            .overflow_y_scroll();
+                        for (index, label) in options.iter().enumerate() {
+                            let label = label.clone();
+                            let select = select.clone();
+                            list = list.child(
+                                div()
+                                    .id(SharedString::from(format!("export-choice-{index}")))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .h(px(22.0))
+                                    .cursor_pointer()
+                                    .on_click(move |_event, _window, cx| {
+                                        select.update(cx, |app, cx| {
+                                            app.export_choice_select(index, cx);
+                                        });
+                                    })
+                                    .child(ui::radio_box(selected.get(index) == Some(&true), theme))
+                                    .child(div().text_size(px(12.0)).child(label)),
+                            );
+                        }
+                        body = body.child(list);
+                    }
+                    content.child(body)
                 })
-                .footer(
+                .footer({
+                    let can_ok = app
+                        .read(cx)
+                        .export_choice
+                        .as_ref()
+                        .is_some_and(|choice| choice.selected.iter().any(|selected| *selected));
                     div()
                         .flex()
                         .flex_row()
@@ -332,14 +379,18 @@ impl AppView {
                         .child(ui::button(
                             "export-choice-ok",
                             t!("form.ok").to_string(),
-                            ButtonKind::Default,
+                            if can_ok {
+                                ButtonKind::Default
+                            } else {
+                                ButtonKind::Disabled
+                            },
                             theme,
                             move |_event, _window, cx| {
                                 let _ =
                                     footer_ok.update(cx, |app, cx| app.confirm_export_choice(cx));
                             },
-                        )),
-                )
+                        ))
+                })
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text(t!("form.ok").to_string())
