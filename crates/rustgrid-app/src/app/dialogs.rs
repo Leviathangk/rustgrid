@@ -56,6 +56,8 @@ impl AppView {
             Some(DialogKind::SaveQuery)
         } else if self.unsaved_confirm.is_some() {
             Some(DialogKind::Unsaved)
+        } else if self.export_choice.is_some() {
+            Some(DialogKind::ExportChoice)
         } else if self.error_dialog.is_some() {
             Some(DialogKind::Error)
         } else if self.delete_confirm.is_some() {
@@ -83,6 +85,7 @@ impl AppView {
             Some(DialogKind::Error) => self.open_error_dialog(window, cx),
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
             Some(DialogKind::Unsaved) => self.open_unsaved_dialog(window, cx),
+            Some(DialogKind::ExportChoice) => self.open_export_choice_dialog(window, cx),
             None => {}
         }
     }
@@ -239,6 +242,120 @@ impl AppView {
                 )
                 .on_close(move |_, _, cx| {
                     let _ = on_close.update(cx, |app, cx| app.cancel_delete(cx));
+                })
+        });
+    }
+
+    /// The 导出 scope prompt: a radio list of sources plus 取消 / 确定. It sits in front of the
+    /// Export Wizard, so the user decides between the whole table and the rows on screen (or which
+    /// query result) before a file path is chosen.
+    fn open_export_choice_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let theme = app.read(cx).theme;
+            let on_ok = app.downgrade();
+            let on_cancel = app.downgrade();
+            let on_close = app.downgrade();
+            let footer_ok = app.downgrade();
+            let footer_cancel = app.downgrade();
+            let content_app = app.clone();
+
+            dialog
+                .entrance(DIALOG_ENTRANCE)
+                .title(t!("export.confirm_title").to_string())
+                .margin_top(centered_margin_top(window, 230.0))
+                .content(move |content, _window, cx| {
+                    let (message, options, selected) =
+                        content_app.update(cx, |app, _| match app.export_choice.as_ref() {
+                            Some(choice) => (
+                                choice.message.clone(),
+                                choice.options.clone(),
+                                choice.selected,
+                            ),
+                            None => (String::new(), Vec::new(), 0),
+                        });
+                    let select = content_app.clone();
+                    let mut list = div()
+                        .id("export-choice-list")
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .max_h(px(300.0))
+                        .overflow_y_scroll();
+                    for (index, label) in options.iter().enumerate() {
+                        let label = label.clone();
+                        let select = select.clone();
+                        list = list.child(
+                            div()
+                                .id(SharedString::from(format!("export-choice-{index}")))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .h(px(22.0))
+                                .cursor_pointer()
+                                .on_click(move |_event, _window, cx| {
+                                    select.update(cx, |app, cx| {
+                                        app.export_choice_select(index, cx);
+                                    });
+                                })
+                                .child(ui::radio_box(index == selected, theme))
+                                .child(div().text_size(px(12.0)).child(label)),
+                        );
+                    }
+                    content.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().text_size(px(12.0)).child(message))
+                            .child(list),
+                    )
+                })
+                .footer(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .w_full()
+                        .child(ui::button(
+                            "export-choice-cancel",
+                            t!("form.cancel").to_string(),
+                            ButtonKind::Normal,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ = footer_cancel
+                                    .update(cx, |app, cx| app.cancel_export_choice(cx));
+                            },
+                        ))
+                        .child(ui::button(
+                            "export-choice-ok",
+                            t!("form.ok").to_string(),
+                            ButtonKind::Default,
+                            theme,
+                            move |_event, _window, cx| {
+                                let _ =
+                                    footer_ok.update(cx, |app, cx| app.confirm_export_choice(cx));
+                            },
+                        )),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("form.ok").to_string())
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            let _ = on_ok.update(cx, |app, cx| app.confirm_export_choice(cx));
+                            true
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = on_cancel.update(cx, |app, cx| app.cancel_export_choice(cx));
+                            true
+                        }),
+                )
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.cancel_export_choice(cx));
                 })
         });
     }

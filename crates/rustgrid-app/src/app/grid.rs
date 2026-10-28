@@ -774,10 +774,28 @@ impl GridView {
     }
 
     pub(super) fn sort_apply_now(&mut self, cx: &mut Context<'_, Self>) {
+        self.sync_sort_controls(cx);
         self.state.sort_rules = self.state.sort_draft.clone();
         self.state.page_index = 0;
         self.sync_page_input();
         self.load_page(cx);
+    }
+
+    /// Fold a column pick the host has not adopted yet back into the sort draft, so 应用 always
+    /// matches what the panel shows.
+    fn sync_sort_controls(&mut self, cx: &App) {
+        let picks: Vec<(usize, String)> = self
+            .sort_field_combos
+            .iter()
+            .filter_map(|(index, combo)| {
+                combo.read(cx).active_value(cx).map(|value| (*index, value))
+            })
+            .collect();
+        for (index, column) in picks {
+            if let Some(rule) = self.state.sort_draft.get_mut(index) {
+                rule.column = column;
+            }
+        }
     }
 
     /// The grid header's sort badge. Header sorting is single-column: clicking a column toggles
@@ -986,12 +1004,15 @@ impl GridView {
             .iter()
             .map(|column| ComboOption::plain(column.name.clone()))
             .collect();
-        let selected = self
-            .state
-            .columns
-            .first()
-            .map(|column| column.name.clone())
-            .unwrap_or_default();
+        let selected = match filter_node(&self.state.filter_draft, &key) {
+            Some(FilterNode::Condition(condition)) => condition.column.clone(),
+            _ => self
+                .state
+                .columns
+                .first()
+                .map(|column| column.name.clone())
+                .unwrap_or_default(),
+        };
         // The popup menu is widened to fit the longest column name; the trigger stays compact.
         let menu_width = self.field_menu_width();
         let entity = cx.new(move |cx| {
@@ -1042,8 +1063,16 @@ impl GridView {
                 ComboOption::new(index.to_string(), t!(operator.label_key()).to_string())
             })
             .collect();
+        let selected = match filter_node(&self.state.filter_draft, &key) {
+            Some(FilterNode::Condition(condition)) => FilterOperator::ALL
+                .iter()
+                .position(|operator| *operator == condition.operator)
+                .unwrap_or(0)
+                .to_string(),
+            _ => "0".to_string(),
+        };
         let entity = cx.new(move |cx| {
-            ComboBox::new(theme, options, "0", FILTER_OPERATOR_WIDTH, cx)
+            ComboBox::new(theme, options, selected, FILTER_OPERATOR_WIDTH, cx)
                 .field_width(FILTER_OPERATOR_WIDTH)
                 .height(FILTER_CONTROL_HEIGHT)
                 .text_size(FILTER_CONTROL_TEXT_SIZE)
@@ -1170,10 +1199,81 @@ impl GridView {
     }
 
     pub(super) fn filter_apply_now(&mut self, cx: &mut Context<'_, Self>) {
+        self.sync_filter_controls(cx);
         self.state.filters = self.state.filter_draft.clone();
         self.state.page_index = 0;
         self.sync_page_input();
         self.load_page(cx);
+    }
+
+    /// Fold every control of the filter panel into the draft before it is applied: a combo pick or
+    /// a typed value is normally mirrored at once, but the hosts dispatch their callbacks one
+    /// render late, so 应用 must not rely on that having happened already. Without this the panel
+    /// could show `RECEIVE_ID` while the applied `WHERE` still held the condition's old `ID`.
+    fn sync_filter_controls(&mut self, cx: &App) {
+        let fields: Vec<(Vec<usize>, String)> = self
+            .filter_field_combos
+            .iter()
+            .filter_map(|(path, combo)| {
+                combo
+                    .read(cx)
+                    .active_value(cx)
+                    .map(|value| (path.clone(), value))
+            })
+            .collect();
+        for (path, column) in fields {
+            if let Some(FilterNode::Condition(condition)) =
+                filter_node_mut(&mut self.state.filter_draft, &path)
+            {
+                condition.column = column;
+            }
+        }
+
+        let operators: Vec<(Vec<usize>, String)> = self
+            .filter_operator_combos
+            .iter()
+            .filter_map(|(path, combo)| {
+                combo
+                    .read(cx)
+                    .active_value(cx)
+                    .map(|value| (path.clone(), value))
+            })
+            .collect();
+        for (path, value) in operators {
+            let Ok(index) = value.parse::<usize>() else {
+                continue;
+            };
+            let Some(operator) = FilterOperator::ALL.get(index).copied() else {
+                continue;
+            };
+            if let Some(FilterNode::Condition(condition)) =
+                filter_node_mut(&mut self.state.filter_draft, &path)
+            {
+                condition.operator = operator;
+            }
+        }
+
+        let values: Vec<((Vec<usize>, u8), String)> = self
+            .filter_value_inputs
+            .iter()
+            .filter_map(|(key, input)| {
+                input
+                    .read(cx)
+                    .current_text(cx)
+                    .map(|text| (key.clone(), text))
+            })
+            .collect();
+        for ((path, slot), text) in values {
+            if let Some(FilterNode::Condition(condition)) =
+                filter_node_mut(&mut self.state.filter_draft, &path)
+            {
+                if slot == 0 {
+                    condition.value = text;
+                } else {
+                    condition.value2 = text;
+                }
+            }
+        }
     }
 
     pub(super) fn toggle_page_size_menu(&mut self, cx: &mut Context<'_, Self>) {

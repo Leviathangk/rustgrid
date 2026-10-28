@@ -20,6 +20,11 @@ impl AppView {
         }
         self.sync_query_selection(query_index, cx);
         let theme = self.theme;
+        // 导出结果 is only useful when the last run produced at least one result set.
+        let has_result_sets = self
+            .queries
+            .get(query_index)
+            .is_some_and(|query| query.result_grids.iter().any(|grid| grid.is_some()));
 
         let toolbar = div()
             .flex()
@@ -50,6 +55,18 @@ impl AppView {
                 theme.text,
                 true,
                 cx.listener(|this, _event, window, cx| this.format_query(window, cx)),
+            ))
+            .child(toolbar_separator(theme))
+            .child(self.query_tool_button(
+                "query-export",
+                "icons/export.svg",
+                t!("query.export_results").to_string(),
+                theme.text,
+                theme.icon_views,
+                has_result_sets,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.open_query_export_choice(query_index, cx)
+                }),
             ));
 
         // Copy the few scalars needed from the tab, so the `queries` borrow ends before the editor

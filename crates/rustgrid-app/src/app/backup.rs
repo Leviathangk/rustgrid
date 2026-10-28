@@ -1888,6 +1888,7 @@ impl AppView {
             elapsed: None,
             error: None,
             config_saved: false,
+            baseline: None,
         });
         self.backup_name_focus_pending = true;
         self.load_backup_objects(cx);
@@ -2013,6 +2014,9 @@ impl AppView {
                         if let Some(saved) = dialog.apply.take() {
                             apply_saved_selection(dialog, &saved);
                         }
+                        // The freshly-loaded (and, for a saved configuration, applied) state is
+                        // what 保存 compares against.
+                        capture_backup_baseline(dialog);
                     }
                 }
                 cx.notify();
@@ -2026,6 +2030,7 @@ impl AppView {
             && let Some(entry) = dialog.objects.get_mut(index)
         {
             entry.selected = !entry.selected;
+            dialog.config_saved = false;
         }
         cx.notify();
     }
@@ -2044,6 +2049,7 @@ impl AppView {
             for entry in dialog.objects.iter_mut().filter(|entry| entry.kind == kind) {
                 entry.selected = !all;
             }
+            dialog.config_saved = false;
         }
         cx.notify();
     }
@@ -2053,6 +2059,7 @@ impl AppView {
             for entry in dialog.objects.iter_mut() {
                 entry.selected = selected;
             }
+            dialog.config_saved = false;
         }
         cx.notify();
     }
@@ -2127,6 +2134,8 @@ impl AppView {
             dialog.error = None;
             // Confirm the save in the footer: the log line alone is invisible on the Objects tab.
             dialog.config_saved = true;
+            // The saved state is the new baseline, so 保存 disables until the next change.
+            capture_backup_baseline(dialog);
             dialog
                 .log
                 .push(t!("backup.log.saved_config", name = dialog.config_name.trim()).to_string());
@@ -3478,6 +3487,27 @@ impl AppView {
         body.into_any_element()
     }
 
+    /// Whether the backup configuration has changed since the dialog opened (or was last saved),
+    /// which is what enables the footer's 保存 button.
+    fn backup_config_dirty(&self) -> bool {
+        let Some(dialog) = self.new_backup_dialog.as_ref() else {
+            return false;
+        };
+        if dialog.loading || dialog.config_name.trim().is_empty() {
+            return false;
+        }
+        let Some((name, flags)) = dialog.baseline.as_ref() else {
+            return false;
+        };
+        name != dialog.config_name.trim()
+            || *flags
+                != dialog
+                    .objects
+                    .iter()
+                    .map(|entry| entry.selected)
+                    .collect::<Vec<_>>()
+    }
+
     fn new_backup_dialog_footer(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let (running, paused) = self
@@ -3559,10 +3589,14 @@ impl AppView {
                     .gap_2()
                     .flex_none()
                     .child(self.backup_status_indicator(theme))
-                    .child(self.dialog_button(
+                    .child(self.win_button(
                         "backup-save-config",
                         t!("backup.save").to_string(),
-                        false,
+                        if self.backup_config_dirty() {
+                            ButtonKind::Normal
+                        } else {
+                            ButtonKind::Disabled
+                        },
                         cx.listener(|this, _event, window, cx| this.save_backup_config(window, cx)),
                     ))
                     .child(run_button),
@@ -4340,6 +4374,12 @@ fn apply_saved_selection(dialog: &mut NewBackupDialog, saved: &SavedBackup) {
     for entry in dialog.objects.iter_mut() {
         entry.selected = saved.selection(entry.kind).contains(&entry.name);
     }
+}
+
+/// Remember the dialog's current name/selection as the state 保存 compares against.
+fn capture_backup_baseline(dialog: &mut NewBackupDialog) {
+    let flags = dialog.objects.iter().map(|entry| entry.selected).collect();
+    dialog.baseline = Some((dialog.config_name.trim().to_string(), flags));
 }
 
 /// One backup-list entry, parsed from its selection key (`file:<name>` / `config:<name>`).

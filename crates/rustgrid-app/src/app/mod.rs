@@ -21,16 +21,16 @@ use rustgrid_config::{
     LanguageSetting, ThemeSetting,
 };
 use rustgrid_core::{
-    AccountKind, BackupObjectKind, CellValue, Connection, ConnectionConfig, ConnectionFieldChoice,
-    ConnectionFieldKind, ConnectionFieldSpec, ConnectionHomePage, ConnectionPage,
-    ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab, DatabaseOptions,
-    DefaultObjectType, DefaultPrivilege, DriverCapability, DriverIconStyle, DriverId,
-    DriverRegistry, Error, FilterCondition, FilterConjunction, FilterGroup, FilterNode,
-    FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest, PrivilegeCatalog, PrivilegeId,
-    PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails, RoutineEdit, RoutineInfo,
-    RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery, SavedTransfer,
-    ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind, TunnelLayer, UserAccount,
-    UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping, ViewEdit,
+    AccountKind, BackupObjectKind, CellValue, ColumnInfo, Connection, ConnectionConfig,
+    ConnectionFieldChoice, ConnectionFieldKind, ConnectionFieldSpec, ConnectionHomePage,
+    ConnectionPage, ConnectionStandardField, DatabaseEditorSpec, DatabaseEditorTab,
+    DatabaseOptions, DefaultObjectType, DefaultPrivilege, DriverCapability, DriverDialect,
+    DriverIconStyle, DriverId, DriverRegistry, Error, FilterCondition, FilterConjunction,
+    FilterGroup, FilterNode, FilterOperator, ObjectGrant, ObjectPrivilegeRow, PageRequest,
+    PrivilegeCatalog, PrivilegeId, PrivilegePreset, PrivilegeScope, QueryResult, RoutineDetails,
+    RoutineEdit, RoutineInfo, RoutineKind, RowInsert, RowUpdate, SavedBackup, SavedQuery,
+    SavedTransfer, ServerSecurableGrant, TableStatus, TlsMode, TunnelAuth, TunnelKind, TunnelLayer,
+    UserAccount, UserDetails, UserEdit, UserEditSection, UserEditorSpec, UserMapping, ViewEdit,
 };
 use rustgrid_export::ExportFormat;
 
@@ -559,8 +559,12 @@ struct NewBackupDialog {
     elapsed: Option<std::time::Duration>,
     error: Option<String>,
     /// Set after the Save button writes the configuration, so the footer can confirm it. Cleared
-    /// when the name changes or a run starts.
+    /// when the name or the object selection changes, or a run starts.
     config_saved: bool,
+    /// The name and per-object selection the dialog opened with (after a saved configuration was
+    /// applied), aligned with `objects`. The footer's 保存 stays disabled while both still match,
+    /// so it only lights up once there is something to save.
+    baseline: Option<(String, Vec<bool>)>,
 }
 
 /// State of the "Restore Backup" dialog.
@@ -764,14 +768,16 @@ struct ExportTablePlan {
     path: String,
 }
 
-/// One table's resolved export run: the output path, the selected columns (names and engine types)
-/// and the primary-key ordering used for paged reads.
+/// One table's resolved export run: the output path, the selected columns (names and engine types),
+/// the primary-key ordering used for paged reads, and — when the source was a grid page or a query
+/// result — the rows already in memory instead of a server read.
 struct ExportPlan {
     name: String,
     path: String,
     columns: Vec<String>,
     column_types: Vec<String>,
     order_by: Vec<rustgrid_core::SortColumn>,
+    snapshot: Option<ExportSnapshot>,
 }
 
 /// The P3 field selection of one table.
@@ -835,9 +841,48 @@ impl ExportFields {
     }
 }
 
+/// Rows already in hand for an export source — a table grid's current page, or one query result.
+/// The wizard writes these straight to the file instead of paging the server again, so the
+/// exported rows are exactly the ones the user was looking at (filtered, sorted, current page).
+#[derive(Clone)]
+struct ExportSnapshot {
+    /// The source name, used in P2/P3 and as the default file stem.
+    name: String,
+    columns: Vec<ColumnInfo>,
+    rows: Arc<Vec<Vec<CellValue>>>,
+}
+
+/// The 导出 confirmation shown before the wizard opens: a table grid chooses between the whole
+/// table and the rows currently on screen; a query tab chooses one result set or all of them.
+struct ExportChoice {
+    message: String,
+    /// The choice labels, in order (radio list).
+    options: Vec<String>,
+    selected: usize,
+    target: ExportChoiceTarget,
+}
+
+enum ExportChoiceTarget {
+    TablePage {
+        connection_index: usize,
+        database_index: usize,
+        table: String,
+        page: ExportSnapshot,
+    },
+    QueryResults {
+        connection_index: Option<usize>,
+        database: String,
+        dialect: DriverDialect,
+        results: Vec<ExportSnapshot>,
+    },
+}
+
 /// State of the "Export Wizard" window.
 struct ExportWizard {
-    connection_index: usize,
+    connection_index: Option<usize>,
+    /// The engine dialect (for `.sql` identifier quoting); kept even when no live connection is
+    /// needed because every source is an in-memory [`ExportSnapshot`].
+    dialect: DriverDialect,
     database: String,
     step: ExportStep,
     format: ExportFormat,
@@ -846,6 +891,9 @@ struct ExportWizard {
     tables: Vec<ExportTablePlan>,
     /// P3's available fields per selected table, keyed by table name.
     fields: BTreeMap<String, ExportFields>,
+    /// In-memory sources, keyed by the same name as `tables`. A table without an entry is paged
+    /// from the server while the export runs.
+    snapshots: BTreeMap<String, ExportSnapshot>,
     /// The table whose fields P3 shows, as an index into `tables`.
     field_table: usize,
     /// The P3 source-table dropdown (drawn only when more than one table is selected).
@@ -1887,6 +1935,8 @@ enum DialogKind {
     Confirm,
     /// "Discard unsaved changes?" confirmation guarding a close/navigate action.
     Unsaved,
+    /// The 导出 scope choice (all records vs the grid's page, or which query result).
+    ExportChoice,
 }
 
 /// A transient notification queued by a path that has no `Window`, flushed through `Root` on the
@@ -2619,6 +2669,9 @@ pub struct AppView {
     backup_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The open export wizard, if any.
     export_wizard: Option<ExportWizard>,
+    /// The 导出 scope confirmation waiting for the user (table page vs all records, or which
+    /// query result), shown before the wizard window opens.
+    export_choice: Option<ExportChoice>,
     /// The OS window hosting the export wizard, if open.
     export_window: Option<WindowHandle<gpui_kit::component::Root>>,
     /// The open import wizard, if any.
@@ -2739,6 +2792,10 @@ impl AppView {
     ) -> Self {
         let secrets = config.load_secrets().unwrap_or_default();
         let settings = load_startup_settings(&config);
+        // 启动时恢复 owns every bit of restored tree state — the open connections/databases as well
+        // as the expansion of connections, databases and groups. With it off, the tree starts
+        // collapsed rather than reopening the groups the previous launch left expanded.
+        let restore_session = settings.restore_session;
 
         let connections: Vec<ConnectionNode> = config
             .load_profiles()
@@ -2747,7 +2804,8 @@ impl AppView {
             .map(|profile| {
                 let password = secrets.get(&profile.id).cloned();
                 let password_saved = password.is_some();
-                let expanded = settings.expanded_connections.contains(&profile.id);
+                let expanded =
+                    restore_session && settings.expanded_connections.contains(&profile.id);
                 ConnectionNode {
                     profile,
                     password,
@@ -2759,13 +2817,20 @@ impl AppView {
             })
             .collect();
 
-        let remembered_db_expansion = settings.expanded_databases.clone();
+        let remembered_db_expansion = if restore_session {
+            settings.expanded_databases.clone()
+        } else {
+            BTreeMap::new()
+        };
         let theme_setting = settings.theme;
         let language = settings.language;
         // Reconcile the persisted tree layout with the profiles that actually loaded: drop entries
         // for removed connections and append any connection the layout does not mention yet.
         let mut tree_layout = settings.groups.clone();
         groups::reconcile_tree(&mut tree_layout, &connections);
+        if !restore_session {
+            groups::collapse_all(&mut tree_layout);
+        }
         let _ = config.migrate_legacy_queries();
         let query_files = query::scan_query_files(&config);
         let backup_configs = config.load_backups().unwrap_or_default();
@@ -3279,6 +3344,7 @@ impl AppView {
             object_privileges_window: None,
             backup_window: None,
             export_wizard: None,
+            export_choice: None,
             export_window: None,
             import_wizard: None,
             import_window: None,

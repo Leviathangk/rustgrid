@@ -156,6 +156,15 @@ impl TextInput {
         cx.notify();
     }
 
+    /// The text currently shown in the field, including an edit the wrapper has not flushed back
+    /// to its host yet. Hosts that read their model in the same gesture as another control (the
+    /// grid filter's 应用) use this so the visible text is always what gets applied.
+    pub(crate) fn current_text(&self, cx: &App) -> Option<String> {
+        self.state
+            .as_ref()
+            .map(|state| state.read(cx).value().to_string())
+    }
+
     /// Replaces the field's placeholder. Applied on the next render, where a `Window` is available.
     pub(crate) fn set_placeholder(
         &mut self,

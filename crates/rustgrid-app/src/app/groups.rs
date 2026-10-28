@@ -153,6 +153,17 @@ pub(super) fn collect_groups(entries: &[GroupEntry], depth: usize, out: &mut Vec
     }
 }
 
+/// Collapse every group (recursively), so a launch that does not restore the previous session
+/// shows the tree closed instead of reopening last run's groups.
+pub(super) fn collapse_all(entries: &mut [GroupEntry]) {
+    for entry in entries {
+        if let GroupEntry::Group(group) = entry {
+            group.expanded = false;
+            collapse_all(&mut group.children);
+        }
+    }
+}
+
 /// The next free group id (one past the largest in use).
 pub(super) fn next_group_id(entries: &[GroupEntry]) -> u64 {
     let mut ids = Vec::new();
@@ -770,6 +781,21 @@ mod tests {
 
     fn conn(id: &str) -> GroupEntry {
         GroupEntry::Connection(id.to_string())
+    }
+
+    #[test]
+    fn collapse_all_closes_every_group_at_every_depth() {
+        let mut layout = vec![
+            conn("a"),
+            group(
+                1,
+                "outer",
+                vec![conn("b"), group(2, "inner", vec![conn("c")])],
+            ),
+        ];
+        collapse_all(&mut layout);
+        assert!(!find_group(&layout, 1).unwrap().expanded);
+        assert!(!find_group(&layout, 2).unwrap().expanded);
     }
 
     #[test]

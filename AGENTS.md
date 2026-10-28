@@ -612,6 +612,8 @@ shadcn chrome described above. Implemented today:
    syntax highlighting and keyword/table completion, `Beautify SQL`, run arbitrary SQL against a
    chosen connection + database, `Explain`, and a result grid that reuses the table grid
    (controls, scrollbars, status, and in-place editing when a single table can be inferred).
+   **导出结果** exports the result sets through the Export Wizard: one result set directly, or a
+   prompt (结果1 / 结果2 / … / 全部结果) when the last run produced several.
 6. Right-clicking a table (in the object list or the connection tree) offers Open/Design plus Drop
    Table, Empty Table (`DELETE FROM`), Truncate Table and Rename; Drop/Empty/Truncate go through
    the shared confirm dialog, while Rename (or `F2` on the selection) edits the name **in place**
@@ -637,6 +639,9 @@ shadcn chrome described above. Implemented today:
    fields by default), and P4 options + run (include column titles, continue on error) with a
    live log/progress view. Writes go through `rustgrid-export`; the wizard streams table pages via
    `Connection::fetch_page` (ordered by the primary key when the table has one).
+   A grid's own 导出 first asks **全部记录 / 当前 N 条记录 / 取消** (Navicat's choice): 当前记录
+   exports exactly the rows on screen — the applied filter and sort and the current page — through
+   the same wizard, as an in-memory snapshot instead of `fetch_page`.
 9. Import wizard: **Import Wizard** (object toolbar / table context menu, when a database is
    open) opens a separate OS window walking four pages — P1 import type (`Excel File`, `CSV File`,
    `Text File`), P2 the merged source page (a native file dialog picks the workbook or delimited
@@ -788,10 +793,12 @@ shadcn chrome described above. Implemented today:
     (`SqlEditor::set_display_options`), instead of only the editors opened afterwards. The 常规 page
     adds **启动时恢复** (`AppSettings::restore_session`, on by default, tooltip: restore query tabs,
     connections, open databases and table tabs at the next start) — the workspace session is then
-    neither restored nor saved, so a start with it off is a clean one — and the object-search switch
-    is now simply **保留对象搜索** (`preserve_object_search`, on by default). The one search box is
-    shared by 表 / 视图 / 函数 / 查询, and `AppView::object_searches` files its text **per list**
-    (keyed by the `VIEW_PAGE_*` page of the shown list, `AppView::object_search_page`), so 表's
+    neither restored nor saved, so a start with it off is a clean one, and the saved connection,
+    database and group expansion is not restored either (the tree starts collapsed) — and the
+    object-search switch is now simply **保留对象搜索** (`preserve_object_search`, on by default).
+    The one search box is shared by 表 / 视图 / 函数 / 查询, and `AppView::object_searches` files
+    its text **per list** (keyed by the `VIEW_PAGE_*` page of the shown list,
+    `AppView::object_search_page`), so 表's
     search never filters 视图 or 查询; `sync_object_search` (called once per render) swaps the
     field's content when the shown list changes, `set_object_search` writes the typed text to that
     list's entry, `clear_object_search` (Esc) clears just that one and

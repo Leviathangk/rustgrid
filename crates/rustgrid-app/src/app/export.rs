@@ -69,18 +69,251 @@ impl AppView {
             .collect();
         // P3 opens on the first ticked table, or the first row when nothing was preselected.
         let field_table = tables.iter().position(|table| table.selected).unwrap_or(0);
+        let dialect = self.driver_dialect(connection_index);
 
         let weak = cx.weak_entity();
         let dir_input = make_export_dir_input(self.theme, output_dir.clone(), &weak, cx);
         self.export_wizard = Some(ExportWizard {
-            connection_index,
+            connection_index: Some(connection_index),
+            dialect,
             database,
             step: ExportStep::Format,
             format,
             output_dir,
             tables,
             fields: BTreeMap::new(),
+            snapshots: BTreeMap::new(),
             field_table,
+            field_combo: None,
+            dir_input: Some(dir_input),
+            include_header: true,
+            continue_on_error: true,
+            running: false,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            log: Vec::new(),
+            log_scroll: ScrollHandle::new(),
+            rows_total: 0,
+            rows_done: 0,
+            started: None,
+            elapsed: None,
+            error: None,
+        });
+        self.open_export_window(cx);
+        cx.notify();
+    }
+
+    /// Open the 导出 confirmation for a table grid: the whole table or the rows currently shown.
+    pub(super) fn open_table_export_choice(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        table: String,
+        page: ExportSnapshot,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.export_wizard.is_some() || self.export_choice.is_some() {
+            return;
+        }
+        let rows = page.rows.len();
+        let options = vec![
+            t!("export.all_records").to_string(),
+            t!("export.current_records", count = rows).to_string(),
+        ];
+        self.export_choice = Some(ExportChoice {
+            message: t!("export.scope_table").to_string(),
+            options,
+            selected: 0,
+            target: ExportChoiceTarget::TablePage {
+                connection_index,
+                database_index,
+                table,
+                page,
+            },
+        });
+        cx.notify();
+    }
+
+    /// Open the 导出 confirmation for a query tab: one of its result sets, or all of them.
+    pub(super) fn open_query_export_choice(
+        &mut self,
+        query_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.export_wizard.is_some() || self.export_choice.is_some() {
+            return;
+        }
+        let Some(tab) = self.queries.get(query_index) else {
+            return;
+        };
+        let connection_index = tab.connection_index;
+        let database = tab.database.clone().unwrap_or_default();
+        let dialect = connection_index
+            .map(|index| self.driver_dialect(index))
+            .unwrap_or_default();
+        // Result tabs are numbered by the grid-backed sets (statements without a result set are
+        // skipped), so the export labels must use the same numbering as the tab strip.
+        let mut results: Vec<ExportSnapshot> = Vec::new();
+        let mut result_number = 0usize;
+        let mut active = 0usize;
+        for grid_id in tab.result_grids.iter().flatten() {
+            let Some(grid) = self
+                .grids
+                .iter()
+                .find(|grid| grid.read(cx).state.id == *grid_id)
+            else {
+                continue;
+            };
+            result_number += 1;
+            let grid = grid.read(cx);
+            let name = t!("query.result_tab", n = result_number).to_string();
+            if tab.active_result == result_number {
+                active = results.len();
+            }
+            results.push(ExportSnapshot {
+                name,
+                columns: grid.state.all_columns.clone(),
+                rows: grid.state.rows.clone(),
+            });
+        }
+        if results.is_empty() {
+            return;
+        }
+        if results.len() == 1 {
+            // Nothing to choose: a single result set goes straight to the wizard.
+            self.open_export_wizard_snapshots(connection_index, database, dialect, results, cx);
+            return;
+        }
+        let mut options: Vec<String> = results.iter().map(|result| result.name.clone()).collect();
+        options.push(t!("export.all_results").to_string());
+        let selected = if active < results.len() { active } else { 0 };
+        self.export_choice = Some(ExportChoice {
+            message: t!("export.scope_query").to_string(),
+            options,
+            selected,
+            target: ExportChoiceTarget::QueryResults {
+                connection_index,
+                database,
+                dialect,
+                results,
+            },
+        });
+        cx.notify();
+    }
+
+    /// The 取消 / 确定 footer of the export scope dialog.
+    pub(super) fn cancel_export_choice(&mut self, cx: &mut Context<'_, Self>) {
+        self.export_choice = None;
+        cx.notify();
+    }
+
+    /// Highlight one option of the export scope dialog.
+    pub(super) fn export_choice_select(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if let Some(choice) = self.export_choice.as_mut()
+            && index < choice.options.len()
+        {
+            choice.selected = index;
+        }
+        cx.notify();
+    }
+
+    /// Apply the export scope dialog's choice and open the wizard on that source.
+    pub(super) fn confirm_export_choice(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(choice) = self.export_choice.take() else {
+            return;
+        };
+        match choice.target {
+            ExportChoiceTarget::TablePage {
+                connection_index,
+                database_index,
+                table,
+                page,
+            } => {
+                if choice.selected == 0 {
+                    self.open_export_wizard(
+                        connection_index,
+                        database_index,
+                        std::slice::from_ref(&table),
+                        cx,
+                    );
+                } else {
+                    self.open_export_wizard_snapshots(
+                        Some(connection_index),
+                        self.database_name(connection_index, database_index)
+                            .unwrap_or_default(),
+                        self.driver_dialect(connection_index),
+                        vec![page],
+                        cx,
+                    );
+                }
+            }
+            ExportChoiceTarget::QueryResults {
+                connection_index,
+                database,
+                dialect,
+                results,
+            } => {
+                let chosen = if choice.selected < results.len() {
+                    vec![results[choice.selected].clone()]
+                } else {
+                    results
+                };
+                self.open_export_wizard_snapshots(connection_index, database, dialect, chosen, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open the Export Wizard with in-memory sources (a grid page or query results). No live
+    /// connection is required: P2 still offers the format/path/field/options pages, but the run
+    /// writes the rows it was handed.
+    pub(super) fn open_export_wizard_snapshots(
+        &mut self,
+        connection_index: Option<usize>,
+        database: String,
+        dialect: DriverDialect,
+        sources: Vec<ExportSnapshot>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.export_wizard.is_some() || sources.is_empty() {
+            return;
+        }
+        let output_dir = default_export_dir();
+        let format = ExportFormat::Xlsx;
+        let tables: Vec<ExportTablePlan> = sources
+            .iter()
+            .map(|source| ExportTablePlan {
+                name: source.name.clone(),
+                selected: true,
+                path: default_output_path(&output_dir, &source.name, format),
+            })
+            .collect();
+        let fields: BTreeMap<String, ExportFields> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source.name.clone(),
+                    ExportFields::all(source.columns.clone()),
+                )
+            })
+            .collect();
+        let snapshots: BTreeMap<String, ExportSnapshot> = sources
+            .into_iter()
+            .map(|source| (source.name.clone(), source))
+            .collect();
+
+        let weak = cx.weak_entity();
+        let dir_input = make_export_dir_input(self.theme, output_dir.clone(), &weak, cx);
+        self.export_wizard = Some(ExportWizard {
+            connection_index,
+            dialect,
+            database,
+            step: ExportStep::Format,
+            format,
+            output_dir,
+            tables,
+            fields,
+            snapshots,
+            field_table: 0,
             field_combo: None,
             dir_input: Some(dir_input),
             include_header: true,
@@ -285,8 +518,17 @@ impl AppView {
                 // Re-entering the run page is a fresh run: drop the previous result so the footer
                 // offers Start again instead of a stale Close.
                 if let Some(wizard) = self.export_wizard.as_mut() {
+                    // In-memory sources already know their row count, so P4 can show the total
+                    // before the run starts; a server-paged table reports it on its first page.
+                    let known = wizard
+                        .tables
+                        .iter()
+                        .filter(|table| table.selected)
+                        .filter_map(|table| wizard.snapshots.get(&table.name))
+                        .map(|snapshot| snapshot.rows.len())
+                        .sum();
                     wizard.elapsed = None;
-                    wizard.rows_total = 0;
+                    wizard.rows_total = known;
                     wizard.rows_done = 0;
                     wizard.log.clear();
                 }
@@ -549,18 +791,28 @@ impl AppView {
         cx.notify();
     }
 
-    /// Load the column lists of every selected table that has not been loaded yet.
+    /// Load the column lists of every selected table that has not been loaded yet. In-memory
+    /// sources already carry their columns, so they never hit the server.
     fn export_load_fields(&mut self, cx: &mut Context<'_, Self>) {
         let Some(wizard) = self.export_wizard.as_ref() else {
             return;
         };
         let connection_index = wizard.connection_index;
         let database = wizard.database.clone();
-        let Some(connection) = self.connection_arc(connection_index) else {
-            if let Some(wizard) = self.export_wizard.as_mut() {
-                wizard.error = Some(t!("export.not_connected").to_string());
+        let snapshots = &wizard.snapshots;
+        let needs_connection = wizard
+            .tables
+            .iter()
+            .filter(|table| table.selected)
+            .any(|table| !snapshots.contains_key(&table.name));
+        let connection = connection_index.and_then(|index| self.connection_arc(index));
+        let Some(connection) = connection else {
+            if needs_connection {
+                if let Some(wizard) = self.export_wizard.as_mut() {
+                    wizard.error = Some(t!("export.not_connected").to_string());
+                }
+                cx.notify();
             }
-            cx.notify();
             return;
         };
         let pending: Vec<String> = wizard
@@ -745,6 +997,7 @@ impl AppView {
                     columns,
                     column_types,
                     order_by,
+                    snapshot: wizard.snapshots.get(&table.name).cloned(),
                 }
             })
             .collect();
@@ -758,15 +1011,26 @@ impl AppView {
         }
         let connection_index = wizard.connection_index;
         let database = wizard.database.clone();
+        let dialect = wizard.dialect;
         let format = wizard.format;
         let options = ExportOptions {
             include_header: wizard.include_header,
         };
         let continue_on_error = wizard.continue_on_error;
-        let Some(connection) = self.connection_arc(connection_index) else {
+        // A run whose sources are all in memory needs no live connection; only a server-paged
+        // table does.
+        let needs_connection = plans.iter().any(|plan| plan.snapshot.is_none());
+        let connection = connection_index.and_then(|index| self.connection_arc(index));
+        if needs_connection && connection.is_none() {
             self.set_export_error(t!("export.not_connected").to_string(), cx);
             return;
-        };
+        }
+        // Snapshot rows are already counted; paged tables add their totals as they start.
+        let snapshot_rows: usize = plans
+            .iter()
+            .filter_map(|plan| plan.snapshot.as_ref())
+            .map(|snapshot| snapshot.rows.len())
+            .sum();
 
         if let Some(wizard) = self.export_wizard.as_mut() {
             wizard.running = true;
@@ -775,7 +1039,7 @@ impl AppView {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             wizard.error = None;
             wizard.log.clear();
-            wizard.rows_total = 0;
+            wizard.rows_total = snapshot_rows;
             wizard.rows_done = 0;
             wizard.elapsed = None;
             wizard.started = Some(std::time::Instant::now());
@@ -801,13 +1065,9 @@ impl AppView {
             .map(|wizard| wizard.cancel.clone())
             .unwrap_or_default();
         // The `.sql` writer quotes identifiers per engine; the other formats are engine-agnostic.
-        let dialect = match self
-            .registry
-            .get(&connection.driver_id())
-            .map(|driver| driver.dialect())
-        {
-            Some(DriverDialect::Postgres) => SqlDialect::Postgres,
-            Some(DriverDialect::Oracle) => SqlDialect::Oracle,
+        let sql_dialect = match dialect {
+            DriverDialect::Postgres => SqlDialect::Postgres,
+            DriverDialect::Oracle => SqlDialect::Oracle,
             _ => SqlDialect::MySql,
         };
         cx.spawn(async move |this, cx| {
@@ -824,6 +1084,7 @@ impl AppView {
                     columns,
                     column_types,
                     order_by,
+                    snapshot,
                 } = plan;
                 let created = TableWriter::create(
                     Path::new(&path),
@@ -832,7 +1093,7 @@ impl AppView {
                     &column_types,
                     format,
                     options,
-                    dialect,
+                    sql_dialect,
                 );
                 let mut writer = match created {
                     Ok(writer) => writer,
@@ -852,99 +1113,169 @@ impl AppView {
                     }
                 };
 
-                let mut page_index = 0u64;
                 let mut table_rows = 0usize;
-                let mut projection: Option<Vec<usize>> = None;
-                let mut identity = false;
                 let mut error: Option<String> = None;
-                loop {
-                    if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        error = Some(t!("export.log.cancelled").to_string());
-                        break;
-                    }
-                    let connection = connection.clone();
-                    let database = database.clone();
-                    let table = name.clone();
-                    let request = PageRequest::new(page_index, EXPORT_PAGE_SIZE)
-                        .with_order_by(order_by.clone());
-                    let result = runtime
-                        .spawn(
-                            async move { connection.fetch_page(&database, &table, request).await },
-                        )
-                        .await;
-                    let page = match result {
-                        Ok(Ok(page)) => page,
-                        Ok(Err(err)) => {
-                            error = Some(err.to_string());
-                            break;
-                        }
-                        Err(err) => {
-                            error = Some(err.to_string());
-                            break;
-                        }
-                    };
-                    let fetched = page.rows.len();
-                    if page_index == 0
-                        && let Some(total) = page.total_rows
-                    {
-                        let total = total as usize;
-                        let _ = this.update(cx, |app, cx| {
-                            if let Some(wizard) = app.export_wizard.as_mut() {
-                                wizard.rows_total += total;
-                            }
-                            cx.notify();
-                        });
-                    }
-                    if projection.is_none() {
-                        let mut indices = Vec::with_capacity(columns.len());
-                        for column in &columns {
-                            match page.columns.iter().position(|info| &info.name == column) {
-                                Some(index) => indices.push(index),
-                                None => {
-                                    error = Some(format!("column `{column}` is missing"));
-                                    break;
-                                }
+                if let Some(snapshot) = snapshot {
+                    // In-memory source: write exactly the rows the grid showed (filtered, sorted,
+                    // current page) or the query result set.
+                    let mut indices = Vec::with_capacity(columns.len());
+                    for column in &columns {
+                        match snapshot
+                            .columns
+                            .iter()
+                            .position(|info| &info.name == column)
+                        {
+                            Some(index) => indices.push(index),
+                            None => {
+                                error = Some(format!("column `{column}` is missing"));
+                                break;
                             }
                         }
-                        if error.is_some() {
-                            break;
-                        }
-                        identity = indices.len() == page.columns.len()
+                    }
+                    if error.is_none() {
+                        let total = snapshot.rows.len();
+                        let identity = indices.len() == snapshot.columns.len()
                             && indices
                                 .iter()
                                 .enumerate()
                                 .all(|(position, index)| position == *index);
-                        projection = Some(indices);
-                    }
-                    let rows = match (&projection, identity) {
-                        (Some(indices), false) => page
-                            .rows
-                            .into_iter()
-                            .map(|row| {
-                                indices
-                                    .iter()
-                                    .filter_map(|index| row.get(*index).cloned())
-                                    .collect()
-                            })
-                            .collect(),
-                        _ => page.rows,
-                    };
-                    if let Err(write_error) = writer.write_rows(&rows) {
-                        error = Some(write_error.to_string());
-                        break;
-                    }
-                    table_rows += fetched;
-                    let _ = this.update(cx, |app, cx| {
-                        if let Some(wizard) = app.export_wizard.as_mut() {
-                            wizard.rows_done += fetched;
-                            wizard.log_scroll.scroll_to_bottom();
+                        let write = if identity {
+                            writer.write_rows(&snapshot.rows)
+                        } else {
+                            let rows: Vec<Vec<CellValue>> = snapshot
+                                .rows
+                                .iter()
+                                .map(|row| {
+                                    indices
+                                        .iter()
+                                        .filter_map(|index| row.get(*index).cloned())
+                                        .collect()
+                                })
+                                .collect();
+                            writer.write_rows(&rows)
+                        };
+                        match write {
+                            Ok(()) => {
+                                table_rows = total;
+                                let _ = this.update(cx, |app, cx| {
+                                    if let Some(wizard) = app.export_wizard.as_mut() {
+                                        wizard.rows_done += total;
+                                        wizard.log_scroll.scroll_to_bottom();
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                            Err(write_error) => error = Some(write_error.to_string()),
                         }
-                        cx.notify();
-                    });
-                    if (fetched as u64) < EXPORT_PAGE_SIZE {
-                        break;
                     }
-                    page_index += 1;
+                } else {
+                    let Some(connection) = connection.clone() else {
+                        error = Some(t!("export.not_connected").to_string());
+                        failed += 1;
+                        let message = t!(
+                            "export.log.table_failed",
+                            name = name.clone(),
+                            error = error.clone().unwrap_or_default()
+                        )
+                        .to_string();
+                        let _ = this.update(cx, |app, cx| app.export_log(message, cx));
+                        if !continue_on_error {
+                            break;
+                        }
+                        continue;
+                    };
+                    let mut page_index = 0u64;
+                    let mut projection: Option<Vec<usize>> = None;
+                    let mut identity = false;
+                    loop {
+                        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            error = Some(t!("export.log.cancelled").to_string());
+                            break;
+                        }
+                        let connection = connection.clone();
+                        let database = database.clone();
+                        let table = name.clone();
+                        let request = PageRequest::new(page_index, EXPORT_PAGE_SIZE)
+                            .with_order_by(order_by.clone());
+                        let result = runtime
+                            .spawn(async move {
+                                connection.fetch_page(&database, &table, request).await
+                            })
+                            .await;
+                        let page = match result {
+                            Ok(Ok(page)) => page,
+                            Ok(Err(err)) => {
+                                error = Some(err.to_string());
+                                break;
+                            }
+                            Err(err) => {
+                                error = Some(err.to_string());
+                                break;
+                            }
+                        };
+                        let fetched = page.rows.len();
+                        if page_index == 0
+                            && let Some(total) = page.total_rows
+                        {
+                            let total = total as usize;
+                            let _ = this.update(cx, |app, cx| {
+                                if let Some(wizard) = app.export_wizard.as_mut() {
+                                    wizard.rows_total += total;
+                                }
+                                cx.notify();
+                            });
+                        }
+                        if projection.is_none() {
+                            let mut indices = Vec::with_capacity(columns.len());
+                            for column in &columns {
+                                match page.columns.iter().position(|info| &info.name == column) {
+                                    Some(index) => indices.push(index),
+                                    None => {
+                                        error = Some(format!("column `{column}` is missing"));
+                                        break;
+                                    }
+                                }
+                            }
+                            if error.is_some() {
+                                break;
+                            }
+                            identity = indices.len() == page.columns.len()
+                                && indices
+                                    .iter()
+                                    .enumerate()
+                                    .all(|(position, index)| position == *index);
+                            projection = Some(indices);
+                        }
+                        let rows = match (&projection, identity) {
+                            (Some(indices), false) => page
+                                .rows
+                                .into_iter()
+                                .map(|row| {
+                                    indices
+                                        .iter()
+                                        .filter_map(|index| row.get(*index).cloned())
+                                        .collect()
+                                })
+                                .collect(),
+                            _ => page.rows,
+                        };
+                        if let Err(write_error) = writer.write_rows(&rows) {
+                            error = Some(write_error.to_string());
+                            break;
+                        }
+                        table_rows += fetched;
+                        let _ = this.update(cx, |app, cx| {
+                            if let Some(wizard) = app.export_wizard.as_mut() {
+                                wizard.rows_done += fetched;
+                                wizard.log_scroll.scroll_to_bottom();
+                            }
+                            cx.notify();
+                        });
+                        if (fetched as u64) < EXPORT_PAGE_SIZE {
+                            break;
+                        }
+                        page_index += 1;
+                    }
                 }
                 let cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
                 if cancelled {

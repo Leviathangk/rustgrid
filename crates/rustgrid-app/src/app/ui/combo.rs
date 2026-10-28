@@ -121,8 +121,9 @@ pub(crate) struct ComboBox {
     subscriptions: Vec<Subscription>,
     pending_options: bool,
     pending_selected: bool,
-    /// A pick reported by the kit, waiting for the next render to reach the callback.
-    pending_select: Option<String>,
+    /// The value the user last picked from the popup, cleared when the host adopts it through
+    /// [`Self::set_selected`]. See [`Self::picked_value`].
+    picked: Option<String>,
 }
 
 impl ComboBox {
@@ -151,7 +152,7 @@ impl ComboBox {
             subscriptions: Vec::new(),
             pending_options: false,
             pending_selected: false,
-            pending_select: None,
+            picked: None,
         }
     }
 
@@ -209,8 +210,28 @@ impl ComboBox {
             return;
         }
         self.selected = value;
+        // The host has adopted a value of its own (normally the pick the callback just delivered),
+        // so no pick is left waiting to be applied.
+        self.picked = None;
         self.pending_selected = true;
         cx.notify();
+    }
+
+    /// The value the control is showing: a pick the host has not written back yet, else the
+    /// kit's committed selection.
+    ///
+    /// A pick reaches the host's `on_select` immediately, so this normally just mirrors the model.
+    /// A host that reads its model in the same gesture as another control (the grid filter's 应用)
+    /// consults it anyway, which guarantees the applied condition matches what the trigger shows
+    /// even if the model update was missed.
+    pub(crate) fn active_value(&self, cx: &App) -> Option<String> {
+        if let Some(picked) = &self.picked {
+            return Some(picked.clone());
+        }
+        self.state
+            .as_ref()
+            .and_then(|state| state.read(cx).selected_value())
+            .or_else(|| (!self.selected.is_empty()).then(|| self.selected.clone()))
     }
 
     pub(crate) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -261,14 +282,21 @@ impl ComboBox {
                 .multiple(false)
                 .searchable(true)
         });
-        self.subscriptions.push(cx.subscribe(
+        // Deliver the pick immediately rather than on the next render. A host that reads its own
+        // model in the meantime (the filter builder's 应用 is the one that bit users: the trigger
+        // showed the new field while the applied condition still held the old one) then always sees
+        // the value the user just chose.
+        self.subscriptions.push(cx.subscribe_in(
             &state,
-            |this, _state, event: &ComboboxEvent<ComboDelegate>, cx| {
+            window,
+            |this, _state, event: &ComboboxEvent<ComboDelegate>, window, cx| {
                 if let ComboboxEvent::Change(values) = event
                     && let Some(value) = values.first()
                 {
-                    this.pending_select = Some(value.clone());
-                    cx.notify();
+                    this.picked = Some(value.clone());
+                    if let Some(callback) = this.on_select.clone() {
+                        callback(value, window, cx);
+                    }
                 }
             },
         ));
@@ -277,7 +305,7 @@ impl ComboBox {
         self.pending_selected = true;
     }
 
-    /// Applies queued mutations and dispatches queued callbacks, which need a `Window`.
+    /// Applies the queued option/selection mutations that need a `Window`.
     fn flush(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.state.clone() else {
             return;
@@ -294,12 +322,6 @@ impl ComboBox {
             state.update(cx, |state, cx| {
                 state.set_selected_values(std::slice::from_ref(&selected), window, cx);
             });
-        }
-
-        if let Some(value) = self.pending_select.take()
-            && let Some(callback) = self.on_select.clone()
-        {
-            callback(&value, window, cx);
         }
     }
 }

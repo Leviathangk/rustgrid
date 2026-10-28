@@ -93,7 +93,7 @@ impl GridView {
                 "icons/export.svg",
                 t!("grid.export").to_string(),
                 theme.icon_views,
-                self.state.sql.is_none(),
+                self.state.sql.is_none() && !self.state.all_columns.is_empty(),
                 false,
                 false,
                 cx.listener(|this, _event, _window, cx| this.open_grid_export(cx)),
@@ -155,28 +155,30 @@ impl GridView {
         });
     }
 
-    /// Open the Export Wizard with this grid's table pre-selected. Table grids only.
+    /// Open the 导出 confirmation with this grid's table pre-selected, offering the whole table or
+    /// the rows currently on screen (which already carry the applied filter and sort). Table grids
+    /// only.
     fn open_grid_export(&mut self, cx: &mut Context<'_, Self>) {
-        if self.state.sql.is_some() {
+        if self.state.sql.is_some() || self.state.all_columns.is_empty() {
             return;
         }
         let connection = self.state.connection.clone();
         let database = self.state.database.clone();
         let table = self.state.table.clone();
+        let page = ExportSnapshot {
+            name: table.clone(),
+            columns: self.state.all_columns.clone(),
+            rows: self.state.rows.clone(),
+        };
         let Some(app) = self.app.upgrade() else {
             return;
         };
-        app.update(cx, |app, cx| {
+        app.update(cx, move |app, cx| {
             let Some((connection_index, database_index)) = app.table_scope(&connection, &database)
             else {
                 return;
             };
-            app.open_export_wizard(
-                connection_index,
-                database_index,
-                std::slice::from_ref(&table),
-                cx,
-            );
+            app.open_table_export_choice(connection_index, database_index, table, page, cx);
         });
     }
 
