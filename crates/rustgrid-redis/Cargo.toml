@@ -1,0 +1,24 @@
+[package]
+name = "rustgrid-redis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rustgrid-core.workspace = true
+rustgrid-tunnel.workspace = true
+async-trait.workspace = true
+redis = { workspace = true, features = [
+    "tokio-comp",
+    "cluster-async",
+    "sentinel",
+    "tokio-rustls-comp",
+] }
+tokio.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

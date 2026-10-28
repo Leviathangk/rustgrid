@@ -6,8 +6,8 @@ use crate::dialect::DriverDialect;
 use crate::error::{Error, Result};
 use crate::model::{
     BackupObjectKind, ColumnInfo, ConnectionConfig, ConnectionProfile, DatabaseInfo,
-    DatabaseOptions, DriverId, ObjectDump, PageRequest, QueryResult, RowInsert, RowUpdate,
-    TableInfo, TablePage, TableSchema, TableStatus,
+    DatabaseOptions, DriverId, ObjectCreate, ObjectDump, ObjectNamespace, PageRequest, QueryResult,
+    RowInsert, RowUpdate, TableInfo, TablePage, TableSchema, TableStatus,
 };
 use crate::routine::{RoutineDetails, RoutineEdit, RoutineInfo, RoutineKind};
 use crate::user::{
@@ -305,6 +305,35 @@ pub trait ScriptSession: Send {
     }
 }
 
+/// What a live stream from the server should watch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchSpec {
+    /// Every command the server executes (`MONITOR`).
+    Monitor,
+    /// The listed pub/sub channels and patterns.
+    Subscribe {
+        channels: Vec<String>,
+        patterns: Vec<String>,
+    },
+}
+
+/// One item of a live server stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchEvent {
+    /// The pub/sub channel (or the matched pattern) the message arrived on; `"monitor"` for a
+    /// `MONITOR` line.
+    pub channel: String,
+    /// The message payload or the monitor line.
+    pub text: String,
+}
+
+/// A live stream from the server (pub/sub messages, `MONITOR` lines), read item by item.
+#[async_trait]
+pub trait Watch: Send {
+    /// The next event, or `None` when the server closed the stream.
+    async fn next(&mut self) -> Result<Option<WatchEvent>>;
+}
+
 #[async_trait]
 pub trait Connection: Send + Sync {
     fn driver_id(&self) -> DriverId;
@@ -434,6 +463,69 @@ pub trait Connection: Send + Sync {
         _name: &str,
         _is_view: bool,
     ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    // ----- Key-value engines ---------------------------------------------------------------------
+    //
+    // Engines whose objects are keys (Redis) expose a paged listing, namespaces, key creation, TTL
+    // and live server streams here. The defaults keep the SQL engines unchanged.
+
+    /// List one page of objects, with an opaque `cursor` for the follow-up page.
+    ///
+    /// `pattern` narrows the listing (a namespace filter); `None` lists everything. The default
+    /// ignores paging and returns [`Connection::list_tables`] with no cursor.
+    async fn list_objects_page(
+        &self,
+        database: &str,
+        _cursor: Option<&str>,
+        _pattern: Option<&str>,
+    ) -> Result<(Vec<TableInfo>, Option<String>)> {
+        Ok((self.list_tables(database).await?, None))
+    }
+
+    /// The namespaces (key prefixes) of a key-value database, with their object counts.
+    async fn list_namespaces(&self, _database: &str) -> Result<Vec<ObjectNamespace>> {
+        Ok(Vec::new())
+    }
+
+    /// Create an object (a key). Engines without key objects keep the default error.
+    async fn create_object(
+        &self,
+        _database: &str,
+        name: &str,
+        _spec: &ObjectCreate,
+    ) -> Result<()> {
+        Err(Error::Query(format!(
+            "this driver cannot create {name}: it has no key objects"
+        )))
+    }
+
+    /// The object's expiry in seconds: `Some(-1)` when it never expires, `None` when the engine has
+    /// no TTL concept.
+    async fn object_ttl(&self, _database: &str, _name: &str) -> Result<Option<i64>> {
+        Ok(None)
+    }
+
+    /// Set (or, with `None`, remove) an object's expiry.
+    async fn set_object_ttl(
+        &self,
+        _database: &str,
+        name: &str,
+        _ttl: Option<i64>,
+    ) -> Result<()> {
+        Err(Error::Query(format!(
+            "this driver cannot set a TTL on {name}"
+        )))
+    }
+
+    /// Open a live server stream (pub/sub messages or `MONITOR` lines). `None` when the driver has
+    /// no live streams.
+    async fn watch(
+        &self,
+        _database: Option<&str>,
+        _spec: &WatchSpec,
+    ) -> Result<Option<Box<dyn Watch>>> {
         Ok(None)
     }
 

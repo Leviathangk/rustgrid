@@ -636,6 +636,8 @@ impl AppView {
                                             expanded_schemas: existing.expanded_schemas,
                                             opened_schemas: existing.opened_schemas,
                                             schemas: existing.schemas,
+                                            object_cursor: existing.object_cursor,
+                                            object_pattern: existing.object_pattern,
                                         }
                                     } else {
                                         let expanded = remembered.contains(&database.name);
@@ -650,6 +652,8 @@ impl AppView {
                                             expanded_schemas: Default::default(),
                                             opened_schemas: Default::default(),
                                             schemas: None,
+                                            object_cursor: None,
+                                            object_pattern: None,
                                         }
                                     }
                                 })
@@ -1288,6 +1292,104 @@ impl AppView {
             })
     }
 
+    /// Whether the object list has another page waiting (key-value engines).
+    pub(super) fn has_more_objects(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+    ) -> bool {
+        self.connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases
+                    .get(database_index)
+                    .and_then(|database| database.object_cursor.clone()),
+                _ => None,
+            })
+            .is_some()
+    }
+
+    /// Appends the next object page (key-value engines) to the object list.
+    pub(super) fn load_more_objects(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(node) = self.connections.get(connection_index) else {
+            return;
+        };
+        let ConnectionStatus::Connected(connection) = &node.status else {
+            return;
+        };
+        let connection = connection.clone();
+        let Loadable::Loaded(databases) = &node.databases else {
+            return;
+        };
+        let Some(database) = databases.get(database_index) else {
+            return;
+        };
+        let Some(cursor) = database.object_cursor.clone() else {
+            return;
+        };
+        let database_name = database.name.clone();
+        let pattern = database.object_pattern.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move {
+                    connection
+                        .list_objects_page(&database_name, Some(&cursor), pattern.as_deref())
+                        .await
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                let Ok(Ok((tables, cursor))) = result else {
+                    return;
+                };
+                if let Some(node) = view.connections.get_mut(connection_index)
+                    && let Loadable::Loaded(databases) = &mut node.databases
+                    && let Some(database) = databases.get_mut(database_index)
+                {
+                    if let Loadable::Loaded(existing) = &mut database.tables {
+                        for table in tables {
+                            if !existing
+                                .iter()
+                                .any(|known| known.name == table.name && known.kind == table.kind)
+                            {
+                                existing.push(table);
+                            }
+                        }
+                    }
+                    database.object_cursor = cursor;
+                }
+                view.notify_object_pane(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Sets (or clears) the object list's namespace filter and reloads the first page.
+    pub(super) fn set_object_namespace(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        namespace: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let pattern = namespace
+            .map(|namespace| format!("{namespace}*"))
+            .filter(|pattern| !pattern.is_empty());
+        if let Some(node) = self.connections.get_mut(connection_index)
+            && let Loadable::Loaded(databases) = &mut node.databases
+            && let Some(database) = databases.get_mut(database_index)
+        {
+            database.object_pattern = pattern;
+        }
+        self.reload_tables(connection_index, database_index, cx);
+    }
+
     pub(super) fn load_tables(
         &mut self,
         connection_index: usize,
@@ -1302,7 +1404,19 @@ impl AppView {
         {
             database.tables = Loadable::Loading;
             database.table_statuses = Loadable::Loading;
+            database.object_cursor = None;
         }
+
+        // The namespace filter (key-value engines) narrows the listing server-side.
+        let pattern = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases
+                    .get(database_index)
+                    .and_then(|database| database.object_pattern.clone()),
+                _ => None,
+            });
 
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -1312,8 +1426,13 @@ impl AppView {
             // counts had finished.
             let list_connection = connection.clone();
             let list_database = database_name.clone();
+            let list_pattern = pattern.clone();
             let tables = match runtime
-                .spawn(async move { list_connection.list_tables(&list_database).await })
+                .spawn(async move {
+                    list_connection
+                        .list_objects_page(&list_database, None, list_pattern.as_deref())
+                        .await
+                })
                 .await
             {
                 Ok(inner) => inner,
@@ -1326,7 +1445,10 @@ impl AppView {
                     && let Some(database) = databases.get_mut(database_index)
                 {
                     match tables {
-                        Ok(tables) => database.tables = Loadable::Loaded(tables),
+                        Ok((tables, cursor)) => {
+                            database.tables = Loadable::Loaded(tables);
+                            database.object_cursor = cursor;
+                        }
                         Err(error) => {
                             database.tables = Loadable::Failed(error.to_string());
                             database.table_statuses = Loadable::Failed(error.to_string());

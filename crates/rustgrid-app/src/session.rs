@@ -55,6 +55,10 @@ pub struct DatabaseNode {
     /// The database's schemas, loaded when it is opened so a freshly created (still empty) schema
     /// is visible in the tree. `None` for schema-less engines.
     pub schemas: Option<Loadable<Vec<String>>>,
+    /// The next object page's cursor for a key-value engine, when one is left over.
+    pub object_cursor: Option<String>,
+    /// The namespace filter (`user:*`) applied to the object list, if any.
+    pub object_pattern: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

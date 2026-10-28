@@ -120,6 +120,26 @@ pub struct TableInfo {
     pub updatable: bool,
 }
 
+/// One namespace (key prefix) of a key-value engine, with the number of keys it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectNamespace {
+    /// The prefix including its separator (`user:`), or `""` for keys without a namespace.
+    pub name: String,
+    /// How many keys share the prefix (as far as the driver listed them).
+    pub objects: u64,
+}
+
+/// How a key-value object is created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectCreate {
+    /// The engine's type name (`string`, `hash`, `list`, `set`, `zset`, `stream`).
+    pub kind: String,
+    /// Expiry in seconds; `None` keeps the key permanent.
+    pub ttl: Option<i64>,
+    /// The initial fields: `value` for a string, `field`/`member` plus `value`/`score` otherwise.
+    pub values: Vec<(String, Option<String>)>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub name: String,

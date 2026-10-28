@@ -23,16 +23,18 @@ pub use descriptor::{
 };
 pub use dialect::DriverDialect;
 pub use driver::{
-    Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, ScriptSession, UserEditorSpec,
+    Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, ScriptSession, UserEditorSpec, Watch,
+    WatchEvent, WatchSpec,
 };
 pub use error::{Error, Result};
 pub use model::{
     BackupObjectKind, CellValue, CheckDef, ColumnDef, ColumnInfo, ConnectionConfig,
     ConnectionProfile, DatabaseInfo, DatabaseOptions, DriverId, ExcludeDef, FilterCondition,
     FilterConjunction, FilterGroup, FilterNode, FilterOperator, ForeignKeyDef, IndexColumnDef,
-    IndexDef, ObjectDump, ObjectKind, PageRequest, QueryResult, RowInsert, RowUpdate, RuleDef,
-    SavedBackup, SavedBackupSelection, SavedQuery, SavedTransfer, SortColumn, TableInfo,
-    TableOptions, TablePage, TableSchema, TableStatus, TransferMode, TriggerDef, UniqueKeyDef,
+    IndexDef, ObjectCreate, ObjectDump, ObjectKind, ObjectNamespace, PageRequest, QueryResult,
+    RowInsert, RowUpdate, RuleDef, SavedBackup, SavedBackupSelection, SavedQuery, SavedTransfer,
+    SortColumn, TableInfo, TableOptions, TablePage, TableSchema, TableStatus, TransferMode,
+    TriggerDef, UniqueKeyDef,
 };
 pub use options::{ConnectionOptions, TlsMode, TlsOptions, TunnelAuth, TunnelKind, TunnelLayer};
 pub use portable::{LogicalType, map_schema, map_table_name};

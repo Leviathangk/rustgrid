@@ -77,9 +77,23 @@ not a later refactor.
   `ALL_TAB_COLUMNS`/`ALL_CONSTRAINTS`), `routine.rs` reads functions/procedures/packages/triggers
   from `ALL_OBJECTS` and `DBMS_METADATA.GET_DDL`, and `view.rs`/`user.rs`/`backup.rs` cover views,
   users/roles and `.rgbak`. See `docs/oracle-driver.md`.
+- `crates/rustgrid-redis` — the **Redis** driver, built on **`redis` 0.32** (redis-rs: async,
+  cluster, sentinel and rustls TLS). Redis has no tables, so the driver maps a numbered database to
+  the object container and a **key** to a "table": a hash pages as field/value, a list as index/value,
+  a set as member, a zset as member/score, a stream as entry id/field/value, a string/ReJSON key as a
+  single value. `TYPE` drives the column set; every edit goes back through the key's own commands
+  (`SET`, `HSET`, `LSET`, `SADD`, `ZADD`, `HDEL`, `SREM`, `ZREM`, `UNLINK`, `RENAME`). Key listing is
+  `SCAN`-based and capped by the connection's 键列表上限 (`redis.key_limit`, default 1000); in cluster
+  mode every master from `CLUSTER SLOTS` is scanned, because `SCAN` only sees one shard. Each
+  database gets its own multiplexed connection (`SELECT` is connection state), and the driver gates
+  commands on the server version read from `INFO server`: `MEMORY USAGE`/`UNLINK`/`PTTL` need 4.0,
+  streams 5.0, `SET … KEEPTTL` and ACL 6.0 (on older servers a string edit saves and restores the
+  PTTL around the write). The query editor runs one command per line through the shared editor, and
+  refuses what would break a shared connection (`SELECT`/`AUTH`, `MULTI`, `CLIENT REPLY`, blocking
+  commands, `SHUTDOWN`). See `docs/redis-driver.md`.
 - `crates/rustgrid-tunnel` — the shared **SSH / SOCKS5 / HTTP** tunnel (local port forwarding) used
   by the network drivers (`rustgrid-mysql`, `rustgrid-postgresql`, `rustgrid-oracle`,
-  `rustgrid-sqlserver`). Migrated out of
+  `rustgrid-sqlserver`, `rustgrid-redis` in standalone mode). Migrated out of
   `rustgrid-mysql` so PostgreSQL reuses it; `rustgrid-mysql` re-exports `Tunnel`.
 - `crates/rustgrid-odbc` — the **generic ODBC driver** (app feature `driver-odbc`, on by default).
   It connects through a user-installed ODBC driver or a raw connection string and speaks the engine's
@@ -140,6 +154,10 @@ not a later refactor.
   OCI / Instant Client; TLS reuses the workspace's `rustls 0.23` (already in the lock file), so it
   adds no native compilation. Its API is **synchronous**, so the driver bridges through
   `tokio::task::spawn_blocking` (see the `rustgrid-oracle` bullet).
+- Redis: **`redis` 0.32** (redis-rs) with only `tokio-comp`, `cluster-async`, `sentinel` and
+  `tokio-rustls-comp`, so a single client covers standalone servers, Sentinel deployments and
+  Cluster (including `MOVED`/`ASK` routing) with rustls TLS and no OpenSSL. RESP2 is used on purpose:
+  it works from Redis 2.8 through 7.x, while RESP3 needs 6.0.
 - SQL Server: **tiberius 0.13** (`tds80` + `rustls` + `chrono`, `default-features = false`;
   `winauth` added on Windows by `rustgrid-sqlserver` through a per-target dependency entry, for
   Windows/SSPI authentication — the Unix `sspi-rs` backend is not enabled, as it pins
@@ -821,7 +839,20 @@ shadcn chrome described above. Implemented today:
     `DetailList`), so the buttons appear on the next frame instead of waiting for another render,
     and selecting a result scrolls its tag into view.
 
-Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL and Oracle, and the disabled placeholder UI
+19. Redis (`crates/rustgrid-redis` + `app/redis_tools.rs`): a Redis connection is browsed through
+    the shared object list. Keys open in the normal grid, whose columns follow `TYPE` (hash
+    `field`/`value`, list `index`/`value`, set `member`, zset `member`/`score`, stream
+    `id`/`field`/`value`, string/ReJSON `value`). `DriverCapability::KeyValue` turns on the Redis
+    toolbar items (新建键 / 设置 TTL / Redis 工具), the 加载更多 page button (`list_objects_page`
+    returns a `SCAN` cursor) and the namespace picker in the tools window. The tools window
+    (`app/redis_tools.rs`) is one OS window with five panes: 键 (create key, TTL, namespaces),
+    发布订阅 (`watch` → `SUBSCRIBE`/`PSUBSCRIBE` + `PUBLISH`), 命令监控 (`watch` → `MONITOR`),
+    慢日志 (`SLOWLOG GET 100`) and ACL 用户 (`ACL LIST`/`ACL SETUSER`/`ACL DELUSER`). Live streams
+    run on tokio and forward events to a gpui task, with a generation counter dropping stale events.
+    See `docs/redis-driver.md`.
+
+Still out of scope: engines other than MySQL, MariaDB, SQLite, SQL Server, PostgreSQL, Oracle and
+Redis, and the disabled placeholder UI
 (the `Design/New/Delete Table` toolbar buttons and the query editor's `Query Builder`/`Snippets`
 items are deliberate stubs — leave them disabled unless asked). The abstractions above are what
 make more engines cheap later — do not build those features early.

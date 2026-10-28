@@ -2212,6 +2212,12 @@ pub struct AppView {
     export_connections_dialog: Option<ConnectionExportDialog>,
     /// The OS window hosting the "export connections" dialog, if open.
     export_connections_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// The open Redis tools window's state (pub/sub, monitor, slow log, ACL).
+    redis_tools: Option<redis_tools::RedisToolsState>,
+    /// The OS window hosting the Redis tools, if open.
+    redis_tools_window: Option<WindowHandle<gpui_kit::component::Root>>,
+    /// Bumped whenever a live stream stops, so events from an aborted task are dropped.
+    redis_watch_generation: u64,
     /// The open "new table" name prompt, if any, and its shared name input.
     create_table_dialog: Option<CreateTableDialog>,
     create_table_input: Option<Entity<TextInput>>,
@@ -2692,6 +2698,7 @@ pub struct AppView {
     export_focus: FocusHandle,
     import_focus: FocusHandle,
     export_connections_focus: FocusHandle,
+    redis_tools_focus: FocusHandle,
     backup_window_focus: FocusHandle,
     /// The main window's id, so closing it also closes the Backup/Restore window.
     main_window_id: Option<WindowId>,
@@ -2733,6 +2740,7 @@ mod privilege_manager;
 mod query;
 mod query_editor;
 mod query_view;
+mod redis_tools;
 mod routine;
 mod routine_view;
 mod runsql;
@@ -3024,6 +3032,9 @@ impl AppView {
             query_name_input: None,
             export_connections_dialog: None,
             export_connections_window: None,
+            redis_tools: None,
+            redis_tools_window: None,
+            redis_watch_generation: 0,
             create_table_dialog: None,
             create_table_input: None,
             save_connection_combo: None,
@@ -3362,6 +3373,7 @@ impl AppView {
             export_focus: cx.focus_handle(),
             import_focus: cx.focus_handle(),
             export_connections_focus: cx.focus_handle(),
+            redis_tools_focus: cx.focus_handle(),
             backup_window_focus: cx.focus_handle(),
             main_window_id: None,
             _window_closed: window_closed,

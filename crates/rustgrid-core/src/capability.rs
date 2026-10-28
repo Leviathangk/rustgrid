@@ -20,6 +20,9 @@ pub enum DriverCapability {
     Events,
     /// Views.
     Views,
+    /// A key-value engine: objects are keys, not tables (Redis). The UI uses it to offer keys,
+    /// TTL, namespaces and the Redis tools instead of table-only actions.
+    KeyValue,
 }
 
 /// The set of capabilities an engine supports.

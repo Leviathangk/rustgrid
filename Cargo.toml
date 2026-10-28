@@ -10,6 +10,7 @@ members = [
     "crates/rustgrid-sqlserver",
     "crates/rustgrid-postgresql",
     "crates/rustgrid-oracle",
+    "crates/rustgrid-redis",
     "crates/rustgrid-tunnel",
     "crates/rustgrid-odbc",
     "crates/rustgrid-config",
@@ -38,6 +39,7 @@ rustgrid-postgresql = { path = "crates/rustgrid-postgresql" }
 rustgrid-oracle = { path = "crates/rustgrid-oracle" }
 rustgrid-tunnel = { path = "crates/rustgrid-tunnel" }
 rustgrid-odbc = { path = "crates/rustgrid-odbc" }
+rustgrid-redis = { path = "crates/rustgrid-redis" }
 rustgrid-config = { path = "crates/rustgrid-config" }
 
 async-trait = "0.1"
@@ -46,7 +48,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "tls-rustls-ring", "chrono"] }
@@ -54,6 +56,9 @@ tiberius = { version = "0.13", default-features = false, features = ["tds80", "r
 # Oracle's official pure-Rust thin driver (no OCI / Instant Client). Locked to an exact version
 # because it is a pre-release whose API is still changing.
 oracledb = { version = "=26.0.0-beta.4", default-features = false }
+# Redis: the official redis-rs client. The driver enables only the async, cluster, sentinel and
+# rustls-TLS features it uses, so the tree stays small.
+redis = { version = "0.32", default-features = false }
 libloading = "0.8"
 bb8 = { version = "0.9", default-features = false }
 tokio-util = { version = "0.7", features = ["compat"] }

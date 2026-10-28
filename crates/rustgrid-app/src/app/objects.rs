@@ -213,6 +213,7 @@ impl AppView {
             return self.render_view_object_toolbar(pane, cx);
         }
         let designer_enabled = self.driver_supports_table_designer(connection_index);
+        let key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
         let design_enabled = category == Category::Tables && open_enabled && designer_enabled;
         let new_enabled = category == Category::Tables && designer_enabled;
         // Deleting works off the multi-selection: enabled when at least one row is selected, even
@@ -236,6 +237,9 @@ impl AppView {
         let pane_for_import = pane.clone();
         let pane_for_delete = pane.clone();
         let pane_for_refresh = pane.clone();
+        let pane_for_new_key = pane.clone();
+        let pane_for_ttl = pane.clone();
+        let pane_for_tools = pane.clone();
         div()
             .flex()
             .flex_row()
@@ -353,6 +357,85 @@ impl AppView {
                             this.open_import_wizard(connection_index, database_index, None, cx);
                         }),
                     ))
+                    .when(key_value, |bar| {
+                        bar.child(toolbar_separator(theme))
+                            .child(self.toolbar_item(
+                                "obj-new-key",
+                                "icons/redis.svg",
+                                t!("redis.tools.key_new").to_string(),
+                                category == Category::Tables,
+                                cx.listener(move |this, _event, _window, cx| {
+                                    let (connection_index, database_index) = {
+                                        let pane = pane_for_new_key.read(cx);
+                                        (pane.connection_index, pane.database_index)
+                                    };
+                                    let Some(database) =
+                                        this.database_name(connection_index, database_index)
+                                    else {
+                                        return;
+                                    };
+                                    this.open_redis_tools(
+                                        connection_index,
+                                        database_index,
+                                        database,
+                                        super::redis_tools::RedisToolsSection::Keys,
+                                        None,
+                                        cx,
+                                    );
+                                }),
+                            ))
+                            .child(self.toolbar_item(
+                                "obj-key-ttl",
+                                "icons/gear.svg",
+                                t!("redis.tools.key_apply_ttl").to_string(),
+                                category == Category::Tables && open_enabled,
+                                cx.listener(move |this, _event, _window, cx| {
+                                    let Some((connection_index, database_index, name, _)) =
+                                        object_selection(&pane_for_ttl, cx)
+                                    else {
+                                        return;
+                                    };
+                                    let Some(database) =
+                                        this.database_name(connection_index, database_index)
+                                    else {
+                                        return;
+                                    };
+                                    this.open_redis_tools(
+                                        connection_index,
+                                        database_index,
+                                        database,
+                                        super::redis_tools::RedisToolsSection::Keys,
+                                        Some(name),
+                                        cx,
+                                    );
+                                }),
+                            ))
+                            .child(self.toolbar_item(
+                                "obj-redis-tools",
+                                "icons/redis.svg",
+                                t!("redis.tools.title").to_string(),
+                                category == Category::Tables,
+                                cx.listener(move |this, _event, _window, cx| {
+                                    let (connection_index, database_index) = {
+                                        let pane = pane_for_tools.read(cx);
+                                        (pane.connection_index, pane.database_index)
+                                    };
+                                    let Some(database) =
+                                        this.database_name(connection_index, database_index)
+                                    else {
+                                        return;
+                                    };
+                                    this.open_redis_tools(
+                                        connection_index,
+                                        database_index,
+                                        database,
+                                        super::redis_tools::RedisToolsSection::PubSub,
+                                        None,
+                                        cx,
+                                    );
+                                }),
+                            ))
+                    })
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(
                         "obj-export",
@@ -391,7 +474,19 @@ impl AppView {
                             };
                             this.reload_tables(connection_index, database_index, cx);
                         }),
-                    )),
+                    ))
+                    .when(key_value, |bar| {
+                        bar.child(toolbar_separator(theme)).child(self.toolbar_item(
+                            "obj-load-more",
+                            "icons/next.svg",
+                            t!("redis.tools.load_more").to_string(),
+                            category == Category::Tables
+                                && self.has_more_objects(connection_index, database_index),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.load_more_objects(connection_index, database_index, cx);
+                            }),
+                        ))
+                    }),
             )
             .child(self.render_object_view_controls(category, cx))
     }
