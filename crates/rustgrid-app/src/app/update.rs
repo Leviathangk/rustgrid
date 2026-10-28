@@ -12,6 +12,7 @@
 //! layouts — see [`configure_macos_layout`].
 
 use super::*;
+use gpui_kit::base::SelectableText;
 use std::io::Read as _;
 use std::time::Duration;
 
@@ -619,63 +620,65 @@ impl AppView {
             return None;
         }
         let mut lines = div().flex().flex_col().gap_2().w_full();
-        for note in notes {
-            lines = lines.child(match note {
-                changelog::NoteLine::Version { version, date } => div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme.text))
-                            .child(version),
-                    )
-                    .when_some(date, |row, date| {
-                        row.child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(theme.text_muted))
-                                .child(date),
-                        )
-                    })
-                    .into_any_element(),
-                changelog::NoteLine::Group(group) => div()
-                    .mt_1()
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(theme.brand))
-                    .child(group)
-                    .into_any_element(),
-                changelog::NoteLine::Bullet(item) => div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .w_full()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text_muted))
-                            .child("•"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme.text))
-                            .child(item),
-                    )
-                    .into_any_element(),
-                changelog::NoteLine::Text(text) => div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme.text))
-                    .child(text)
-                    .into_any_element(),
-            });
+        // The button's copy text is the whole section; a drag can still select only what it covers.
+        let full_text = notes
+            .iter()
+            .map(|note| match note {
+                changelog::NoteLine::Version { version, date } => match date {
+                    Some(date) => format!("{version}  {date}"),
+                    None => version.clone(),
+                },
+                changelog::NoteLine::Group(group) => group.clone(),
+                changelog::NoteLine::Bullet(item) => format!("• {item}"),
+                changelog::NoteLine::Text(text) => text.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (order, note) in notes.into_iter().enumerate() {
+            let order = order as u64;
+            // Each line is its own selection participant with a document order, so a drag can
+            // cross lines and Ctrl+C copies the whole selected range in reading order.
+            let (text, size, weight, color, spaced) = match note {
+                changelog::NoteLine::Version { version, date } => (
+                    match date {
+                        Some(date) => format!("{version}  {date}"),
+                        None => version,
+                    },
+                    13.0,
+                    FontWeight::SEMIBOLD,
+                    theme.text,
+                    false,
+                ),
+                changelog::NoteLine::Group(group) => {
+                    (group, 12.0, FontWeight::MEDIUM, theme.brand, true)
+                }
+                changelog::NoteLine::Bullet(item) => (
+                    format!("• {item}"),
+                    12.0,
+                    FontWeight::NORMAL,
+                    theme.text,
+                    false,
+                ),
+                changelog::NoteLine::Text(text) => {
+                    (text, 12.0, FontWeight::NORMAL, theme.text, false)
+                }
+            };
+            let mut line = div()
+                .w_full()
+                .text_size(px(size))
+                .font_weight(weight)
+                .text_color(rgb(color))
+                .cursor_text();
+            if spaced {
+                line = line.mt_1();
+            }
+            lines = lines.child(
+                line.child(
+                    SelectableText::new(("about-changelog-line", order), text)
+                        .document_order(order)
+                        .selection_color(rgba((theme.grid_selection_bg << 8) | 0x59).into()),
+                ),
+            );
         }
         Some(
             div()
@@ -687,10 +690,27 @@ impl AppView {
                 .w_full()
                 .child(
                     div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(theme.text_muted))
-                        .child(t!("about.changelog").to_string()),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .w_full()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(theme.text_muted))
+                                .child(t!("about.changelog").to_string()),
+                        )
+                        .child(ui::popup_button(
+                            "about-changelog-copy",
+                            t!("about.copy_changelog").to_string(),
+                            false,
+                            theme,
+                            move |_event, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(full_text.clone()));
+                            },
+                        )),
                 )
                 .child(
                     div()

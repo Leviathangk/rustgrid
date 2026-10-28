@@ -6,6 +6,7 @@
 
 use super::objects::object_display;
 use super::*;
+use gpui_kit::base::SelectableText;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::dialog::{DialogButtonProps, DialogEntrance};
@@ -126,7 +127,11 @@ impl AppView {
                                     .flex_1()
                                     .min_w(px(0.0))
                                     .text_size(px(12.0))
-                                    .child(message.clone()),
+                                    .cursor_text()
+                                    // A SelectableText participates in the dialog's window
+                                    // selection: the message can be dragged over and copied, not
+                                    // only sent to the clipboard through 复制.
+                                    .child(SelectableText::new("error-message", message.clone())),
                             ),
                     )
                 })

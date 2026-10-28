@@ -631,7 +631,7 @@ pub fn delete_row_change(
 /// The values are the edit strings the connection methods would bind, so the preview shows the
 /// same data the run writes. `None` renders as `NULL`; string values are quoted per `dialect`.
 pub fn render_change_sql(table: &str, change: &RowChange, dialect: DriverDialect) -> String {
-    let target = dialect.quote_identifier(table);
+    let target = dialect.quote_table_name(table);
     match change.kind {
         RowChangeKind::Insert => {
             let columns = change
@@ -1102,6 +1102,11 @@ mod tests {
         assert_eq!(
             render_change_sql("users", &delete, DriverDialect::SqlServer),
             "DELETE FROM [users] WHERE [id] IS NULL;"
+        );
+        // A schema-qualified name is quoted one part at a time, so the dot stays a separator.
+        assert_eq!(
+            render_change_sql("public.users", &delete, DriverDialect::Postgres),
+            "DELETE FROM \"public\".\"users\" WHERE \"id\" IS NULL;"
         );
     }
 }

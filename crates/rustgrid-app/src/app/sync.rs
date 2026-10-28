@@ -3,7 +3,10 @@
 //!
 //! The page follows Navicat's 数据传输/同步 workbench: a source → target topology bar, one
 //! segmented control for the four modes (全部 / 仅结构 / 仅数据 / 全量传输), a table list with a
-//! per-table status pill, and an inspector with 结构比对 / 数据比对 / SQL 预览 tabs. Comparisons run
+//! per-table status pill, and an inspector with 结构比对 / 数据比对 / SQL 预览 tabs. Schema-aware
+//! engines (PostgreSQL, SQL Server, Oracle) also pick a source and target schema, so a cross-engine
+//! transfer maps `public.users` onto the target's `dbo.users` instead of a literal `public` schema.
+//! Comparisons run
 //! through [`rustgrid_core::Connection`] (so every driver works) and the engine-agnostic diff lives
 //! in [`rustgrid_core::sync`]. Applying a plan reuses the drivers' own write paths
 //! (`save_table_schema`, `insert_rows`, `update_rows`, `delete_rows`), never raw SQL written here,
@@ -26,8 +29,9 @@ use rustgrid_core::{
     update_row_change, usable_key_columns,
 };
 
-use super::backup::{format_hms, now_timestamp, render_log_lines};
+use super::backup::{format_hms, now_timestamp};
 use super::*;
+use gpui_kit::base::SelectableText;
 
 /// Width of the table list column.
 const SYNC_LIST_WIDTH: f32 = 296.0;
@@ -368,8 +372,16 @@ impl SyncTable {
 pub(super) struct SyncState {
     pub source_connection: Option<usize>,
     pub source_database: String,
+    /// The selected source schema (`public`, `dbo`, ...). Empty for a schema-less engine.
+    pub source_schema: String,
     pub target_connection: Option<usize>,
     pub target_database: String,
+    /// The selected target schema. Empty for a schema-less engine.
+    pub target_schema: String,
+    /// The schemas the source/target connection offers for the selected database, as returned by
+    /// `list_schemas` (or derived from the table list when the driver does not report them).
+    pub source_schemas: Vec<String>,
+    pub target_schemas: Vec<String>,
     pub mode: SyncMode,
     pub tables: Vec<SyncTable>,
     pub selected: Option<usize>,
@@ -400,8 +412,10 @@ pub(super) struct SyncState {
     pub schema_changes_scroll: ScrollHandle,
     pub source_combo: Option<Entity<ComboBox>>,
     pub source_database_combo: Option<Entity<ComboBox>>,
+    pub source_schema_combo: Option<Entity<ComboBox>>,
     pub target_combo: Option<Entity<ComboBox>>,
     pub target_database_combo: Option<Entity<ComboBox>>,
+    pub target_schema_combo: Option<Entity<ComboBox>>,
     pub search_input: Entity<TextInput>,
     /// The 传输 configurations list's search text and its field.
     pub transfer_search: String,
@@ -488,8 +502,12 @@ impl SyncState {
         Self {
             source_connection: None,
             source_database: String::new(),
+            source_schema: String::new(),
             target_connection: None,
             target_database: String::new(),
+            target_schema: String::new(),
+            source_schemas: Vec::new(),
+            target_schemas: Vec::new(),
             mode: SyncMode::All,
             tables: Vec::new(),
             selected: None,
@@ -518,8 +536,10 @@ impl SyncState {
             schema_changes_scroll: ScrollHandle::new(),
             source_combo: None,
             source_database_combo: None,
+            source_schema_combo: None,
             target_combo: None,
             target_database_combo: None,
+            target_schema_combo: None,
             search_input,
             transfer_search: String::new(),
             transfer_search_input,
@@ -664,6 +684,21 @@ impl AppView {
             });
             self.sync.source_database_combo = Some(combo);
         }
+        if self.sync.source_schema_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(theme, Vec::new(), String::new(), 200.0, cx).on_select(Rc::new(
+                    move |value, _window, cx| {
+                        let _ =
+                            weak.update(cx, |app, cx| app.sync_source_schema_selected(value, cx));
+                    },
+                ))
+            });
+            combo.update(cx, |combo, cx| {
+                combo.set_icon("icons/layers.svg", theme.icon_database, cx);
+            });
+            self.sync.source_schema_combo = Some(combo);
+        }
         if self.sync.target_combo.is_none() {
             let weak = cx.weak_entity();
             let combo = cx.new(|cx| {
@@ -692,6 +727,21 @@ impl AppView {
                 combo.set_icon("icons/database.svg", theme.icon_database, cx);
             });
             self.sync.target_database_combo = Some(combo);
+        }
+        if self.sync.target_schema_combo.is_none() {
+            let weak = cx.weak_entity();
+            let combo = cx.new(|cx| {
+                ComboBox::new(theme, Vec::new(), String::new(), 200.0, cx).on_select(Rc::new(
+                    move |value, _window, cx| {
+                        let _ =
+                            weak.update(cx, |app, cx| app.sync_target_schema_selected(value, cx));
+                    },
+                ))
+            });
+            combo.update(cx, |combo, cx| {
+                combo.set_icon("icons/layers.svg", theme.icon_database, cx);
+            });
+            self.sync.target_schema_combo = Some(combo);
         }
     }
 
@@ -725,6 +775,42 @@ impl AppView {
             .into_iter()
             .map(|(value, label)| ComboOption::new(value, label))
             .collect();
+        let mut source_schemas: Vec<ComboOption> = self
+            .sync
+            .source_schemas
+            .iter()
+            .cloned()
+            .map(|schema| ComboOption::new(schema.clone(), schema))
+            .collect();
+        let mut target_schemas: Vec<ComboOption> = self
+            .sync
+            .target_schemas
+            .iter()
+            .cloned()
+            .map(|schema| ComboOption::new(schema.clone(), schema))
+            .collect();
+        // An empty database still has an engine default schema; keep it in the list so the
+        // trigger names the schema the run will write into.
+        if !self.sync.source_schema.is_empty()
+            && !source_schemas
+                .iter()
+                .any(|option| option.value.eq_ignore_ascii_case(&self.sync.source_schema))
+        {
+            source_schemas.push(ComboOption::new(
+                self.sync.source_schema.clone(),
+                self.sync.source_schema.clone(),
+            ));
+        }
+        if !self.sync.target_schema.is_empty()
+            && !target_schemas
+                .iter()
+                .any(|option| option.value.eq_ignore_ascii_case(&self.sync.target_schema))
+        {
+            target_schemas.push(ComboOption::new(
+                self.sync.target_schema.clone(),
+                self.sync.target_schema.clone(),
+            ));
+        }
         // A connection's database list arrives after it connects; pick the first one so the page
         // starts comparing without another click.
         let mut picked = false;
@@ -756,6 +842,7 @@ impl AppView {
             .unwrap_or_default();
         let placeholder = t!("sync.select_connection").to_string();
         let database_placeholder = t!("database.name").to_string();
+        let schema_placeholder = t!("sync.schema").to_string();
         let (source_icon, source_icon_color) = self.sync_engine_icon(self.sync.source_connection);
         let (target_icon, target_icon_color) = self.sync_engine_icon(self.sync.target_connection);
         if let Some(combo) = self.sync.source_combo.clone() {
@@ -788,6 +875,24 @@ impl AppView {
                 combo.set_selected(self.sync.target_database.clone(), cx);
                 combo.set_placeholder(database_placeholder, cx);
                 combo.set_enabled(self.sync.target_connection.is_some(), cx);
+            });
+        }
+        if let Some(combo) = self.sync.source_schema_combo.clone() {
+            let enabled = self.sync.source_connection.is_some() && !source_schemas.is_empty();
+            combo.update(cx, |combo, cx| {
+                combo.set_options(source_schemas, cx);
+                combo.set_selected(self.sync.source_schema.clone(), cx);
+                combo.set_placeholder(schema_placeholder.clone(), cx);
+                combo.set_enabled(enabled, cx);
+            });
+        }
+        if let Some(combo) = self.sync.target_schema_combo.clone() {
+            let enabled = self.sync.target_connection.is_some() && !target_schemas.is_empty();
+            combo.update(cx, |combo, cx| {
+                combo.set_options(target_schemas, cx);
+                combo.set_selected(self.sync.target_schema.clone(), cx);
+                combo.set_placeholder(schema_placeholder, cx);
+                combo.set_enabled(enabled, cx);
             });
         }
         // A configuration opened before its connections were open only becomes comparable once
@@ -852,6 +957,8 @@ impl AppView {
         self.sync.source_database = index
             .and_then(|index| self.first_database_name(index))
             .unwrap_or_default();
+        self.sync.source_schema.clear();
+        self.sync.source_schemas.clear();
         self.sync.config_saved = false;
         if let Some(index) = index
             && !matches!(
@@ -871,6 +978,8 @@ impl AppView {
         self.sync.target_database = index
             .and_then(|index| self.first_database_name(index))
             .unwrap_or_default();
+        self.sync.target_schema.clear();
+        self.sync.target_schemas.clear();
         self.sync.config_saved = false;
         if let Some(index) = index
             && !matches!(
@@ -890,6 +999,8 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.sync.source_database = value.to_string();
+        self.sync.source_schema.clear();
+        self.sync.source_schemas.clear();
         self.sync.config_saved = false;
         self.sync_refresh(cx);
         cx.notify();
@@ -901,6 +1012,28 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.sync.target_database = value.to_string();
+        self.sync.target_schema.clear();
+        self.sync.target_schemas.clear();
+        self.sync.config_saved = false;
+        self.sync_refresh(cx);
+        cx.notify();
+    }
+
+    pub(super) fn sync_source_schema_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        if self.sync.source_schema == value {
+            return;
+        }
+        self.sync.source_schema = value.to_string();
+        self.sync.config_saved = false;
+        self.sync_refresh(cx);
+        cx.notify();
+    }
+
+    pub(super) fn sync_target_schema_selected(&mut self, value: &str, cx: &mut Context<'_, Self>) {
+        if self.sync.target_schema == value {
+            return;
+        }
+        self.sync.target_schema = value.to_string();
         self.sync.config_saved = false;
         self.sync_refresh(cx);
         cx.notify();
@@ -915,6 +1048,24 @@ impl AppView {
                 self.driver_dialect(source) == self.driver_dialect(target)
             }
             _ => true,
+        }
+    }
+
+    /// The schema a schema-aware connection defaults to for a fresh scope. PostgreSQL uses
+    /// `public`, SQL Server `dbo` and Oracle the login's own schema; other engines have none.
+    fn sync_preferred_schema(&self, connection: usize) -> String {
+        if !self.driver_supports(connection, DriverCapability::Schemas) {
+            return String::new();
+        }
+        match self.driver_dialect(connection) {
+            DriverDialect::Postgres => "public".to_string(),
+            DriverDialect::SqlServer => "dbo".to_string(),
+            DriverDialect::Oracle => self
+                .connections
+                .get(connection)
+                .map(|node| node.profile.username.clone())
+                .unwrap_or_default(),
+            _ => String::new(),
         }
     }
 
@@ -969,18 +1120,16 @@ impl AppView {
                 return SortKey::Empty;
             };
             match sort.column {
-                1 => {
-                    SortKey::text(&self.transfer_scope_label(
-                        &config.source_connection_id,
-                        &config.source_database,
-                    ))
-                }
-                2 => {
-                    SortKey::text(&self.transfer_scope_label(
-                        &config.target_connection_id,
-                        &config.target_database,
-                    ))
-                }
+                1 => SortKey::text(&self.transfer_scope_label(
+                    &config.source_connection_id,
+                    &config.source_database,
+                    &config.source_schema,
+                )),
+                2 => SortKey::text(&self.transfer_scope_label(
+                    &config.target_connection_id,
+                    &config.target_database,
+                    &config.target_schema,
+                )),
                 3 => SortKey::text(&sync_mode_label(SyncMode::from_saved(config.mode))),
                 _ => SortKey::text(&config.name),
             }
@@ -988,8 +1137,8 @@ impl AppView {
         indices
     }
 
-    /// `connection · database` for a saved scope, or a muted placeholder when unset.
-    fn transfer_scope_label(&self, connection_id: &str, database: &str) -> String {
+    /// `connection · database · schema` for a saved scope, or a muted placeholder when unset.
+    fn transfer_scope_label(&self, connection_id: &str, database: &str, schema: &str) -> String {
         if connection_id.is_empty() && database.is_empty() {
             return String::new();
         }
@@ -999,11 +1148,14 @@ impl AppView {
             .find(|node| node.profile.id == connection_id)
             .map(|node| node.profile.name.clone())
             .unwrap_or_else(|| connection_id.to_string());
-        if database.is_empty() {
-            connection
-        } else {
-            format!("{connection} · {database}")
+        let mut label = connection;
+        for part in [database, schema] {
+            if !part.is_empty() {
+                label.push_str(" · ");
+                label.push_str(part);
+            }
         }
+        label
     }
 
     pub(super) fn transfer_key(&self, index: usize) -> Option<String> {
@@ -1104,6 +1256,11 @@ impl AppView {
         } else {
             self.default_query_database(source, cx).unwrap_or_default()
         };
+        // Start in the schema the user is already browsing, when there is one; the comparison
+        // falls back to the engine default (`public` / `dbo`) otherwise.
+        let source_schema = self
+            .default_query_schema(cx, source, Some(source_database.as_str()))
+            .unwrap_or_default();
         // Reset the page for the new configuration.
         self.sync.config_name = String::new();
         self.sync.config_saved = false;
@@ -1114,8 +1271,12 @@ impl AppView {
         self.sync.existing_only = false;
         self.sync.source_connection = Some(source);
         self.sync.source_database = source_database;
+        self.sync.source_schema = source_schema;
+        self.sync.source_schemas.clear();
         self.sync.target_connection = None;
         self.sync.target_database = String::new();
+        self.sync.target_schema.clear();
+        self.sync.target_schemas.clear();
         self.reset_sync_run(cx);
         if !matches!(
             self.connections.get(source).map(|node| &node.status),
@@ -1165,9 +1326,15 @@ impl AppView {
         self.sync.source_database = source
             .map(|_| config.source_database.clone())
             .unwrap_or_default();
+        self.sync.source_schema = source
+            .map(|_| config.source_schema.clone())
+            .unwrap_or_default();
         self.sync.target_connection = target;
         self.sync.target_database = target
             .map(|_| config.target_database.clone())
+            .unwrap_or_default();
+        self.sync.target_schema = target
+            .map(|_| config.target_schema.clone())
             .unwrap_or_default();
         for index in [source, target].into_iter().flatten() {
             if !matches!(
@@ -1211,6 +1378,8 @@ impl AppView {
         self.sync.tables.clear();
         self.sync.selected = None;
         self.sync.pending_selected = None;
+        self.sync.source_schemas.clear();
+        self.sync.target_schemas.clear();
         self.sync.sub_tab = self.sync.mode.default_sub_tab();
         self.sync.data_filter = SyncDataFilter::All;
         self.sync.search.clear();
@@ -1265,12 +1434,14 @@ impl AppView {
                 .map(|node| node.profile.id.clone())
                 .unwrap_or_default(),
             source_database: self.sync.source_database.clone(),
+            source_schema: self.sync.source_schema.clone(),
             target_connection_id: self
                 .connections
                 .get(target)
                 .map(|node| node.profile.id.clone())
                 .unwrap_or_default(),
             target_database: self.sync.target_database.clone(),
+            target_schema: self.sync.target_schema.clone(),
             mode: self.sync.mode.to_saved(),
             include_delete: self.sync.include_delete,
             existing_only: self.sync.existing_only,
@@ -1546,6 +1717,12 @@ impl AppView {
         self.sync.compare_total = 0;
         let source_database = self.sync.source_database.clone();
         let target_database = self.sync.target_database.clone();
+        let supports_source_schemas = self.driver_supports(source_index, DriverCapability::Schemas);
+        let supports_target_schemas = self.driver_supports(target_index, DriverCapability::Schemas);
+        let source_schema = self.sync.source_schema.clone();
+        let target_schema = self.sync.target_schema.clone();
+        let source_default_schema = self.sync_preferred_schema(source_index);
+        let target_default_schema = self.sync_preferred_schema(target_index);
         let mode = self.sync.mode;
         let same_engine = self.sync_same_engine();
         let source_dialect = self.driver_dialect(source_index);
@@ -1576,14 +1753,51 @@ impl AppView {
                 list_tables(runtime.clone(), target.clone(), target_database.clone())
                     .await
                     .unwrap_or_default();
+            // Schema-aware engines scope a sync to one schema. Ask the driver for the database's
+            // real schema list (so an empty schema is still selectable) and fall back to the
+            // prefixes the table list exposes when it cannot answer.
+            let mut source_schemas = if supports_source_schemas {
+                list_schemas(runtime.clone(), source.clone(), source_database.clone())
+                    .await
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if source_schemas.is_empty() {
+                source_schemas = schema_names(&source_tables);
+            }
+            let mut target_schemas = if supports_target_schemas {
+                list_schemas(runtime.clone(), target.clone(), target_database.clone())
+                    .await
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if target_schemas.is_empty() {
+                target_schemas = schema_names(&target_tables);
+            }
+            let source_schema = choose_schema(
+                &source_schema,
+                &source_schemas,
+                &source_default_schema,
+                supports_source_schemas,
+            );
+            let target_schema = choose_schema(
+                &target_schema,
+                &target_schemas,
+                &target_default_schema,
+                supports_target_schemas,
+            );
             let target_names: Vec<String> = target_tables
                 .into_iter()
                 .filter(|table| matches!(table.kind, ObjectKind::Table))
+                .filter(|table| in_schema(&table.name, &target_schema))
                 .map(|table| table.name)
                 .collect();
             let names: Vec<String> = source_tables
                 .into_iter()
                 .filter(|table| matches!(table.kind, ObjectKind::Table))
+                .filter(|table| in_schema(&table.name, &source_schema))
                 .map(|table| table.name)
                 .collect();
             let total = names.len();
@@ -1591,15 +1805,21 @@ impl AppView {
                 if generation != app.sync.generation {
                     return;
                 }
+                app.sync.source_schemas = source_schemas;
+                app.sync.target_schemas = target_schemas;
+                app.sync.source_schema = source_schema.clone();
+                app.sync.target_schema = target_schema.clone();
                 app.sync.tables = names
                     .iter()
                     .map(|name| {
-                        let resolved = resolve_target_name(name, &target_names, target_dialect);
-                        let target_name = resolved
-                            .clone()
-                            .unwrap_or_else(|| map_table_name(name, target_dialect));
-                        let mut table =
-                            SyncTable::new(name.clone(), target_name, resolved.is_some());
+                        let (target_name, in_target) = target_table_name(
+                            name,
+                            &target_names,
+                            target_dialect,
+                            &target_schema,
+                            supports_target_schemas,
+                        );
+                        let mut table = SyncTable::new(name.clone(), target_name, in_target);
                         if let Some(saved) = pending_tables.as_ref() {
                             table.checked = saved.contains(name);
                         }
@@ -1611,6 +1831,9 @@ impl AppView {
                     .as_ref()
                     .and_then(|name| names.iter().position(|candidate| candidate == name))
                     .or_else(|| (!names.is_empty()).then_some(0));
+                // Push the schema list into the combos now: the transfer window may repaint
+                // without the main window (which normally syncs them) rendering first.
+                app.sync_sync_combos(cx);
                 cx.notify();
             });
 
@@ -1621,9 +1844,13 @@ impl AppView {
                 if !still_current {
                     return;
                 }
-                let resolved = resolve_target_name(name, &target_names, target_dialect);
-                let in_target = resolved.is_some();
-                let target_name = resolved.unwrap_or_else(|| map_table_name(name, target_dialect));
+                let (target_name, in_target) = target_table_name(
+                    name,
+                    &target_names,
+                    target_dialect,
+                    &target_schema,
+                    supports_target_schemas,
+                );
                 let compared = compare_table(
                     runtime.clone(),
                     source.clone(),
@@ -1888,9 +2115,17 @@ impl AppView {
             return;
         };
         if self.sync.source_database == self.sync.target_database && source_index == target_index {
-            self.sync.error = Some(t!("sync.error.same").to_string());
-            cx.notify();
-            return;
+            // Within one database, syncing two different schemas (e.g. public → archive) is a
+            // real transfer. Only the same database *and* the same schema is a self-sync.
+            let same_schema = self
+                .sync
+                .source_schema
+                .eq_ignore_ascii_case(&self.sync.target_schema);
+            if same_schema {
+                self.sync.error = Some(t!("sync.error.same").to_string());
+                cx.notify();
+                return;
+            }
         }
         let (Some(source), Some(target)) = (
             self.connection_arc(source_index),
@@ -2078,7 +2313,7 @@ impl AppView {
             .source_connection
             .map(|index| self.driver_dialect(index))
             .unwrap_or_default();
-        let target_name = map_table_name(&table.name, dialect);
+        let target_name = table.target_name.clone();
         let connection = self
             .sync
             .target_connection
@@ -2133,12 +2368,12 @@ impl AppView {
                 if mode == SyncMode::Transfer && same_engine {
                     lines.push(format!(
                         "DROP TABLE IF EXISTS {};",
-                        dialect.quote_identifier(&target_name)
+                        dialect.quote_table_name(&target_name)
                     ));
                 } else {
                     lines.push(format!(
                         "DELETE FROM {};",
-                        dialect.quote_identifier(&target_name)
+                        dialect.quote_table_name(&target_name)
                     ));
                 }
                 lines.push(t!("sync.sql.full_copy", table = table.name.clone()).to_string());
@@ -2359,12 +2594,16 @@ impl AppView {
                 continue;
             };
             longest[0] = longest[0].max(ui::approx_text_width(&config.name) + 30.0);
-            longest[1] = longest[1].max(ui::approx_text_width(
-                &self.transfer_scope_label(&config.source_connection_id, &config.source_database),
-            ));
-            longest[2] = longest[2].max(ui::approx_text_width(
-                &self.transfer_scope_label(&config.target_connection_id, &config.target_database),
-            ));
+            longest[1] = longest[1].max(ui::approx_text_width(&self.transfer_scope_label(
+                &config.source_connection_id,
+                &config.source_database,
+                &config.source_schema,
+            )));
+            longest[2] = longest[2].max(ui::approx_text_width(&self.transfer_scope_label(
+                &config.target_connection_id,
+                &config.target_database,
+                &config.target_schema,
+            )));
             longest[3] = longest[3].max(ui::approx_text_width(&sync_mode_label(
                 SyncMode::from_saved(config.mode),
             )));
@@ -2446,10 +2685,16 @@ impl AppView {
         let key = format!("transfer:{}", config.name);
         let selected = self.transfers_selection.contains(&key);
         let name = config.name.clone();
-        let source =
-            self.transfer_scope_label(&config.source_connection_id, &config.source_database);
-        let target =
-            self.transfer_scope_label(&config.target_connection_id, &config.target_database);
+        let source = self.transfer_scope_label(
+            &config.source_connection_id,
+            &config.source_database,
+            &config.source_schema,
+        );
+        let target = self.transfer_scope_label(
+            &config.target_connection_id,
+            &config.target_database,
+            &config.target_schema,
+        );
         let mode = sync_mode_label(SyncMode::from_saved(config.mode));
         let click_key = key.clone();
         let open_key = key.clone();
@@ -2815,22 +3060,34 @@ impl AppView {
             .into_any_element()
     }
 
-    /// `connection · database` for one side of the current scope, for the confirmation's summary.
+    /// `connection · database · schema` for one side of the current scope, for the confirmation's
+    /// summary.
     fn sync_scope_label(&self, source: bool) -> String {
-        let (connection, database) = if source {
-            (self.sync.source_connection, &self.sync.source_database)
+        let (connection, database, schema) = if source {
+            (
+                self.sync.source_connection,
+                &self.sync.source_database,
+                &self.sync.source_schema,
+            )
         } else {
-            (self.sync.target_connection, &self.sync.target_database)
+            (
+                self.sync.target_connection,
+                &self.sync.target_database,
+                &self.sync.target_schema,
+            )
         };
         let name = connection
             .and_then(|index| self.connections.get(index))
             .map(|node| node.profile.name.clone())
             .unwrap_or_else(|| t!("sync.select_connection").to_string());
-        if database.is_empty() {
-            name
-        } else {
-            format!("{name} · {database}")
+        let mut label = name;
+        for part in [database, schema] {
+            if !part.is_empty() {
+                label.push_str(" · ");
+                label.push_str(part);
+            }
         }
+        label
     }
 
     /// The in-window confirmation shown when the window is closed with unsaved configuration
@@ -3271,14 +3528,26 @@ impl AppView {
             })
     }
 
-    /// One side of the source → target picker: a label, the connection dropdown and the database
-    /// dropdown in a single bordered group.
+    /// One side of the source → target picker: a label, the connection dropdown, the database
+    /// dropdown and (on a schema-aware engine) the schema dropdown in a single bordered group.
     fn sync_endpoint_group(&self, source: bool, theme: Theme) -> Div {
-        let (connection, database) = if source {
-            (&self.sync.source_combo, &self.sync.source_database_combo)
+        let (connection, database, schema, connection_index) = if source {
+            (
+                &self.sync.source_combo,
+                &self.sync.source_database_combo,
+                &self.sync.source_schema_combo,
+                self.sync.source_connection,
+            )
         } else {
-            (&self.sync.target_combo, &self.sync.target_database_combo)
+            (
+                &self.sync.target_combo,
+                &self.sync.target_database_combo,
+                &self.sync.target_schema_combo,
+                self.sync.target_connection,
+            )
         };
+        let supports_schemas = connection_index
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::Schemas));
         let side = if source {
             t!("sync.config.source").to_string()
         } else {
@@ -3310,7 +3579,7 @@ impl AppView {
                     .border_color(rgb(theme.border))
                     .bg(rgb(theme.editor_bg))
                     .child(
-                        div().w(px(150.0)).h(px(24.0)).child(
+                        div().w(px(130.0)).h(px(24.0)).child(
                             connection
                                 .clone()
                                 .map(|combo| combo.into_any_element())
@@ -3318,13 +3587,23 @@ impl AppView {
                         ),
                     )
                     .child(
-                        div().w(px(130.0)).h(px(24.0)).child(
+                        div().w(px(105.0)).h(px(24.0)).child(
                             database
                                 .clone()
                                 .map(|combo| combo.into_any_element())
                                 .unwrap_or_else(|| div().into_any_element()),
                         ),
-                    ),
+                    )
+                    .when(supports_schemas, |group| {
+                        group.child(
+                            div().w(px(90.0)).h(px(24.0)).child(
+                                schema
+                                    .clone()
+                                    .map(|combo| combo.into_any_element())
+                                    .unwrap_or_else(|| div().into_any_element()),
+                            ),
+                        )
+                    }),
             )
     }
 
@@ -4336,13 +4615,90 @@ impl AppView {
                     .flex_1()
                     .min_h(px(0.0))
                     .mt_1()
-                    .child(render_log_lines(
-                        &self.sync.log,
-                        &self.sync.log_scroll,
-                        &self.sync.log_handle,
-                        theme,
+                    .child(self.render_sync_log_lines(theme)),
+            )
+    }
+
+    /// The log lines as one plain, selectable text run. A single run (instead of one selectable
+    /// element per line) keeps a long log cheap to lay out, lets a drag select across lines, and
+    /// copies through the window selection (Ctrl+C) as well as the 复制日志 button.
+    fn render_sync_log_lines(&self, theme: Theme) -> Div {
+        let text = self.sync.log.join("\n");
+        let mut panel = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .mx_3()
+            .mb_1()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .overflow_hidden();
+        if !text.is_empty() {
+            let copy_text = text.clone();
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .items_center()
+                    .px_1()
+                    .pt_1()
+                    .child(ui::popup_button(
+                        "sync-log-copy",
+                        t!("sqlfile.copy_log").to_string(),
                         false,
+                        theme,
+                        move |_event, _window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                        },
                     )),
+            );
+        }
+        let body: AnyElement = if self.sync.log.is_empty() {
+            div()
+                .p_2()
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text_muted))
+                .child("--")
+                .into_any_element()
+        } else {
+            div()
+                .p_2()
+                .w_full()
+                .font_family("Consolas")
+                .text_size(px(12.0))
+                .text_color(rgb(theme.text))
+                .cursor_text()
+                .child(
+                    SelectableText::with_handle(
+                        "sync-log-text",
+                        self.sync.log_handle.clone(),
+                        text,
+                    )
+                    .selection_color(rgba((theme.grid_selection_bg << 8) | 0x59).into()),
+                )
+                .into_any_element()
+        };
+        panel
+            .child(
+                div()
+                    .id("sync-log-lines")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.sync.log_scroll)
+                    .child(body),
+            )
+            .child(
+                Scrollbar::vertical(&self.sync.log_scroll)
+                    .mode(ScrollbarMode::Always)
+                    .id("sync-log-scrollbar"),
             )
     }
 
@@ -4521,6 +4877,22 @@ async fn list_tables(
         .await
     {
         Ok(Ok(tables)) => Ok(tables),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// List a database's schemas through the runtime.
+async fn list_schemas(
+    runtime: Arc<Runtime>,
+    connection: Arc<dyn Connection>,
+    database: String,
+) -> Result<Vec<String>, String> {
+    match runtime
+        .spawn(async move { connection.list_schemas(&database).await })
+        .await
+    {
+        Ok(Ok(schemas)) => Ok(schemas),
         Ok(Err(error)) => Err(error.to_string()),
         Err(error) => Err(error.to_string()),
     }
@@ -4770,35 +5142,97 @@ fn is_oracle_lob(data_type: &str) -> bool {
     )
 }
 
-/// Find the target's own name for a source table. Schema-aware targets list `public.users` /
-/// `dbo.users`, while a cross-engine source may only say `users`; match the bare name when the
-/// exact name is absent, but only when the match is unambiguous.
-fn resolve_target_name(
+/// The schema part of a possibly qualified `schema.table` name.
+fn schema_of(name: &str) -> Option<&str> {
+    name.rsplit_once('.').map(|(schema, _)| schema)
+}
+
+/// The bare table name of a possibly qualified `schema.table` name.
+fn bare_name(name: &str) -> &str {
+    name.rsplit_once('.')
+        .map(|(_, table)| table)
+        .unwrap_or(name)
+}
+
+/// Whether `name` belongs to `schema`. An empty schema (a schema-less engine) matches everything.
+fn in_schema(name: &str, schema: &str) -> bool {
+    schema.is_empty() || schema_of(name).is_some_and(|part| part.eq_ignore_ascii_case(schema))
+}
+
+/// The distinct schema prefixes the table list exposes, sorted case-insensitively.
+fn schema_names(tables: &[rustgrid_core::TableInfo]) -> Vec<String> {
+    let mut names: Vec<String> = tables
+        .iter()
+        .filter_map(|table| schema_of(&table.name).map(|schema| schema.to_string()))
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names
+}
+
+/// Keep an existing schema when it is still offered, otherwise prefer the engine's default and
+/// finally the first listed schema. A schema-aware engine with an empty list keeps the default so
+/// an empty target database still maps into `dbo`/`public`.
+fn choose_schema(previous: &str, available: &[String], preferred: &str, supported: bool) -> String {
+    if !supported {
+        return String::new();
+    }
+    if let Some(found) = available
+        .iter()
+        .find(|schema| schema.eq_ignore_ascii_case(previous))
+    {
+        return found.clone();
+    }
+    if let Some(found) = available
+        .iter()
+        .find(|schema| schema.eq_ignore_ascii_case(preferred))
+    {
+        return found.clone();
+    }
+    available
+        .first()
+        .cloned()
+        .unwrap_or_else(|| preferred.to_string())
+}
+
+/// The target's name for one source table, plus whether it already exists in the selected target
+/// schema. A schema-aware target always receives the selected target schema (so PostgreSQL's
+/// `public.users` becomes SQL Server's `dbo.users` rather than a literal `public` schema), while a
+/// schema-less target receives the bare name.
+fn target_table_name(
     source: &str,
     target_names: &[String],
     target_dialect: rustgrid_core::DriverDialect,
-) -> Option<String> {
-    if let Some(exact) = target_names
+    target_schema: &str,
+    target_has_schemas: bool,
+) -> (String, bool) {
+    let bare = bare_name(source);
+    let existing = target_names
         .iter()
         .find(|candidate| candidate.eq_ignore_ascii_case(source))
-    {
-        return Some(exact.clone());
+        .or_else(|| {
+            target_names
+                .iter()
+                .find(|candidate| bare_name(candidate).eq_ignore_ascii_case(bare))
+        });
+    match existing {
+        Some(found) => {
+            let name = if target_has_schemas && !target_schema.is_empty() {
+                format!("{target_schema}.{}", bare_name(found))
+            } else {
+                found.clone()
+            };
+            (name, true)
+        }
+        None => {
+            let name = if target_has_schemas && !target_schema.is_empty() {
+                format!("{target_schema}.{bare}")
+            } else {
+                map_table_name(source, target_dialect)
+            };
+            (name, false)
+        }
     }
-    let bare = source.rsplit('.').next().unwrap_or(source);
-    let mut matches = target_names.iter().filter(|candidate| {
-        candidate
-            .rsplit('.')
-            .next()
-            .is_some_and(|name| name.eq_ignore_ascii_case(bare))
-    });
-    let first = matches.next()?.clone();
-    if matches.next().is_none() {
-        return Some(first);
-    }
-    // Several schemas have a table with this bare name; only an explicit qualified match is
-    // unambiguous, and there was none.
-    let _ = target_dialect;
-    None
 }
 
 /// Whether a merge join over the key's server-side order is safe.
@@ -6009,31 +6443,55 @@ mod tests {
     }
 
     #[test]
-    fn a_source_table_resolves_to_the_targets_own_name() {
+    fn a_source_table_maps_into_the_selected_target_schema() {
+        // PostgreSQL's public schema becomes SQL Server's dbo schema, not a literal `public`.
         assert_eq!(
-            resolve_target_name(
-                "users",
-                &["public.users".to_string()],
-                rustgrid_core::DriverDialect::Postgres
+            target_table_name(
+                "public.users",
+                &[],
+                rustgrid_core::DriverDialect::SqlServer,
+                "dbo",
+                true,
             ),
-            Some("public.users".to_string())
+            ("dbo.users".to_string(), false)
         );
         assert_eq!(
-            resolve_target_name(
+            target_table_name(
+                "public.users",
+                &["dbo.users".to_string()],
+                rustgrid_core::DriverDialect::SqlServer,
+                "dbo",
+                true,
+            ),
+            ("dbo.users".to_string(), true)
+        );
+        // A schema-less target keeps its bare name.
+        assert_eq!(
+            target_table_name(
                 "public.users",
                 &["users".to_string()],
-                rustgrid_core::DriverDialect::Mysql
+                rustgrid_core::DriverDialect::Mysql,
+                "",
+                false,
             ),
-            Some("users".to_string())
+            ("users".to_string(), true)
         );
-        assert_eq!(
-            resolve_target_name(
-                "users",
-                &["a.users".to_string(), "b.users".to_string()],
-                rustgrid_core::DriverDialect::Postgres
-            ),
-            None
-        );
+    }
+
+    #[test]
+    fn schema_selection_keeps_the_previous_value_or_picks_the_engine_default() {
+        let schemas = vec!["archive".to_string(), "dbo".to_string()];
+        assert_eq!(choose_schema("archive", &schemas, "dbo", true), "archive");
+        assert_eq!(choose_schema("missing", &schemas, "dbo", true), "dbo");
+        assert_eq!(choose_schema("", &schemas, "public", true), "archive");
+        // An empty target database still maps into the engine's default schema.
+        assert_eq!(choose_schema("", &[], "dbo", true), "dbo");
+        assert_eq!(choose_schema("dbo", &schemas, "dbo", false), "");
+
+        // Only the selected schema's tables take part in the comparison.
+        assert!(in_schema("public.users", "public"));
+        assert!(!in_schema("public.users", "dbo"));
+        assert!(in_schema("users", ""));
     }
 
     #[test]

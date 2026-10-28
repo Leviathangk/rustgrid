@@ -118,7 +118,7 @@ impl GridView {
                     .child(self.grid_tool_button(
                         "grid-field-filter",
                         "icons/field_filter.svg",
-                        t!("grid.filter").to_string(),
+                        t!("grid.fields").to_string(),
                         self.field_filter_color(),
                         self.state.sql.is_none() && !self.state.all_columns.is_empty(),
                         configured && self.field_filter_open,

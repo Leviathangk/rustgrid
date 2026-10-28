@@ -48,6 +48,16 @@ impl DriverDialect {
         quoted
     }
 
+    /// Quote a possibly schema-qualified table name, one identifier at a time, so
+    /// `public.users` becomes `"public"."users"` rather than a single quoted name containing a
+    /// dot. Used by previews that render table names outside a driver.
+    pub fn quote_table_name(self, name: &str) -> String {
+        name.split('.')
+            .map(|part| self.quote_identifier(part))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     /// Whether `LIMIT`/`OFFSET` + `FETCH` pagination needs an `ORDER BY`: SQL Server and Oracle
     /// reject `OFFSET … FETCH NEXT` without one, while MySQL/SQLite/PostgreSQL page without it.
     pub fn paging_needs_order(self) -> bool {

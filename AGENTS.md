@@ -756,9 +756,10 @@ shadcn chrome described above. Implemented today:
     are mapped, and an absent port falls back to the engine default.
 
 16. Grid field presentation (`app/grid_fields.rs` + `app/options.rs` + `session.rs::GridFieldLayout`):
-    the table grid's toolbar ends with the 字段筛选 item (labelled 筛选, after 导出). It opens a popup
-    panel under the button (not a child window) listing every field with a visibility check box, a
-    search box, the field's comment beside its name, and 重置 / 全选 / 反选; the last visible field
+    the table grid's toolbar ends with the 字段筛选 item (labelled 字段, after 导出, so it is not
+    confused with the WHERE 筛选 button). It opens a popup panel under the button (not a child
+    window) listing every field with a visibility check box, a search box, the field's comment
+    beside its name, and 重置 / 全选 / 反选; the last visible field
     cannot be hidden (the same rule 反选 honors) and a drag on a row's handle re-orders the fields.
     The edits stay on a draft and only 确定 applies them (取消 / click-away discards); the applied
     layout (order + hidden set) is then remembered per connection/database/table in `settings.json`

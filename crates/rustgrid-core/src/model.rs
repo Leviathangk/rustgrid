@@ -818,11 +818,18 @@ pub struct SavedTransfer {
     /// The source `ConnectionProfile::id`.
     pub source_connection_id: String,
     pub source_database: String,
+    /// The source schema for schema-aware engines (`public`, `dbo`, ...); empty for an engine
+    /// without schemas and for configurations saved before schema selection existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_schema: String,
     /// The target `ConnectionProfile::id`. Empty while a new transfer has no target yet.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub target_connection_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub target_database: String,
+    /// The target schema (see [`Self::source_schema`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_schema: String,
     #[serde(default)]
     pub mode: TransferMode,
     #[serde(default = "default_true")]
