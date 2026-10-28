@@ -10,6 +10,27 @@ UI labels are quoted as the app shows them, so this file quotes the English stri
 [`CHANGELOG_zh.md`](CHANGELOG_zh.md) and [`CHANGELOG_ru.md`](CHANGELOG_ru.md) quote the 简体中文 and
 Russian ones.
 
+## [0.1.3] - 2026-10-28
+
+### Added
+
+- MySQL connections gain an optional StarRocks compatibility mode (Advanced → Compatibility mode):
+  browsing, paging and editing work, and unsupported features (Users, Functions, table designer,
+  Backup/Restore) are hidden while it is on.
+- Export Results in the query toolbar exports one or several result sets; several results become
+  worksheets in one `.xlsx` workbook.
+- Exporting a table grid offers all records or the current page's filtered, sorted rows.
+
+### Changed
+
+- With Restore on startup off, connections, databases and groups start collapsed.
+- The backup dialog enables Save only after the name or the selected objects change.
+
+### Fixed
+
+- The filter panel and the applied WHERE clause stay in sync, so the column shown is the one used.
+- MySQL TIMESTAMP columns show the server's time instead of raw bytes.
+
 ## [0.1.2] - 2026-10-26
 
 ### Added
