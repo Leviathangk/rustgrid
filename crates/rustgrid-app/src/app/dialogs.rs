@@ -19,14 +19,6 @@ use gpui_kit::component::dialog::{DialogButtonProps, DialogEntrance};
 /// an instant appearance (or `SlideDown` for the kit's legacy slide).
 pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::Fade;
 
-/// gpui-kit anchors a dialog at 10% of the window height, which leaves short dialogs stranded near
-/// the top. Compute a top margin that centres a dialog of roughly `dialog_height` instead — the
-/// exact height is only known after layout, so callers pass an estimate.
-pub(super) fn centered_margin_top(window: &Window, dialog_height: f32) -> Pixels {
-    let viewport = window.viewport_size().height;
-    ((viewport - px(dialog_height)) * 0.5).max(px(24.0))
-}
-
 /// One-shot guard for a dialog's initial focus.
 ///
 /// `Root` re-invokes a dialog's builder on every frame, so the "focus the first field once" flag
@@ -93,7 +85,7 @@ impl AppView {
 
     fn open_error_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let message = app.update(cx, |app, _| app.error_dialog.clone().unwrap_or_default());
             let copy_message = message.clone();
             let theme = app.read(cx).theme;
@@ -103,7 +95,7 @@ impl AppView {
             dialog
                 .entrance(DIALOG_ENTRANCE)
                 .title(t!("error.title").to_string())
-                .margin_top(centered_margin_top(window, 170.0))
+                .centered()
                 .content(move |content, _window, _cx| {
                     content.child(
                         div()
@@ -189,7 +181,7 @@ impl AppView {
 
     fn open_confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let (title, message, confirm_label) = app.update(cx, |app, _| app.confirm_texts());
             let theme = app.read(cx).theme;
             let on_ok = app.downgrade();
@@ -202,7 +194,7 @@ impl AppView {
             dialog
                 .entrance(DIALOG_ENTRANCE)
                 .title(title)
-                .margin_top(centered_margin_top(window, 180.0))
+                .centered()
                 .content(move |content, _window, _cx| content.child(message.clone()))
                 .footer(
                     div()
@@ -256,7 +248,7 @@ impl AppView {
     /// which rows or result sets to export before a file path is chosen.
     fn open_export_choice_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let theme = app.read(cx).theme;
             let on_ok = app.downgrade();
             let on_cancel = app.downgrade();
@@ -268,7 +260,7 @@ impl AppView {
             dialog
                 .entrance(DIALOG_ENTRANCE)
                 .title(t!("export.confirm_title").to_string())
-                .margin_top(centered_margin_top(window, 230.0))
+                .centered()
                 .content(move |content, _window, cx| {
                     let (message, options, selected, multiple, combo) =
                         content_app.update(cx, |app, _cx| {
@@ -419,7 +411,7 @@ impl AppView {
     /// Opens the "discard unsaved changes?" confirmation.
     fn open_unsaved_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let theme = app.read(cx).theme;
             let on_ok = app.downgrade();
             let on_cancel = app.downgrade();
@@ -429,7 +421,7 @@ impl AppView {
             dialog
                 .entrance(DIALOG_ENTRANCE)
                 .title(t!("unsaved.title").to_string())
-                .margin_top(centered_margin_top(window, 180.0))
+                .centered()
                 .content(|content, _window, _cx| content.child(t!("unsaved.message").to_string()))
                 .footer(
                     div()
@@ -615,7 +607,7 @@ impl AppView {
 
     fn open_password_prompt(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let Some((title, input)) = app.update(cx, |app, _| {
                 app.password_prompt.as_ref().map(|prompt| {
                     let name = app
@@ -643,7 +635,7 @@ impl AppView {
             dialog
                 .entrance(DIALOG_ENTRANCE)
                 .title(title)
-                .margin_top(centered_margin_top(window, 240.0))
+                .centered()
                 .footer(
                     div()
                         .flex()
@@ -746,7 +738,7 @@ impl AppView {
     /// back from `AppView` each frame, so the name field and location picker stay live.
     fn open_save_query_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let (title, footer) = app.update(cx, |app, cx| {
                 (
                     t!("query.save_title").to_string(),
@@ -761,7 +753,7 @@ impl AppView {
                 .entrance(DIALOG_ENTRANCE)
                 .title(title)
                 .w(px(460.0))
-                .margin_top(centered_margin_top(window, 240.0))
+                .centered()
                 .content(move |content, window, cx| {
                     let body = content_app.update(cx, |app, cx| {
                         app.save_query_dialog_body(cx).into_any_element()
@@ -890,7 +882,7 @@ impl AppView {
 
     fn open_create_table_modal(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let (title, footer) = app.update(cx, |app, cx| {
                 (
                     t!("object.new_table").to_string(),
@@ -905,7 +897,7 @@ impl AppView {
                 .entrance(DIALOG_ENTRANCE)
                 .title(title)
                 .w(px(420.0))
-                .margin_top(centered_margin_top(window, 160.0))
+                .centered()
                 .content(move |content, window, cx| {
                     let body = content_app.update(cx, |app, cx| {
                         app.create_table_dialog_body(cx).into_any_element()

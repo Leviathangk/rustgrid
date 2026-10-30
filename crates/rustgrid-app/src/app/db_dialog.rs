@@ -60,7 +60,7 @@ impl AppView {
     /// Opens the SQL Server "New Schema" dialog as a `Root`-managed modal.
     pub(super) fn open_schema_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             // The footer is built once here and is never rebuilt, so anything it reads must not
             // depend on later state. `submitting` is only read per-frame inside `content`.
             let title = app.update(cx, |_, _| t!("database.new_schema").to_string());
@@ -74,7 +74,7 @@ impl AppView {
             dialog
                 .entrance(super::dialogs::DIALOG_ENTRANCE)
                 .title(title)
-                .margin_top(super::dialogs::centered_margin_top(window, 190.0))
+                .centered()
                 .content(move |content, _window, cx| {
                     let body = content_app.update(cx, |app, _cx| {
                         let Some(dialog) = app.schema_dialog.as_ref() else {
