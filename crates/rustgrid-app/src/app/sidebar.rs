@@ -2182,12 +2182,19 @@ impl TreePane {
                 let click_count = event.click_count();
                 let modifiers = event.modifiers();
                 let key = click_key.clone();
-                let _ = app.update(cx, |app, cx| {
-                    app.hit_query(&key, click_count, modifiers, cx);
-                    if app.click_opens(click_count, modifiers) {
-                        app.open_saved_query(file_index, cx);
-                    }
-                    cx.notify();
+                let app = app.clone();
+                // `hit_query` reads the tree's selected row to scope its list. Running it from
+                // inside this row's listener would borrow the tree pane twice (the listener
+                // already holds it), which aborts the app; defer one cycle so the event handler
+                // has returned.
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        app.hit_query(&key, click_count, modifiers, cx);
+                        if app.click_opens(click_count, modifiers) {
+                            app.open_saved_query(file_index, cx);
+                        }
+                        cx.notify();
+                    });
                 });
                 cx.notify();
             }))
@@ -2203,15 +2210,21 @@ impl TreePane {
                     let already = menu_app
                         .upgrade()
                         .is_some_and(|app| app.read(cx).query_selection.contains(&key));
-                    let _ = menu_app.update(cx, |app, cx| {
-                        if !already {
-                            app.hit_query(&key, 1, Modifiers::default(), cx);
-                        }
-                        app.context_menu = Some(ContextMenu {
-                            target: ContextTarget::QueryFile { index: file_index },
-                            position: event.position,
+                    let position = event.position;
+                    let app = menu_app.clone();
+                    // Same deferred scope as the click: `hit_query` must not re-enter the tree
+                    // entity that is dispatching this mouse-down.
+                    cx.defer(move |cx| {
+                        let _ = app.update(cx, |app, cx| {
+                            if !already {
+                                app.hit_query(&key, 1, Modifiers::default(), cx);
+                            }
+                            app.context_menu = Some(ContextMenu {
+                                target: ContextTarget::QueryFile { index: file_index },
+                                position,
+                            });
+                            cx.notify();
                         });
-                        cx.notify();
                     });
                     cx.notify();
                 }),
@@ -2307,15 +2320,20 @@ impl TreePane {
                 let click_count = event.click_count();
                 let modifiers = event.modifiers();
                 let key = click_key.clone();
-                let _ = app.update(cx, |app, cx| {
-                    app.hit_backup(&key, click_count, modifiers, cx);
-                    if app.click_opens(click_count, modifiers) {
-                        match kind {
-                            TreeBackupKind::File => app.open_restore_backup(index, cx),
-                            TreeBackupKind::Config => app.open_backup_config(index, cx),
+                let app = app.clone();
+                // See `render_saved_query`: the hit needs the tree's selected row, so it must run
+                // after this row's listener releases the tree pane.
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        app.hit_backup(&key, click_count, modifiers, cx);
+                        if app.click_opens(click_count, modifiers) {
+                            match kind {
+                                TreeBackupKind::File => app.open_restore_backup(index, cx),
+                                TreeBackupKind::Config => app.open_backup_config(index, cx),
+                            }
                         }
-                    }
-                    cx.notify();
+                        cx.notify();
+                    });
                 });
                 cx.notify();
             }))
@@ -2331,18 +2349,22 @@ impl TreePane {
                     let already = menu_app
                         .upgrade()
                         .is_some_and(|app| app.read(cx).backups_selection.contains(&key));
-                    let _ = menu_app.update(cx, |app, cx| {
-                        if !already {
-                            app.hit_backup(&key, 1, Modifiers::default(), cx);
-                        }
-                        app.context_menu = Some(ContextMenu {
-                            target: match kind {
-                                TreeBackupKind::File => ContextTarget::BackupFile { index },
-                                TreeBackupKind::Config => ContextTarget::BackupConfig { index },
-                            },
-                            position: event.position,
+                    let position = event.position;
+                    let app = menu_app.clone();
+                    cx.defer(move |cx| {
+                        let _ = app.update(cx, |app, cx| {
+                            if !already {
+                                app.hit_backup(&key, 1, Modifiers::default(), cx);
+                            }
+                            app.context_menu = Some(ContextMenu {
+                                target: match kind {
+                                    TreeBackupKind::File => ContextTarget::BackupFile { index },
+                                    TreeBackupKind::Config => ContextTarget::BackupConfig { index },
+                                },
+                                position,
+                            });
+                            cx.notify();
                         });
-                        cx.notify();
                     });
                     cx.notify();
                 }),
