@@ -93,59 +93,45 @@ writes such as `JSON.SET`, and every grid edit.
 The object list is the key list. For key-value engines (`DriverCapability::KeyValue`) its detailed
 layout is 键名 / 类型 / TTL / 内存 and it is the **only** layout for a key list (the 详细列表 /
 平铺网格 switch is not shown), the tree under a database shows the **namespace folders** (with key
-counts) instead of SQL categories, and the toolbar adds **新建键 / 设置 TTL**. The
-database row itself is the all-keys view and carries the key count (the prototype's `(11)`); there
-is no separate 全部 row and no 查询 category under a Redis database. The key list is loaded in one
-go up to the connection's `redis.key_limit` (so there is no 加载更多 button). The Redis tools
-window's 键 pane carries the same operations plus a namespace picker:
+counts) instead of SQL categories, and the toolbar follows the prototype: a filled **新建键**, an
+outlined **删除**, plain **设置 TTL / 刷新** actions and the active namespace chip. The database row
+itself is the all-keys view and carries the key count (the prototype's `(11)`); there is no
+separate 全部 row and no 查询 category under a Redis database. The key list is loaded in one go up
+to the connection's `redis.key_limit` (so there is no 加载更多 button).
 
-- **new key**: name, type (`string`/`hash`/`list`/`set`/`zset`/`stream`), field/member, value/score
-  and an optional TTL;
-- **TTL**: `EXPIRE` (or `PERSIST` for 永久), with the key name prefilled by 设置 TTL from the object
-  list;
+**新建键** and **设置 TTL** are `Root`-managed modals (`app/dialogs.rs`), not a separate tools
+window:
+
+- **new key**: key name, type (`string`/`hash`/`list`/`set`/`zset`/`stream`), TTL (blank or -1 for
+  no expiry) and an initial value. A hash starts with field `field`, a zset with member = value and
+  score 1, a stream with field `field`.
+- **TTL**: `EXPIRE` (or `PERSIST` for 永久), with the key name prefilled by 设置 TTL from the key
+  list and quick buttons for 永久 / 1 minute / 1 hour.
 - **namespaces**: `list_namespaces` groups the scanned keys by their first `:` prefix and shows the
-  counts; picking one in the tree (or the tools window) applies `prefix*` as the `SCAN MATCH`
-  pattern (`object_pattern`) and reloads the object list; clicking the database row clears it.
+  counts; picking one in the tree applies `prefix*` as the `SCAN MATCH` pattern
+  (`object_pattern`) and reloads the object list; clicking the database row or the chip's ✕ clears
+  it.
 
 Every key opens on its **own key page** (`app/grid_key.rs`), never the SQL grid. The header bar
 carries the type badge, key name, type, TTL, memory and the available actions:
 
 - **string / ReJSON**: the prototype's RAW / JSON switch above a large editor. RAW is editable for
   a string key; JSON is a read-only pretty print, and invalid JSON falls back to the raw text with
-  a warning. ReJSON keys stay read-only.
-- **hash / set / list / zset / stream**: a numbered 字段/值, 成员, 索引/值, 成员/分数 or
-  ID/字段/值 table. Editable types get 添加字段/添加成员/添加元素, 删除选中 and 保存修改; streams
-  are read-only. The table pages have a compact pager instead of the SQL WHERE/sort/field-layout
-  toolbar and record toolbar.
+  a warning. Java long literals such as `103L` are accepted before parsing. ReJSON keys stay
+  read-only.
+- **hash / set / list / zset / stream**: a 字段/值, 成员, 索引/值, 成员/分数 or ID/字段/值 table
+  (no `#` row-number column). Editable types get 添加字段/添加成员/添加元素, 删除选中 and 保存修改;
+  streams are read-only. The table pages have a compact pager instead of the SQL
+  WHERE/sort/field-layout toolbar and record toolbar.
 
 The object list holds at most `redis.key_limit` keys (default 1000), loaded in one SCAN pass; there
 is no 加载更多 button. Cluster mode lists its bounded snapshot in one go.
-
-## Redis tools window
-
-An engine-agnostic OS window opened by the object toolbar's **新建键 / 设置 TTL** actions, showing:
-
-| Section | What it does |
-| --- | --- |
-| 键 | new key, TTL, namespace picker (see above) |
-| 发布订阅 | `SUBSCRIBE`/`PSUBSCRIBE` through `Connection::watch`, a message log and `PUBLISH` |
-| 命令监控 | `MONITOR` through `Connection::watch`, start/stop, live log |
-| 慢日志 | `SLOWLOG GET 100` rendered as one line per entry |
-| ACL 用户 | `ACL LIST`, select a user to fill the rule text, `ACL SETUSER` / `ACL DELUSER` |
-
-The live streams run on the tokio runtime and forward events through a channel to a gpui task; a
-generation counter drops events from a stopped stream. `MONITOR` on a cluster follows the first
-master (the stream is per node). The ACL section needs Redis 6+ and an account allowed to run `ACL`;
-on an older server the error is shown in the window's status line.
 
 ## Limitations
 
 - The object list still labels its container 表: the shared tab/noun vocabulary has no per-driver
   key label yet.
-- There is no separate key-detail tab: a key opens in the normal grid, whose columns depend on
-  `TYPE`, with a key header above it.
-- The Users main tab stays disabled (`supports_users` is `false`); Redis ACL is managed in the tools
-  window instead.
+- The Users main tab stays disabled (`supports_users` is `false`); there is no ACL editor.
 - Backup/Restore (`Backup` tab) is disabled: the SQL dump pipeline does not apply to keys.
 - Keys of module types other than ReJSON are listed but not opened.
 

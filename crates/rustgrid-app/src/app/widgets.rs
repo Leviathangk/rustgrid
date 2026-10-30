@@ -660,17 +660,7 @@ impl AppView {
                             t!("redis.tools.key_apply_ttl").to_string(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
-                                let Some(database) = this.database_name(ci, di) else {
-                                    return;
-                                };
-                                this.open_redis_tools(
-                                    ci,
-                                    di,
-                                    database,
-                                    super::redis_tools::RedisToolsSection::Keys,
-                                    Some(ttl_name.clone()),
-                                    cx,
-                                );
+                                this.start_key_ttl_dialog(ci, di, ttl_name.clone(), cx);
                             }),
                         ))
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))

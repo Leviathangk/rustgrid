@@ -398,6 +398,29 @@ struct CreateTableDialog {
     error: Option<String>,
 }
 
+/// The Redis "新建键" modal (the prototype's `modalNewKey`).
+struct NewKeyDialog {
+    connection_index: usize,
+    database_index: usize,
+    name: String,
+    /// `string` / `hash` / `list` / `set` / `zset` / `stream`.
+    kind: String,
+    ttl: String,
+    value: String,
+    error: Option<String>,
+    saving: bool,
+}
+
+/// The Redis "设置 TTL" modal (the prototype's `modalTtl`).
+struct KeyTtlDialog {
+    connection_index: usize,
+    database_index: usize,
+    key: String,
+    ttl: String,
+    error: Option<String>,
+    saving: bool,
+}
+
 /// State of the "export connections" window: the checked connections, whether passwords are
 /// included, and an inline validation/write error.
 struct ConnectionExportDialog {
@@ -1950,6 +1973,10 @@ enum DialogKind {
     Unsaved,
     /// The 导出 scope choice (all records vs the grid's page, or which query result).
     ExportChoice,
+    /// The Redis 新建键 modal.
+    NewKey,
+    /// The Redis 设置 TTL modal.
+    KeyTtl,
 }
 
 /// A transient notification queued by a path that has no `Window`, flushed through `Root` on the
@@ -2218,15 +2245,18 @@ pub struct AppView {
     export_connections_dialog: Option<ConnectionExportDialog>,
     /// The OS window hosting the "export connections" dialog, if open.
     export_connections_window: Option<WindowHandle<gpui_kit::component::Root>>,
-    /// The open Redis tools window's state (pub/sub, monitor, slow log, ACL).
-    redis_tools: Option<redis_tools::RedisToolsState>,
-    /// The OS window hosting the Redis tools, if open.
-    redis_tools_window: Option<WindowHandle<gpui_kit::component::Root>>,
-    /// Bumped whenever a live stream stops, so events from an aborted task are dropped.
-    redis_watch_generation: u64,
     /// The open "new table" name prompt, if any, and its shared name input.
     create_table_dialog: Option<CreateTableDialog>,
     create_table_input: Option<Entity<TextInput>>,
+    /// The Redis 新建键 modal and its fields.
+    new_key_dialog: Option<NewKeyDialog>,
+    new_key_name_input: Option<Entity<TextInput>>,
+    new_key_ttl_input: Option<Entity<TextInput>>,
+    new_key_type_combo: Option<Entity<ComboBox>>,
+    new_key_value_editor: Option<Entity<ui::SqlEditor>>,
+    /// The Redis 设置 TTL modal and its TTL field.
+    key_ttl_dialog: Option<KeyTtlDialog>,
+    key_ttl_input: Option<Entity<TextInput>>,
     /// The save-query dialog's connection and database pickers.
     save_connection_combo: Option<Entity<ComboBox>>,
     save_database_combo: Option<Entity<ComboBox>>,
@@ -2704,7 +2734,6 @@ pub struct AppView {
     export_focus: FocusHandle,
     import_focus: FocusHandle,
     export_connections_focus: FocusHandle,
-    redis_tools_focus: FocusHandle,
     backup_window_focus: FocusHandle,
     /// The main window's id, so closing it also closes the Backup/Restore window.
     main_window_id: Option<WindowId>,
@@ -2746,7 +2775,6 @@ mod privilege_manager;
 mod query;
 mod query_editor;
 mod query_view;
-mod redis_tools;
 mod routine;
 mod routine_view;
 mod runsql;
@@ -3040,11 +3068,15 @@ impl AppView {
             query_name_input: None,
             export_connections_dialog: None,
             export_connections_window: None,
-            redis_tools: None,
-            redis_tools_window: None,
-            redis_watch_generation: 0,
             create_table_dialog: None,
             create_table_input: None,
+            new_key_dialog: None,
+            new_key_name_input: None,
+            new_key_ttl_input: None,
+            new_key_type_combo: None,
+            new_key_value_editor: None,
+            key_ttl_dialog: None,
+            key_ttl_input: None,
             save_connection_combo: None,
             save_database_combo: None,
             database_cache,
@@ -3381,7 +3413,6 @@ impl AppView {
             export_focus: cx.focus_handle(),
             import_focus: cx.focus_handle(),
             export_connections_focus: cx.focus_handle(),
-            redis_tools_focus: cx.focus_handle(),
             backup_window_focus: cx.focus_handle(),
             main_window_id: None,
             _window_closed: window_closed,
@@ -3424,8 +3455,19 @@ impl AppView {
     /// entities survive the window (the Options one is even built before the language is applied),
     /// so a language change has to retranslate them too.
     fn sync_search_placeholders(&mut self, cx: &mut Context<'_, Self>) {
+        let key_list = self
+            .object_pane
+            .as_ref()
+            .is_some_and(|pane| pane.read(cx).key_value);
         self.object_search_input.update(cx, |input, cx| {
-            input.set_placeholder(t!("object.search").to_string(), cx);
+            input.set_placeholder(
+                if key_list {
+                    t!("redis.key.search").to_string()
+                } else {
+                    t!("object.search").to_string()
+                },
+                cx,
+            );
         });
         self.user_search_input.update(cx, |input, cx| {
             input.set_placeholder(t!("user.search").to_string(), cx);

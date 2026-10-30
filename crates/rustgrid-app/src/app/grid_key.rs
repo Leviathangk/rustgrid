@@ -27,6 +27,16 @@ impl GridView {
         self.key_page_kind().is_some()
     }
 
+    /// The width of the row-selection gutter. A key page has no `#` column, so its cells start at
+    /// the pane's left edge; SQL tables keep the 16px gutter.
+    pub(super) fn gutter_width(&self) -> f32 {
+        if self.is_key_page() {
+            0.0
+        } else {
+            GRID_GUTTER_WIDTH
+        }
+    }
+
     /// A string/ReJSON key uses the page's text editor instead of the field/member table.
     pub(super) fn is_string_key_page(&self) -> bool {
         matches!(self.key_page_kind(), Some("string" | "json"))
@@ -48,11 +58,7 @@ impl GridView {
     /// the shared cell editor read them from there.
     pub(super) fn layout_key_page_columns(&mut self) {
         let pane = f32::from(self.grid_pane_bounds.borrow().size.width);
-        let available = if pane > 240.0 {
-            pane - GRID_GUTTER_WIDTH
-        } else {
-            700.0
-        };
+        let available = if pane > 240.0 { pane } else { 700.0 };
         let kind = self.key_page_kind().unwrap_or_default();
         self.state.column_widths = match (kind, self.state.columns.len()) {
             ("set", 1) => vec![available.max(200.0)],

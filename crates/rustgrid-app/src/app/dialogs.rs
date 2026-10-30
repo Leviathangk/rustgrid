@@ -51,6 +51,10 @@ impl AppView {
             Some(DialogKind::Unsaved)
         } else if self.export_choice.is_some() {
             Some(DialogKind::ExportChoice)
+        } else if self.new_key_dialog.is_some() {
+            Some(DialogKind::NewKey)
+        } else if self.key_ttl_dialog.is_some() {
+            Some(DialogKind::KeyTtl)
         } else if self.error_dialog.is_some() {
             Some(DialogKind::Error)
         } else if self.delete_confirm.is_some() {
@@ -79,6 +83,8 @@ impl AppView {
             Some(DialogKind::Confirm) => self.open_confirm_dialog(window, cx),
             Some(DialogKind::Unsaved) => self.open_unsaved_dialog(window, cx),
             Some(DialogKind::ExportChoice) => self.open_export_choice_dialog(window, cx),
+            Some(DialogKind::NewKey) => self.open_new_key_dialog(window, cx),
+            Some(DialogKind::KeyTtl) => self.open_key_ttl_dialog(window, cx),
             None => {}
         }
     }
@@ -880,6 +886,649 @@ impl AppView {
         cx.notify();
     }
 
+    /// Set up the Redis 新建键 modal and build its fields.
+    pub(super) fn start_new_key_dialog(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let theme = self.theme;
+        let weak = cx.weak_entity();
+        self.new_key_dialog = Some(NewKeyDialog {
+            connection_index,
+            database_index,
+            name: String::new(),
+            kind: "string".to_string(),
+            ttl: String::new(),
+            value: String::new(),
+            error: None,
+            saving: false,
+        });
+
+        let name_weak = weak.clone();
+        let submit_weak = weak.clone();
+        let cancel_weak = weak.clone();
+        self.new_key_name_input = Some(cx.new(|cx| {
+            TextInput::new(theme, "", TextInputOptions::default(), cx)
+                .on_change(Rc::new(move |text, _window, cx| {
+                    let _ = name_weak.update(cx, |app, cx| {
+                        if let Some(dialog) = app.new_key_dialog.as_mut() {
+                            dialog.name = text.to_string();
+                            dialog.error = None;
+                        }
+                        cx.notify();
+                    });
+                }))
+                .on_submit(Rc::new(move |_window, cx| {
+                    let _ = submit_weak.update(cx, |app, cx| app.submit_new_key(cx));
+                }))
+                .on_cancel(Rc::new(move |_window, cx| {
+                    let _ = cancel_weak.update(cx, |app, cx| app.cancel_new_key(cx));
+                }))
+        }));
+
+        let ttl_weak = weak.clone();
+        self.new_key_ttl_input = Some(cx.new(|cx| {
+            TextInput::new(
+                theme,
+                "",
+                TextInputOptions {
+                    placeholder: "-1".into(),
+                    accepts: Some(Rc::new(|ch: char| ch.is_ascii_digit() || ch == '-')),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = ttl_weak.update(cx, |app, cx| {
+                    if let Some(dialog) = app.new_key_dialog.as_mut() {
+                        dialog.ttl = text.to_string();
+                        dialog.error = None;
+                    }
+                    cx.notify();
+                });
+            }))
+        }));
+
+        let kinds = ["string", "hash", "list", "set", "zset", "stream"];
+        let options: Vec<ComboOption> =
+            kinds.iter().map(|kind| ComboOption::plain(*kind)).collect();
+        let type_weak = weak.clone();
+        self.new_key_type_combo = Some(cx.new(|cx| {
+            ComboBox::new(theme, options, "string".to_string(), 180.0, cx)
+                .field_width(180.0)
+                .on_select(Rc::new(move |value, _window, cx| {
+                    let _ = type_weak.update(cx, |app, cx| {
+                        if let Some(dialog) = app.new_key_dialog.as_mut() {
+                            dialog.kind = value.to_string();
+                            dialog.error = None;
+                        }
+                        cx.notify();
+                    });
+                }))
+        }));
+
+        let value_weak = weak.clone();
+        self.new_key_value_editor = Some(cx.new(|cx| {
+            ui::SqlEditor::new(cx)
+                .options(ui::SqlEditorOptions {
+                    language: "text".into(),
+                    font_size: 12.0,
+                    line_number: false,
+                    readonly: false,
+                    ..Default::default()
+                })
+                .on_change(Rc::new(move |text, cx| {
+                    let _ = value_weak.update(cx, |app, cx| {
+                        if let Some(dialog) = app.new_key_dialog.as_mut() {
+                            dialog.value = text.to_string();
+                        }
+                        cx.notify();
+                    });
+                }))
+        }));
+        cx.notify();
+    }
+
+    fn open_new_key_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let (title, footer) = app.update(cx, |app, cx| {
+                (
+                    t!("redis.key.new").to_string(),
+                    app.new_key_dialog_footer(cx).into_any_element(),
+                )
+            });
+            let content_app = app.clone();
+            let ok_app = app.downgrade();
+            let cancel_app = app.downgrade();
+            let on_close = app.downgrade();
+            dialog
+                .entrance(DIALOG_ENTRANCE)
+                .title(title)
+                .w(px(460.0))
+                .centered()
+                .content(move |content, window, cx| {
+                    let body = content_app
+                        .update(cx, |app, cx| app.new_key_dialog_body(cx).into_any_element());
+                    if content_app
+                        .update(cx, |app, _cx| take_dialog_focus(&mut app.dialog_focus_done))
+                        && let Some(input) = content_app.read(cx).new_key_name_input.clone()
+                    {
+                        input.update(cx, |input, cx| input.focus_state(window, cx));
+                    }
+                    content.child(body)
+                })
+                .footer(footer)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("redis.key.dialog.create").to_string())
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            let _ = ok_app.update(cx, |app, cx| app.submit_new_key(cx));
+                            false
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = cancel_app.update(cx, |app, cx| app.cancel_new_key(cx));
+                            true
+                        }),
+                )
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.cancel_new_key(cx));
+                })
+        });
+    }
+
+    fn new_key_dialog_body(&self, _cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.new_key_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let field = |label: String, control: AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme.text_muted))
+                        .child(label),
+                )
+                .child(control)
+                .into_any_element()
+        };
+        let mut body = div().flex().flex_col().gap_3().p_4();
+        body = body.child(field(
+            t!("redis.key.dialog.name").to_string(),
+            self.new_key_name_input
+                .clone()
+                .map(|input| div().h(px(26.0)).child(input).into_any_element())
+                .unwrap_or_else(|| div().into_any_element()),
+        ));
+        body = body.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .child(
+                    div().flex_1().min_w(px(0.0)).child(field(
+                        t!("redis.key.dialog.type").to_string(),
+                        self.new_key_type_combo
+                            .clone()
+                            .map(|combo| combo.into_any_element())
+                            .unwrap_or_else(|| div().into_any_element()),
+                    )),
+                )
+                .child(
+                    div().flex_1().min_w(px(0.0)).child(field(
+                        t!("redis.key.dialog.ttl").to_string(),
+                        self.new_key_ttl_input
+                            .clone()
+                            .map(|input| div().h(px(26.0)).child(input).into_any_element())
+                            .unwrap_or_else(|| div().into_any_element()),
+                    )),
+                ),
+        );
+        let value = self
+            .new_key_value_editor
+            .clone()
+            .map(|editor| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .h(px(96.0))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .overflow_hidden()
+                    .child(editor)
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| div().into_any_element());
+        body = body.child(field(t!("redis.key.dialog.value").to_string(), value));
+        if let Some(error) = dialog.error.as_ref() {
+            body = body.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.danger))
+                    .child(error.clone()),
+            );
+        }
+        body.into_any_element()
+    }
+
+    fn new_key_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .w_full()
+            .gap_2()
+            .h(px(46.0))
+            .child(self.dialog_button(
+                "new-key-cancel",
+                t!("form.cancel").to_string(),
+                false,
+                cx.listener(|this, _event, _window, cx| this.cancel_new_key(cx)),
+            ))
+            .child(self.dialog_button(
+                "new-key-create",
+                t!("redis.key.dialog.create").to_string(),
+                true,
+                cx.listener(|this, _event, _window, cx| this.submit_new_key(cx)),
+            ))
+    }
+
+    pub(super) fn cancel_new_key(&mut self, cx: &mut Context<'_, Self>) {
+        self.new_key_dialog = None;
+        self.new_key_name_input = None;
+        self.new_key_ttl_input = None;
+        self.new_key_type_combo = None;
+        self.new_key_value_editor = None;
+        cx.notify();
+    }
+
+    pub(super) fn submit_new_key(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.new_key_dialog.as_ref() else {
+            return;
+        };
+        if dialog.saving {
+            return;
+        }
+        let Some(connection) = self.connection_arc(dialog.connection_index) else {
+            return;
+        };
+        let Some(database) = self.database_name(dialog.connection_index, dialog.database_index)
+        else {
+            return;
+        };
+        let name = dialog.name.trim().to_string();
+        if name.is_empty() {
+            self.new_key_dialog.as_mut().unwrap().error =
+                Some(t!("redis.key.name_required").to_string());
+            cx.notify();
+            return;
+        }
+        let ttl = match parse_redis_ttl(&dialog.ttl) {
+            Ok(ttl) => ttl,
+            Err(error) => {
+                self.new_key_dialog.as_mut().unwrap().error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let kind = dialog.kind.clone();
+        let value = dialog.value.clone();
+        let values = match kind.as_str() {
+            "string" => vec![("value".to_string(), Some(value))],
+            "hash" => vec![
+                ("field".to_string(), Some("field".to_string())),
+                ("value".to_string(), Some(value)),
+            ],
+            "list" | "set" => vec![("value".to_string(), Some(value))],
+            "zset" => {
+                let member = if value.trim().is_empty() {
+                    "item".to_string()
+                } else {
+                    value
+                };
+                vec![
+                    ("member".to_string(), Some(member)),
+                    ("score".to_string(), Some("1".to_string())),
+                ]
+            }
+            "stream" => vec![
+                ("field".to_string(), Some("field".to_string())),
+                ("value".to_string(), Some(value)),
+            ],
+            _ => Vec::new(),
+        };
+        let spec = rustgrid_core::ObjectCreate { kind, ttl, values };
+        if let Some(dialog) = self.new_key_dialog.as_mut() {
+            dialog.saving = true;
+            dialog.error = None;
+        }
+        cx.notify();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { connection.create_object(&database, &name, &spec).await })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(dialog) = app.new_key_dialog.as_mut() else {
+                    return;
+                };
+                dialog.saving = false;
+                match result {
+                    Ok(Ok(())) => {
+                        let connection_index = dialog.connection_index;
+                        let database_index = dialog.database_index;
+                        app.new_key_dialog = None;
+                        app.new_key_name_input = None;
+                        app.new_key_ttl_input = None;
+                        app.new_key_type_combo = None;
+                        app.new_key_value_editor = None;
+                        app.reload_tables(connection_index, database_index, cx);
+                        app.toast(ToastKind::Success, t!("redis.key.created").to_string(), cx);
+                    }
+                    Ok(Err(error)) => dialog.error = Some(error.to_string()),
+                    Err(error) => dialog.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Set up the Redis 设置 TTL modal for `key`.
+    pub(super) fn start_key_ttl_dialog(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        key: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let theme = self.theme;
+        let current = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .and_then(|database| match &database.table_statuses {
+                Loadable::Loaded(statuses) => statuses
+                    .iter()
+                    .find(|(name, _)| name == &key)
+                    .and_then(|(_, status)| status.ttl),
+                _ => None,
+            })
+            .unwrap_or(-1);
+        let initial = current.to_string();
+        self.key_ttl_dialog = Some(KeyTtlDialog {
+            connection_index,
+            database_index,
+            key,
+            ttl: initial.clone(),
+            error: None,
+            saving: false,
+        });
+        let weak = cx.weak_entity();
+        let change = weak.clone();
+        let submit = weak.clone();
+        let cancel = weak.clone();
+        self.key_ttl_input = Some(cx.new(|cx| {
+            TextInput::new(
+                theme,
+                initial,
+                TextInputOptions {
+                    accepts: Some(Rc::new(|ch: char| ch.is_ascii_digit() || ch == '-')),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |app, cx| {
+                    if let Some(dialog) = app.key_ttl_dialog.as_mut() {
+                        dialog.ttl = text.to_string();
+                        dialog.error = None;
+                    }
+                    cx.notify();
+                });
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit.update(cx, |app, cx| app.submit_key_ttl(cx));
+            }))
+            .on_cancel(Rc::new(move |_window, cx| {
+                let _ = cancel.update(cx, |app, cx| app.cancel_key_ttl(cx));
+            }))
+        }));
+        cx.notify();
+    }
+
+    fn open_key_ttl_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let (title, footer) = app.update(cx, |app, cx| {
+                (
+                    t!("redis.key.dialog.ttl_title").to_string(),
+                    app.key_ttl_dialog_footer(cx).into_any_element(),
+                )
+            });
+            let content_app = app.clone();
+            let ok_app = app.downgrade();
+            let cancel_app = app.downgrade();
+            let on_close = app.downgrade();
+            dialog
+                .entrance(DIALOG_ENTRANCE)
+                .title(title)
+                .w(px(340.0))
+                .centered()
+                .content(move |content, window, cx| {
+                    let body = content_app
+                        .update(cx, |app, cx| app.key_ttl_dialog_body(cx).into_any_element());
+                    if content_app
+                        .update(cx, |app, _cx| take_dialog_focus(&mut app.dialog_focus_done))
+                        && let Some(input) = content_app.read(cx).key_ttl_input.clone()
+                    {
+                        input.update(cx, |input, cx| input.focus_state(window, cx));
+                    }
+                    content.child(body)
+                })
+                .footer(footer)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("redis.key.dialog.apply").to_string())
+                        .cancel_text(t!("form.cancel").to_string())
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            let _ = ok_app.update(cx, |app, cx| app.submit_key_ttl(cx));
+                            false
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = cancel_app.update(cx, |app, cx| app.cancel_key_ttl(cx));
+                            true
+                        }),
+                )
+                .on_close(move |_, _, cx| {
+                    let _ = on_close.update(cx, |app, cx| app.cancel_key_ttl(cx));
+                })
+        });
+    }
+
+    fn key_ttl_dialog_body(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(dialog) = self.key_ttl_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let mut body = div().flex().flex_col().gap_3().p_4();
+        body = body.child(
+            div()
+                .text_size(px(12.0))
+                .font_family("Consolas")
+                .text_color(rgb(theme.text_muted))
+                .child(dialog.key.clone()),
+        );
+        if let Some(input) = self.key_ttl_input.as_ref() {
+            body = body.child(div().w_full().h(px(26.0)).child(input.clone()));
+        }
+        let quick = |label: String, value: &'static str| {
+            let weak = cx.weak_entity();
+            div()
+                .id(SharedString::from(format!("key-ttl-quick-{value}")))
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .bg(rgb(theme.button_bg))
+                .border_1()
+                .border_color(rgb(theme.button_border))
+                .hover(move |style| style.bg(rgb(theme.button_hover_bg)))
+                .on_click(move |_event, _window, cx| {
+                    let _ = weak.update(cx, |app, cx| {
+                        if let Some(dialog) = app.key_ttl_dialog.as_mut() {
+                            dialog.ttl = value.to_string();
+                        }
+                        if let Some(input) = app.key_ttl_input.clone() {
+                            input.update(cx, |input, cx| input.set_text(value, cx));
+                        }
+                        cx.notify();
+                    });
+                })
+                .child(label)
+        };
+        body = body.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(quick(t!("redis.key.dialog.forever").to_string(), "-1"))
+                .child(quick(t!("redis.key.dialog.minute").to_string(), "60"))
+                .child(quick(t!("redis.key.dialog.hour").to_string(), "3600")),
+        );
+        if let Some(error) = dialog.error.as_ref() {
+            body = body.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.danger))
+                    .child(error.clone()),
+            );
+        }
+        body.into_any_element()
+    }
+
+    fn key_ttl_dialog_footer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .w_full()
+            .gap_2()
+            .h(px(46.0))
+            .child(self.dialog_button(
+                "key-ttl-cancel",
+                t!("form.cancel").to_string(),
+                false,
+                cx.listener(|this, _event, _window, cx| this.cancel_key_ttl(cx)),
+            ))
+            .child(self.dialog_button(
+                "key-ttl-apply",
+                t!("redis.key.dialog.apply").to_string(),
+                true,
+                cx.listener(|this, _event, _window, cx| this.submit_key_ttl(cx)),
+            ))
+    }
+
+    pub(super) fn cancel_key_ttl(&mut self, cx: &mut Context<'_, Self>) {
+        self.key_ttl_dialog = None;
+        self.key_ttl_input = None;
+        cx.notify();
+    }
+
+    pub(super) fn submit_key_ttl(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.key_ttl_dialog.as_ref() else {
+            return;
+        };
+        if dialog.saving {
+            return;
+        }
+        let Some(connection) = self.connection_arc(dialog.connection_index) else {
+            return;
+        };
+        let Some(database) = self.database_name(dialog.connection_index, dialog.database_index)
+        else {
+            return;
+        };
+        let ttl = match parse_redis_ttl(&dialog.ttl) {
+            Ok(ttl) => ttl,
+            Err(error) => {
+                self.key_ttl_dialog.as_mut().unwrap().error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let key = dialog.key.clone();
+        let connection_index = dialog.connection_index;
+        let database_index = dialog.database_index;
+        let status_database = database.clone();
+        if let Some(dialog) = self.key_ttl_dialog.as_mut() {
+            dialog.saving = true;
+            dialog.error = None;
+        }
+        cx.notify();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { connection.set_object_ttl(&database, &key, ttl).await })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(dialog) = app.key_ttl_dialog.as_mut() else {
+                    return;
+                };
+                dialog.saving = false;
+                match result {
+                    Ok(Ok(())) => {
+                        let key = dialog.key.clone();
+                        app.key_ttl_dialog = None;
+                        app.key_ttl_input = None;
+                        app.reload_tables(connection_index, database_index, cx);
+                        // Keep an open key page's header in step with the new expiry.
+                        for grid in &app.grids {
+                            let matches = {
+                                let grid = grid.read(cx);
+                                grid.state.database == status_database && grid.state.table == key
+                            };
+                            if matches {
+                                grid.update(cx, |grid, cx| {
+                                    if let Some(status) = grid.state.key_status.as_mut() {
+                                        status.ttl = Some(ttl.unwrap_or(-1));
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        app.toast(
+                            ToastKind::Success,
+                            t!("redis.key.ttl_updated").to_string(),
+                            cx,
+                        );
+                    }
+                    Ok(Err(error)) => dialog.error = Some(error.to_string()),
+                    Err(error) => dialog.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn open_create_table_modal(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let app = cx.entity();
         window.open_dialog(cx, move |dialog, _window, cx| {
@@ -1392,6 +2041,20 @@ impl AppView {
             ),
             None => (String::new(), String::new(), t!("form.ok").to_string()),
         }
+    }
+}
+
+/// Parse a Redis TTL field. Blank, `-1` and non-positive values mean "no expiry"; a positive
+/// value is seconds; anything else is an error.
+fn parse_redis_ttl(text: &str) -> Result<Option<i64>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<i64>() {
+        Ok(ttl) if ttl > 0 => Ok(Some(ttl)),
+        Ok(_) => Ok(None),
+        Err(_) => Err(t!("redis.key.ttl_invalid").to_string()),
     }
 }
 

@@ -248,7 +248,8 @@ impl Render for GridView {
         };
         let visible_count = self.state.visible_columns.min(all_widths.len());
         let widths: Vec<f32> = all_widths[..visible_count].to_vec();
-        let content_width: f32 = (GRID_GUTTER_WIDTH + widths.iter().sum::<f32>()).max(1.0);
+        let gutter_width = self.gutter_width();
+        let content_width: f32 = (gutter_width + widths.iter().sum::<f32>()).max(1.0);
 
         let mut header = div()
             .flex()
@@ -256,10 +257,11 @@ impl Render for GridView {
             .flex_none()
             .bg(rgb(theme.header_bg))
             .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(
+            .border_color(rgb(theme.border));
+        if gutter_width > 0.0 {
+            header = header.child(
                 div()
-                    .w(px(GRID_GUTTER_WIDTH))
+                    .w(px(gutter_width))
                     .h(px(header_height))
                     .flex_none()
                     .flex()
@@ -268,9 +270,9 @@ impl Render for GridView {
                     .text_size(px(11.0))
                     .text_color(rgb(theme.text_muted))
                     .border_r_1()
-                    .border_color(rgb(theme.grid_line))
-                    .when(key_page, |gutter| gutter.child("#")),
+                    .border_color(rgb(theme.grid_line)),
             );
+        }
         for (index, column) in self.state.columns.iter().enumerate().take(visible_count) {
             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
             let sort_descending = self
@@ -475,77 +477,50 @@ impl Render for GridView {
                             .flex_row()
                             .bg(rgb(base_background))
                             .h(px(GRID_ROW_HEIGHT))
-                            .child(if key_page {
-                                // The key page numbers its fields/members, like the prototype.
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .h(px(GRID_ROW_HEIGHT))
-                                    .w(px(GRID_GUTTER_WIDTH))
-                                    .flex_none()
-                                    .bg(rgb(if row_selected {
-                                        theme.grid_selection_bg
-                                    } else {
-                                        base_background
-                                    }))
-                                    .border_r_1()
-                                    .border_color(rgb(theme.border))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(if row_selected {
-                                        theme.grid_selection_text
-                                    } else {
-                                        theme.text_muted
-                                    }))
-                                    .child(if insert.is_some() {
-                                        "*".to_string()
-                                    } else {
-                                        (row_index + 1).to_string()
-                                    })
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .h(px(GRID_ROW_HEIGHT))
-                                    .w(px(GRID_GUTTER_WIDTH))
-                                    .flex_none()
-                                    .bg(rgb(if row_selected {
-                                        theme.grid_selection_bg
-                                    } else {
-                                        base_background
-                                    }))
-                                    .border_r_1()
-                                    .border_color(rgb(theme.border))
-                                    .when(insert.is_none() && current_row, move |gutter| {
-                                        gutter.child(
-                                            svg()
-                                                .path("icons/row_marker.svg")
-                                                .w(px(7.0))
-                                                .h(px(7.0))
-                                                .flex_none()
-                                                .text_color(rgb(if row_selected {
-                                                    theme.grid_selection_text
-                                                } else {
-                                                    theme.primary
-                                                })),
-                                        )
-                                    })
-                                    .when(insert.is_some(), move |gutter| {
-                                        gutter.child(
-                                            div()
-                                                .text_size(px(12.0))
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(rgb(if row_selected {
-                                                    theme.grid_selection_text
-                                                } else {
-                                                    theme.primary
-                                                }))
-                                                .child("*"),
-                                        )
-                                    })
-                                    .into_any_element()
+                            .when(!key_page, |row| {
+                                row.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .h(px(GRID_ROW_HEIGHT))
+                                        .w(px(GRID_GUTTER_WIDTH))
+                                        .flex_none()
+                                        .bg(rgb(if row_selected {
+                                            theme.grid_selection_bg
+                                        } else {
+                                            base_background
+                                        }))
+                                        .border_r_1()
+                                        .border_color(rgb(theme.border))
+                                        .when(insert.is_none() && current_row, move |gutter| {
+                                            gutter.child(
+                                                svg()
+                                                    .path("icons/row_marker.svg")
+                                                    .w(px(7.0))
+                                                    .h(px(7.0))
+                                                    .flex_none()
+                                                    .text_color(rgb(if row_selected {
+                                                        theme.grid_selection_text
+                                                    } else {
+                                                        theme.primary
+                                                    })),
+                                            )
+                                        })
+                                        .when(insert.is_some(), move |gutter| {
+                                            gutter.child(
+                                                div()
+                                                    .text_size(px(12.0))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(rgb(if row_selected {
+                                                        theme.grid_selection_text
+                                                    } else {
+                                                        theme.primary
+                                                    }))
+                                                    .child("*"),
+                                            )
+                                        }),
+                                )
                             });
                         for index in 0..column_count {
                             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
@@ -832,7 +807,12 @@ impl Render for GridView {
                             .min_h(px(0.0))
                             .w_full()
                             .overflow_hidden()
-                            .child(empty_grid_rows(&filler_widths, rows_to_fill, theme)),
+                            .child(empty_grid_rows(
+                                &filler_widths,
+                                rows_to_fill,
+                                gutter_width,
+                                theme,
+                            )),
                     )
                     .into_any_element()
             } else {
@@ -1183,7 +1163,12 @@ fn header_cell_text(
 /// The decorative body of a table with no rows: the gutter and one bordered cell per column,
 /// repeated `rows` times with the same alternating bands as real rows, so an empty page still reads
 /// as an empty table rather than a blank pane under the header. The rows carry no hit-testing.
-fn empty_grid_rows(widths: &[f32], rows: usize, theme: Theme) -> impl IntoElement {
+fn empty_grid_rows(
+    widths: &[f32],
+    rows: usize,
+    gutter_width: f32,
+    theme: Theme,
+) -> impl IntoElement {
     let mut column = div().flex().flex_col().w_full();
     for row in 0..rows {
         let background = if row % 2 == 1 {
@@ -1196,15 +1181,17 @@ fn empty_grid_rows(widths: &[f32], rows: usize, theme: Theme) -> impl IntoElemen
             .flex_row()
             .flex_none()
             .h(px(GRID_ROW_HEIGHT))
-            .bg(rgb(background))
-            .child(
+            .bg(rgb(background));
+        if gutter_width > 0.0 {
+            row_element = row_element.child(
                 div()
-                    .w(px(GRID_GUTTER_WIDTH))
+                    .w(px(gutter_width))
                     .h(px(GRID_ROW_HEIGHT))
                     .flex_none()
                     .border_r_1()
                     .border_color(rgb(theme.grid_line)),
             );
+        }
         for width in widths {
             row_element = row_element.child(
                 div()

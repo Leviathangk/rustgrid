@@ -214,6 +214,39 @@ pub(super) fn icon_button(
         )
 }
 
+/// A borderless text button for a toolbar action that should read as plain text (the prototype's
+/// 设置 TTL / 刷新), with the same compact 12px typography as the toolbar.
+pub(super) fn plain_button(
+    id: impl Into<SharedString>,
+    label: String,
+    enabled: bool,
+    theme: Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let color = if enabled {
+        theme.text
+    } else {
+        theme.text_muted
+    };
+    div()
+        .id(id.into())
+        .flex()
+        .items_center()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .text_size(px(12.0))
+        .text_color(rgb(color))
+        .when(enabled, move |button| {
+            button
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+        })
+        .when(!enabled, |button| button.opacity(0.5))
+        .on_click(on_click)
+        .child(label)
+}
+
 /// The chrome of a `并且/或者` pill rendered by [`toggle_pill`]. Two presets cover the filter
 /// builder's in-group rail pill and the floating between-groups boundary pill.
 #[derive(Clone, Copy)]

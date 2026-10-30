@@ -235,6 +235,153 @@ fn object_nav_target(
 }
 
 impl AppView {
+    /// The Redis key-list toolbar, laid out like the prototype's: a filled 新建键, an outlined
+    /// 删除, plain 设置 TTL / 刷新 actions, and the active namespace chip.
+    fn render_key_object_toolbar(
+        &self,
+        pane: &Entity<ObjectPane>,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> Div {
+        let (connection_index, database_index, category, selected) = {
+            let pane = pane.read(cx);
+            (
+                pane.connection_index,
+                pane.database_index,
+                pane.category,
+                pane.selected.clone(),
+            )
+        };
+        let selected_key = selected.or_else(|| self.objects_selection.items().first().cloned());
+        let namespace = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .and_then(|database| database.object_pattern.clone());
+        let pane_for_delete = pane.clone();
+
+        let mut left = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(self.dialog_button(
+                "obj-new-key",
+                t!("redis.key.new").to_string(),
+                true,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.start_new_key_dialog(connection_index, database_index, cx);
+                }),
+            ))
+            .child(self.dialog_button(
+                "obj-delete",
+                t!("connection.delete").to_string(),
+                false,
+                cx.listener(move |this, _event, _window, cx| {
+                    let (connection_index, database_index, is_view) =
+                        object_scope(&pane_for_delete, cx);
+                    if is_view {
+                        return;
+                    }
+                    let mut names = this.objects_selection.items();
+                    if names.is_empty() {
+                        let Some((_, _, name, _)) = object_selection(&pane_for_delete, cx) else {
+                            return;
+                        };
+                        names.push(name);
+                    }
+                    this.delete_confirm = Some(DeleteConfirm::Tables {
+                        connection_index,
+                        database_index,
+                        names,
+                    });
+                    cx.notify();
+                }),
+            ));
+        let ttl_connection = connection_index;
+        let ttl_database = database_index;
+        let ttl_key = selected_key.clone();
+        left = left.child(ui::plain_button(
+            "obj-key-ttl",
+            t!("redis.tools.key_apply_ttl").to_string(),
+            ttl_key.is_some(),
+            theme,
+            cx.listener(move |this, _event, _window, cx| {
+                let Some(key) = ttl_key.clone() else {
+                    return;
+                };
+                this.start_key_ttl_dialog(ttl_connection, ttl_database, key, cx);
+            }),
+        ));
+        left = left.child(toolbar_separator(theme)).child(ui::plain_button(
+            "obj-refresh",
+            t!("common.refresh").to_string(),
+            true,
+            theme,
+            cx.listener(move |this, _event, _window, cx| {
+                this.reload_tables(connection_index, database_index, cx);
+            }),
+        ));
+        if let Some(namespace) = namespace {
+            left = left.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .ml_2()
+                    .pl_2()
+                    .pr_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.toolbar_bg))
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!("{}: {namespace}*", t!("redis.key.directory")))
+                    .child(
+                        div()
+                            .id("obj-key-namespace-clear")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(14.0))
+                            .h(px(14.0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.select_key_namespace(
+                                    connection_index,
+                                    database_index,
+                                    None,
+                                    cx,
+                                );
+                            }))
+                            .child("✕"),
+                    ),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .bg(rgb(theme.toolbar_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(left)
+            .child(self.render_object_view_controls(category, cx))
+    }
+
     pub(super) fn render_object_toolbar(
         &self,
         pane: &Entity<ObjectPane>,
@@ -261,6 +408,9 @@ impl AppView {
         }
         let designer_enabled = self.driver_supports_table_designer(connection_index);
         let key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
+        if key_value {
+            return self.render_key_object_toolbar(pane, theme, cx);
+        }
         let open_label = if key_value {
             t!("redis.key.open").to_string()
         } else {
@@ -294,8 +444,6 @@ impl AppView {
         let pane_for_import = pane.clone();
         let pane_for_delete = pane.clone();
         let pane_for_refresh = pane.clone();
-        let pane_for_new_key = pane.clone();
-        let pane_for_ttl = pane.clone();
         div()
             .flex()
             .flex_row()
@@ -421,60 +569,6 @@ impl AppView {
                                 this.open_import_wizard(connection_index, database_index, None, cx);
                             }),
                         ))
-                    })
-                    .when(key_value, |bar| {
-                        bar.child(toolbar_separator(theme))
-                            .child(self.toolbar_item(
-                                "obj-new-key",
-                                "icons/redis.svg",
-                                t!("redis.tools.key_new").to_string(),
-                                category == Category::Tables,
-                                cx.listener(move |this, _event, _window, cx| {
-                                    let (connection_index, database_index) = {
-                                        let pane = pane_for_new_key.read(cx);
-                                        (pane.connection_index, pane.database_index)
-                                    };
-                                    let Some(database) =
-                                        this.database_name(connection_index, database_index)
-                                    else {
-                                        return;
-                                    };
-                                    this.open_redis_tools(
-                                        connection_index,
-                                        database_index,
-                                        database,
-                                        super::redis_tools::RedisToolsSection::Keys,
-                                        None,
-                                        cx,
-                                    );
-                                }),
-                            ))
-                            .child(self.toolbar_item(
-                                "obj-key-ttl",
-                                "icons/gear.svg",
-                                t!("redis.tools.key_apply_ttl").to_string(),
-                                category == Category::Tables && open_enabled,
-                                cx.listener(move |this, _event, _window, cx| {
-                                    let Some((connection_index, database_index, name, _)) =
-                                        object_selection(&pane_for_ttl, cx)
-                                    else {
-                                        return;
-                                    };
-                                    let Some(database) =
-                                        this.database_name(connection_index, database_index)
-                                    else {
-                                        return;
-                                    };
-                                    this.open_redis_tools(
-                                        connection_index,
-                                        database_index,
-                                        database,
-                                        super::redis_tools::RedisToolsSection::Keys,
-                                        Some(name),
-                                        cx,
-                                    );
-                                }),
-                            ))
                     })
                     .when(!key_value, |bar| {
                         bar.child(toolbar_separator(theme)).child(self.toolbar_item(

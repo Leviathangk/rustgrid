@@ -311,14 +311,15 @@ impl GridView {
         if local_x < 0.0 || local_y < 0.0 {
             return None;
         }
+        let gutter = self.gutter_width();
         let row = (local_y / GRID_ROW_HEIGHT).floor() as usize;
         if row >= self.display_row_count() {
             return None;
         }
-        if local_x < GRID_GUTTER_WIDTH {
+        if local_x < gutter {
             return Some(GridHit::Gutter(row));
         }
-        let mut accumulated = GRID_GUTTER_WIDTH;
+        let mut accumulated = gutter;
         for (col, width) in self
             .state
             .column_widths
@@ -1025,15 +1026,16 @@ impl GridView {
     /// Scroll horizontally so column `col` is fully visible.
     fn reveal_column(&self, col: usize) {
         let widths = &self.state.column_widths;
-        let left = GRID_GUTTER_WIDTH + widths.iter().take(col).sum::<f32>();
+        let gutter = self.gutter_width();
+        let left = gutter + widths.iter().take(col).sum::<f32>();
         let right = left + widths.get(col).copied().unwrap_or(0.0);
         let viewport = f32::from(self.hscroll.bounds().size.width);
         if viewport <= 0.0 {
             return;
         }
         let shown = -f32::from(self.hscroll.offset().x);
-        let start = if left - GRID_GUTTER_WIDTH < shown {
-            left - GRID_GUTTER_WIDTH
+        let start = if left - gutter < shown {
+            left - gutter
         } else if right > shown + viewport {
             right - viewport
         } else {

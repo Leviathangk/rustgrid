@@ -1034,6 +1034,7 @@ impl AppView {
         self.clear_info_selection();
         self.objects_selection.clear();
         self.objects_row_rects.clear();
+        let key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
         self.object_pane = Some(cx.new(|cx| {
             ObjectPane::new(
                 app,
@@ -1041,12 +1042,22 @@ impl AppView {
                 database_index,
                 schema,
                 category,
-                self.driver_supports(connection_index, DriverCapability::KeyValue),
+                key_value,
                 theme,
                 grid_viewport,
                 cx,
             )
         }));
+        self.object_search_input.update(cx, |input, cx| {
+            input.set_placeholder(
+                if key_value {
+                    t!("redis.key.search").to_string()
+                } else {
+                    t!("object.search").to_string()
+                },
+                cx,
+            );
+        });
         // Nothing has ever measured a grid in this window yet: one deferred repaint lets the
         // pane's first scroller report its height and the rows settle before the user sees a
         // wrong column split.
@@ -1341,6 +1352,15 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.main_tab = MainTab::Tables;
+        let selected = match &namespace {
+            Some(name) => format!("keys-{connection_index}-{database_index}-{name}"),
+            None => format!("db-{connection_index}-{database_index}"),
+        };
+        self.tree_pane.update(cx, |tree, cx| {
+            tree.selected = Some(selected);
+            tree.selected_table = None;
+            cx.notify();
+        });
         self.set_object_namespace(connection_index, database_index, namespace, cx);
         self.show_database_objects(connection_index, database_index, cx);
     }
