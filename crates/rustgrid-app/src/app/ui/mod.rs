@@ -425,7 +425,7 @@ pub(super) fn radio_box(selected: bool, theme: Theme) -> impl IntoElement {
 /// The shared chrome for an app-drawn floating surface (popup menus, dropdown lists, pickers):
 /// absolutely positioned with the dialog face, a border and the soft shadow.
 ///
-/// It also sets `.occlude()`, which is the important part: gpui dispatches `ScrollWheelEvent` to
+/// It also sets `.occlude()`, which is the important part: gpui dispatches `ScrollEvent` to
 /// *every* scrollable hitbox under the cursor (each `overflow_*` container handles it without
 /// stopping propagation), so a popup list that overlays a scrollable pane would scroll both.
 /// `.occlude()` makes every hitbox behind the popup report `should_handle_scroll() == false`

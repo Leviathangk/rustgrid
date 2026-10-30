@@ -2288,7 +2288,7 @@ impl TableDesignView {
     /// The scroll container a designer grid lives in: the header and list scroll horizontally with
     /// the view's own scrollbars, and the wheel drives both axes.
     ///
-    /// A gpui `uniform_list` scrolls itself from the *bubble* phase of a `ScrollWheelEvent`, which
+    /// A gpui `uniform_list` scrolls itself from the *bubble* phase of a `ScrollEvent`, which
     /// the grids' surrounding scrollable containers also take part in, so the designer's lists did
     /// not scroll under the wheel. This owns a hitbox in the capture phase instead (exactly as the
     /// table grid does): the wheel scrolls the rows, a horizontal gesture pans the columns, and a
@@ -2347,32 +2347,30 @@ impl TableDesignView {
                 canvas(
                     |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                     move |_bounds, hitbox, window, _cx| {
-                        window.on_mouse_event(
-                            move |event: &ScrollWheelEvent, phase, window, cx| {
-                                if phase != DispatchPhase::Capture
-                                    || !hitbox.should_handle_scroll(window)
-                                {
-                                    return;
+                        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture
+                                || !hitbox.should_handle_scroll(window)
+                            {
+                                return;
+                            }
+                            let (dx, dy) = match event.delta {
+                                ScrollDelta::Lines(delta) => {
+                                    (delta.x * DESIGN_ROW_HEIGHT, delta.y * DESIGN_ROW_HEIGHT)
                                 }
-                                let (dx, dy) = match event.delta {
-                                    ScrollDelta::Lines(delta) => {
-                                        (delta.x * DESIGN_ROW_HEIGHT, delta.y * DESIGN_ROW_HEIGHT)
-                                    }
-                                    ScrollDelta::Pixels(delta) => {
-                                        (f32::from(delta.x), f32::from(delta.y))
-                                    }
-                                };
-                                if dx == 0.0 && dy == 0.0 {
-                                    return;
+                                ScrollDelta::Pixels(delta) => {
+                                    (f32::from(delta.x), f32::from(delta.y))
                                 }
-                                let consumed = weak
-                                    .update(cx, |view, cx| view.design_scroll(dx, dy, cx))
-                                    .unwrap_or(false);
-                                if consumed {
-                                    cx.stop_propagation();
-                                }
-                            },
-                        );
+                            };
+                            if dx == 0.0 && dy == 0.0 {
+                                return;
+                            }
+                            let consumed = weak
+                                .update(cx, |view, cx| view.design_scroll(dx, dy, cx))
+                                .unwrap_or(false);
+                            if consumed {
+                                cx.stop_propagation();
+                            }
+                        });
                     },
                 )
                 .absolute()

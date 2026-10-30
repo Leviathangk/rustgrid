@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use gpui::{
     App, AppContext, Context, DispatchPhase, Entity, HitboxBehavior, InteractiveElement,
-    IntoElement, ParentElement, Render, ScrollDelta, ScrollWheelEvent, SharedString, Styled,
+    IntoElement, ParentElement, Render, ScrollDelta, ScrollEvent, SharedString, Styled,
     Subscription, Window, canvas, div, px,
 };
 use gpui_kit::TestSupportExt as _;
@@ -524,30 +524,28 @@ impl Render for SqlEditor {
                 canvas(
                     |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                     move |_bounds, hitbox, window, _cx| {
-                        window.on_mouse_event(
-                            move |event: &ScrollWheelEvent, phase, window, cx| {
-                                if phase != DispatchPhase::Capture
-                                    || !hitbox.should_handle_scroll(window)
-                                {
-                                    return;
-                                }
-                                if !(event.modifiers.control || event.modifiers.platform) {
-                                    return;
-                                }
-                                let dy = match event.delta {
-                                    ScrollDelta::Lines(delta) => delta.y,
-                                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                                };
-                                if dy == 0.0 {
-                                    return;
-                                }
-                                // Scroll up (positive line delta) zooms in, matching the platform
-                                // convention; the previous sign made Ctrl+wheel feel reversed.
-                                if zoom(if dy > 0.0 { 1.0 } else { -1.0 }, cx) {
-                                    cx.stop_propagation();
-                                }
-                            },
-                        );
+                        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture
+                                || !hitbox.should_handle_scroll(window)
+                            {
+                                return;
+                            }
+                            if !(event.modifiers.control || event.modifiers.platform) {
+                                return;
+                            }
+                            let dy = match event.delta {
+                                ScrollDelta::Lines(delta) => delta.y,
+                                ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                            };
+                            if dy == 0.0 {
+                                return;
+                            }
+                            // Scroll up (positive line delta) zooms in, matching the platform
+                            // convention; the previous sign made Ctrl+wheel feel reversed.
+                            if zoom(if dy > 0.0 { 1.0 } else { -1.0 }, cx) {
+                                cx.stop_propagation();
+                            }
+                        });
                     },
                 )
                 .absolute()

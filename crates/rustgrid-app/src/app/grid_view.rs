@@ -1018,60 +1018,58 @@ impl Render for GridView {
                         |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                         move |_bounds, hitbox, window, _cx| {
                             let grid_focus = grid_focus.clone();
-                            window.on_mouse_event(
-                                move |event: &ScrollWheelEvent, phase, window, cx| {
-                                    if phase != DispatchPhase::Capture
-                                        || !hitbox.should_handle_scroll(window)
-                                    {
-                                        return;
+                            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture
+                                    || !hitbox.should_handle_scroll(window)
+                                {
+                                    return;
+                                }
+                                let (dx, dy) = match event.delta {
+                                    ScrollDelta::Lines(delta) => {
+                                        (delta.x * GRID_ROW_HEIGHT, delta.y * GRID_ROW_HEIGHT)
                                     }
-                                    let (dx, dy) = match event.delta {
-                                        ScrollDelta::Lines(delta) => {
-                                            (delta.x * GRID_ROW_HEIGHT, delta.y * GRID_ROW_HEIGHT)
+                                    ScrollDelta::Pixels(delta) => {
+                                        (f32::from(delta.x), f32::from(delta.y))
+                                    }
+                                };
+                                if dx == 0.0 && dy == 0.0 {
+                                    return;
+                                }
+                                let position = event.position;
+                                let consumed = weak
+                                    .update(cx, |this, cx| {
+                                        // A horizontal trackpad swipe pans the columns; the
+                                        // vertical wheel keeps driving vertical scrolling. A
+                                        // horizontal gesture is claimed even when the columns
+                                        // cannot pan any further: the row list scrolls on one
+                                        // axis only and gpui maps a delta with no room on its
+                                        // axis onto the other, so letting such an event bubble
+                                        // made a swipe past the last column roll the rows
+                                        // instead of doing nothing. A vertical delta is left to
+                                        // bubble as before, so the wheel still reaches the list
+                                        // when the selection cannot move.
+                                        let horizontal = dx != 0.0;
+                                        if horizontal {
+                                            this.scroll_grid_columns(dx, cx);
                                         }
-                                        ScrollDelta::Pixels(delta) => {
-                                            (f32::from(delta.x), f32::from(delta.y))
+                                        let vertical = dy != 0.0
+                                            && this.scroll_grid_selection(position, dy, cx);
+                                        let consumed = horizontal || vertical;
+                                        if consumed {
+                                            cx.stop_propagation();
                                         }
-                                    };
-                                    if dx == 0.0 && dy == 0.0 {
-                                        return;
-                                    }
-                                    let position = event.position;
-                                    let consumed = weak
-                                        .update(cx, |this, cx| {
-                                            // A horizontal trackpad swipe pans the columns; the
-                                            // vertical wheel keeps driving vertical scrolling. A
-                                            // horizontal gesture is claimed even when the columns
-                                            // cannot pan any further: the row list scrolls on one
-                                            // axis only and gpui maps a delta with no room on its
-                                            // axis onto the other, so letting such an event bubble
-                                            // made a swipe past the last column roll the rows
-                                            // instead of doing nothing. A vertical delta is left to
-                                            // bubble as before, so the wheel still reaches the list
-                                            // when the selection cannot move.
-                                            let horizontal = dx != 0.0;
-                                            if horizontal {
-                                                this.scroll_grid_columns(dx, cx);
-                                            }
-                                            let vertical = dy != 0.0
-                                                && this.scroll_grid_selection(position, dy, cx);
-                                            let consumed = horizontal || vertical;
-                                            if consumed {
-                                                cx.stop_propagation();
-                                            }
-                                            consumed
-                                        })
-                                        .unwrap_or(false);
-                                    if consumed {
-                                        // Scrolling is an implicit commit of an in-place cell
-                                        // editor, and dropping that editor also drops the keyboard
-                                        // focus it held — after which Ctrl+C, the arrow keys and
-                                        // Delete would silently do nothing. Hand focus back to the
-                                        // grid so its shortcuts keep working.
-                                        window.focus(&grid_focus, cx);
-                                    }
-                                },
-                            );
+                                        consumed
+                                    })
+                                    .unwrap_or(false);
+                                if consumed {
+                                    // Scrolling is an implicit commit of an in-place cell
+                                    // editor, and dropping that editor also drops the keyboard
+                                    // focus it held — after which Ctrl+C, the arrow keys and
+                                    // Delete would silently do nothing. Hand focus back to the
+                                    // grid so its shortcuts keep working.
+                                    window.focus(&grid_focus, cx);
+                                }
+                            });
                         },
                     )
                     .absolute()

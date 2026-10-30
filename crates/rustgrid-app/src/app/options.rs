@@ -722,6 +722,7 @@ impl AppView {
     /// reset button restores the built-in ones, its clear button unbinds it, and 默认 resets all.
     fn options_shortcuts_body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
+        let os = cx.platform_info().os;
         let filter = self.options_shortcut_filter.trim().to_lowercase();
         let matches = |command: &keymap::Command| {
             filter.is_empty()
@@ -729,7 +730,7 @@ impl AppView {
                 || command.id.contains(&filter)
                 || keymap::keys_for(command, &self.options_shortcuts)
                     .iter()
-                    .any(|key| shortcut_label(key).to_lowercase().contains(&filter))
+                    .any(|key| shortcut_label(key, os).to_lowercase().contains(&filter))
         };
 
         let mut list = div()
@@ -812,7 +813,7 @@ impl AppView {
         let capture_focus = focus.clone();
         let keys = keymap::keys_for(command, &self.options_shortcuts);
         let overridden = self.options_shortcuts.contains_key(id);
-        let conflicts = keymap::conflicts(command, &self.options_shortcuts);
+        let conflicts = keymap::conflicts(command, &self.options_shortcuts, cx.platform_info().os);
 
         let field_text = if recording {
             t!("options.shortcuts.press").to_string()
@@ -820,7 +821,7 @@ impl AppView {
             t!("keymap.unbound").to_string()
         } else {
             keys.iter()
-                .map(|key| shortcut_label(key))
+                .map(|key| shortcut_label(key, cx.platform_info().os))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -1429,7 +1430,9 @@ mod tests {
     use super::*;
 
     fn record(keystroke: &str) -> Option<String> {
-        shortcut_from_keystroke(&Keystroke::parse(keystroke).expect("keystroke"))
+        shortcut_from_keystroke(
+            &Keystroke::parse_with_os(keystroke, OperatingSystem::Windows).expect("keystroke"),
+        )
     }
 
     #[test]

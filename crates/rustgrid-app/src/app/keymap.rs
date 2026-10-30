@@ -10,8 +10,11 @@
 //! are bound in `AppView::new` and are not commands.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
-use gpui::{App, KeyBinding, Keystroke, NoAction};
+use gpui::{
+    Action, App, KeyBinding, KeyBindingContextPredicate, Keystroke, NoAction, OperatingSystem,
+};
 use gpui_kit::component::input::ShowCompletions;
 
 use super::{
@@ -80,8 +83,8 @@ pub(super) struct Command {
     pub defaults: &'static [&'static str],
     /// Built-in keystrokes on macOS, where they differ from `defaults`.
     pub mac_defaults: Option<&'static [&'static str]>,
-    /// Builds the binding of `keystroke` in `context`.
-    pub bind: fn(&str, Option<&'static str>) -> KeyBinding,
+    /// Builds `keystroke`'s binding in `context`; `None` when it does not parse.
+    pub bind: fn(&str, Option<&'static str>, &App) -> Option<KeyBinding>,
 }
 
 impl Command {
@@ -94,9 +97,27 @@ impl Command {
     }
 }
 
+/// Build a binding from a runtime keystroke. `settings.json` can rebind anything, so a command's
+/// keystrokes are never `'static`; `KeyBinding::new` (static, `DummyKeyboardMapper`) therefore
+/// cannot be used. `KeyBinding::load` parses against the host OS (so `secondary-r` is ⌘R on macOS
+/// and Ctrl+R elsewhere) and resolves the context with the app's own keyboard mapper.
+fn load_binding(
+    keystroke: &str,
+    action: impl Action,
+    context: Option<&'static str>,
+    cx: &App,
+) -> Option<KeyBinding> {
+    let context = context.map(|context| {
+        KeyBindingContextPredicate::parse(context)
+            .map(Rc::new)
+            .expect("the app's key contexts are valid predicates")
+    });
+    KeyBinding::load(keystroke, Box::new(action), context, false, None, cx).ok()
+}
+
 macro_rules! bind {
     ($action:expr) => {
-        |keystroke, context| KeyBinding::new(keystroke, $action, context)
+        |keystroke, context, cx| load_binding(keystroke, $action, context, cx)
     };
 }
 
@@ -620,8 +641,8 @@ pub(super) fn set_keys(
 
 /// A keystroke in a canonical form for comparison (`secondary-r` and `ctrl-r` are the same key on
 /// Windows), or `None` when it does not parse.
-fn canonical(keystroke: &str) -> Option<String> {
-    Keystroke::parse(keystroke).ok().map(|key| {
+fn canonical(keystroke: &str, os: OperatingSystem) -> Option<String> {
+    Keystroke::parse_with_os(keystroke, os).ok().map(|key| {
         let modifiers = key.modifiers;
         let mut parts = Vec::new();
         if modifiers.control {
@@ -649,10 +670,11 @@ fn canonical(keystroke: &str) -> Option<String> {
 pub(super) fn conflicts(
     command: &Command,
     overrides: &BTreeMap<String, Vec<String>>,
+    os: OperatingSystem,
 ) -> Vec<&'static Command> {
     let mine: Vec<String> = keys_for(command, overrides)
         .iter()
-        .filter_map(|key| canonical(key))
+        .filter_map(|key| canonical(key, os))
         .collect();
     if mine.is_empty() {
         return Vec::new();
@@ -663,7 +685,7 @@ pub(super) fn conflicts(
         .filter(|other| {
             keys_for(other, overrides)
                 .iter()
-                .filter_map(|key| canonical(key))
+                .filter_map(|key| canonical(key, os))
                 .any(|key| mine.contains(&key))
         })
         .collect()
@@ -687,21 +709,22 @@ pub(super) fn bind_keymap(
     overrides: &BTreeMap<String, Vec<String>>,
     previous: &[(String, &'static str)],
 ) -> BoundKeys {
+    let os = cx.platform_info().os;
     let mut bindings = Vec::new();
     for (keystroke, context) in previous {
-        if Keystroke::parse(keystroke).is_ok() {
-            bindings.push(KeyBinding::new(
-                keystroke,
-                NoAction {},
-                binding_context(context),
-            ));
+        if let Some(binding) = load_binding(keystroke, NoAction {}, binding_context(context), cx) {
+            bindings.push(binding);
         }
     }
     let mut bound = Vec::new();
     for command in COMMANDS {
         for keystroke in keys_for(command, overrides) {
-            if Keystroke::parse(&keystroke).is_ok() {
-                bindings.push((command.bind)(&keystroke, binding_context(command.context)));
+            if Keystroke::parse_with_os(&keystroke, os).is_err() {
+                continue;
+            }
+            if let Some(binding) = (command.bind)(&keystroke, binding_context(command.context), cx)
+            {
+                bindings.push(binding);
                 bound.push((keystroke, command.context));
             }
         }
@@ -713,6 +736,8 @@ pub(super) fn bind_keymap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OS: OperatingSystem = OperatingSystem::Windows;
 
     fn keys(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -734,7 +759,7 @@ mod tests {
                 .chain(command.mac_defaults.unwrap_or(&[]))
             {
                 assert!(
-                    Keystroke::parse(key).is_ok(),
+                    Keystroke::parse_with_os(key, OS).is_ok(),
                     "{}: bad default {key}",
                     command.id
                 );
@@ -746,7 +771,7 @@ mod tests {
     fn built_in_keystrokes_do_not_conflict() {
         let none = BTreeMap::new();
         for command in COMMANDS {
-            let clashes: Vec<&str> = conflicts(command, &none).iter().map(|c| c.id).collect();
+            let clashes: Vec<&str> = conflicts(command, &none, OS).iter().map(|c| c.id).collect();
             assert!(
                 clashes.is_empty(),
                 "{} clashes with {clashes:?}",
@@ -773,7 +798,7 @@ mod tests {
         let mut overrides = BTreeMap::new();
         set_keys(save, Vec::new(), &mut overrides);
         assert!(keys_for(save, &overrides).is_empty());
-        assert!(conflicts(save, &overrides).is_empty());
+        assert!(conflicts(save, &overrides, OS).is_empty());
     }
 
     #[test]
@@ -784,14 +809,17 @@ mod tests {
         let mut overrides = BTreeMap::new();
         set_keys(run, keys(&["secondary-s"]), &mut overrides);
 
-        let clashes: Vec<&str> = conflicts(run, &overrides).iter().map(|c| c.id).collect();
+        let clashes: Vec<&str> = conflicts(run, &overrides, OS)
+            .iter()
+            .map(|c| c.id)
+            .collect();
         assert_eq!(clashes, vec!["query.save"]);
         assert!(
-            conflicts(save, &overrides)
+            conflicts(save, &overrides, OS)
                 .iter()
                 .any(|c| c.id == "query.run")
         );
         // designer.save also uses Ctrl/⌘+S, but in the designer's context.
-        assert!(conflicts(designer_save, &overrides).is_empty());
+        assert!(conflicts(designer_save, &overrides, OS).is_empty());
     }
 }

@@ -71,10 +71,10 @@ sys-locale = "0.3"
 # gpui-kit's `gpui-fast` feature makes the kit re-export `gpui-fast`, so this alias must point at
 # gpui-fast too (a mismatched pair is two GPUI cores with incompatible element types). Note that
 # gpui-kit still depends on gpui-pre unconditionally, so both engines are compiled; the alternative
-# is the upstream backend: `gpui = { package = "gpui-pre", version = "0.3.7" }` with
-# `gpui-kit = { version = "0.7", features = ["tree-sitter-sql"] }`.
-gpui = { package = "gpui-fast", version = "0.1.7" }
-gpui-kit = { version = "0.7", features = ["tree-sitter-sql", "gpui-fast"] }
+# is the upstream backend: `gpui = { package = "gpui-pre", version = "0.3.10" }` with
+# `gpui-kit = { version = "0.8", features = ["tree-sitter-sql"] }`.
+gpui = { package = "gpui-fast", version = "0.1.12" }
+gpui-kit = { version = "0.8", features = ["tree-sitter-sql", "gpui-fast"] }
 # macOS-only: the Dock icon (`rustgrid-app/src/dock_icon.rs`). Every version below is already in the
 # lock file through `gpui-fast-macos`, so this adds no new crates to the tree — which is why the
 # features are listed here rather than at the (single) use site.
@@ -144,22 +144,4 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
-
-# The default `debug = 2` writes the full DWARF of this dependency tree (GPUI, sqlx, tiberius,
-# oracledb, ...) into every executable. On windows-gnu `split-debuginfo` is off, so it all lands
-# inside `target/debug/deps/*.exe` — ~1.5 GB per binary, and every dependency-graph change leaves
-# another one behind. Line tables are what a panic/backtrace actually needs, so keep those and drop
-# the rest; third-party crates keep no debug info at all (their frames still resolve by symbol, and
-# the app's own frames — the ones we debug — keep file:line).
-[profile.dev]
-debug = 1
-
-[profile.dev.package."*"]
-debug = false
-
-# `cargo test --workspace` builds the same story for every integration-test binary.
-[profile.test]
-debug = 1
-
-[profile.test.package."*"]
-debug = false
+# probe 1793342228

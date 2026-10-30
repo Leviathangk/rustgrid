@@ -1475,19 +1475,19 @@ impl AppView {
             .child(self.context_item_shortcut(
                 "tab-close",
                 t!("tab.close").to_string(),
-                self.command_shortcut_label("general.close_tab"),
+                self.command_shortcut_label("general.close_tab", cx.platform_info().os),
                 cx.listener(move |this, _event, _window, cx| this.close_tab(target, cx)),
             ))
             .child(self.context_item_shortcut(
                 "tab-close-others",
                 t!("tab.close_other").to_string(),
-                self.command_shortcut_label("general.close_other_tabs"),
+                self.command_shortcut_label("general.close_other_tabs", cx.platform_info().os),
                 cx.listener(move |this, _event, _window, cx| this.close_other_tabs(target, cx)),
             ))
             .child(self.context_item_shortcut(
                 "tab-close-all",
                 t!("tab.close_all").to_string(),
-                self.command_shortcut_label("general.close_all_tabs"),
+                self.command_shortcut_label("general.close_all_tabs", cx.platform_info().os),
                 cx.listener(|this, _event, _window, cx| this.close_all_tabs(cx)),
             ));
 

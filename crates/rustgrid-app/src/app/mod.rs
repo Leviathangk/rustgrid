@@ -10,11 +10,11 @@ use gpui::{
     Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
     DispatchPhase, Div, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight,
     HighlightStyle, ImageSource, KeyBinding, KeyDownEvent, Keystroke, ListHorizontalSizingBehavior,
-    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Resource, ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
-    StyledText, Subscription, Svg, TextLayout, UTF16Selection, UniformListScrollHandle, WeakEntity,
-    Window, WindowBounds, WindowHandle, WindowId, WindowOptions, anchored, canvas, deferred, div,
-    img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels,
+    Point, Render, Resource, ScrollDelta, ScrollEvent, ScrollHandle, ScrollStrategy, SharedString,
+    Stateful, StyledText, Subscription, Svg, TextLayout, UTF16Selection, UniformListScrollHandle,
+    WeakEntity, Window, WindowBounds, WindowHandle, WindowId, WindowOptions, anchored, canvas,
+    deferred, div, img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{
     AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,
@@ -2787,19 +2787,21 @@ mod workspace;
 use info_pane::{InfoPane, SidebarHost};
 
 /// A configured shortcut, formatted for display: `"secondary-r"` reads `Ctrl+R` on Windows/Linux
-/// and `⌘R` on macOS (the `secondary` modifier is platform-dependent).
-fn shortcut_label(shortcut: &str) -> String {
-    Keystroke::parse(shortcut).map_or_else(|_| shortcut.to_string(), |key| Kbd::format(&key))
+/// and `⌘R` on macOS. The `secondary` modifier is platform-dependent, so the keystroke is parsed
+/// against `os` — `Keystroke::parse` only takes a `'static` string.
+fn shortcut_label(shortcut: &str, os: OperatingSystem) -> String {
+    Keystroke::parse_with_os(shortcut, os)
+        .map_or_else(|_| shortcut.to_string(), |key| Kbd::format(&key))
 }
 
 impl AppView {
     /// The first keystroke bound to keymap command `id`, formatted for display (a toolbar
     /// tooltip), or `None` when the command is unbound.
-    fn command_shortcut_label(&self, id: &str) -> Option<String> {
+    fn command_shortcut_label(&self, id: &str, os: OperatingSystem) -> Option<String> {
         let command = keymap::command(id)?;
         keymap::keys_for(command, &self.shortcuts)
             .first()
-            .map(|key| shortcut_label(key))
+            .map(|key| shortcut_label(key, os))
     }
 }
 

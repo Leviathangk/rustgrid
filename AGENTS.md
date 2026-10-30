@@ -133,11 +133,11 @@ not a later refactor.
 
 - Rust **stable**, **edition 2024** (`rust-toolchain.toml` pins `stable`; workspace
   `rust-version = "1.94"`).
-- UI: **`gpui-kit = "0.7"`** (crates.io). It is the facade over a published GPUI snapshot plus
+- UI: **`gpui-kit = "0.8"`** (crates.io). It is the facade over a published GPUI snapshot plus
   `gpui-base` and the shadcn-styled `gpui-component`, and it re-exports the engine itself. The
-  workspace enables its **`gpui-fast`** feature, so the engine is **`gpui-fast = "0.1.7"`** —
+  workspace enables its **`gpui-fast`** feature, so the engine is **`gpui-fast = "0.1.12"`** —
   Longbridge's rendering/layout-optimised fork of `gpui-pre` — and the alias the ~40 view files
-  import is `gpui = { package = "gpui-fast", version = "0.1.7" }`. **The two lines must move in
+  import is `gpui = { package = "gpui-fast", version = "0.1.12" }`. **The two lines must move in
   lockstep**: the kit re-exports whichever engine the feature selects, so a mismatch is two GPUI
   cores with incompatible element types. `gpui-kit` still depends on `gpui-pre` unconditionally, so
   that crate (and `gpui-pre-windows`' build script) is compiled too — see Gotchas. Do **not**
@@ -485,7 +485,7 @@ touching UI code.
   (it only scrolls and reserves space), so the list ships its own horizontal scrollbar
   (`render_object_hscrollbar`, driven by `object_scroll`); keep it in sync when touching the
   object list.
-- **Floating popups must be built with `ui::popup_panel`.** gpui dispatches `ScrollWheelEvent`
+- **Floating popups must be built with `ui::popup_panel`.** gpui dispatches `ScrollEvent`
   to *every* scrollable hitbox under the cursor — each `overflow_*` container handles it and none
   stops propagation — so a popup whose list overlays a scrollable pane scrolls **both** it and the
   pane behind it. The only fix is hitbox behavior: a `BlockMouse` hitbox (`.occlude()`) makes all
@@ -554,10 +554,10 @@ the root `Cargo.toml`; a mismatch gives two GPUI copies and incompatible element
 `gpui-fast` feature is what makes the two agree — bump both, and re-check that the feature is still
 called that. Two kinds of upgrade:
 
-- **A patch bump (no code):** `cargo update -p gpui-fast -p gpui-kit -p gpui-pre`. The `"0.1.7"` /
-  `"0.7"` ranges in the root `Cargo.toml` keep this in-family (the `-p gpui-pre` is only there
+- **A patch bump (no code):** `cargo update -p gpui-fast -p gpui-kit -p gpui-pre`. The `"0.1.12"` /
+  `"0.8"` ranges in the root `Cargo.toml` keep this in-family (the `-p gpui-pre` is only there
   because the kit pins it too).
-- **A breaking bump (e.g. `gpui-kit 0.8`, a new `gpui-fast` snapshot):** edit both lines in the root
+- **A breaking bump (e.g. `gpui-kit 0.9`, a new `gpui-fast` snapshot):** edit both lines in the root
   `Cargo.toml`, then fix the fallout. It is localized by design:
   - `ui/text_input.rs`, `ui/combo.rs` (the wrappers) and the dialog builders
     (`dialogs.rs`, `db_dialog.rs`, `options.rs`) absorb gpui-kit component API changes; the
@@ -569,6 +569,15 @@ called that. Two kinds of upgrade:
     (`focus(&h, cx)`, `ScrollHandle::max_offset()` returning `Point`, `ShapedLine::paint`
     taking `TextAlign` + `Option<Pixels>`, `BoxShadow { inset }`, `track_scroll(&h)`,
     `Entity::update` returning `R`). Budget one pass like that per breaking engine bump.
+  - `0.7` → `0.8.1` (gpui-fast 0.1.7 → 0.1.12, gpui-pre 0.3.9 → 0.3.10) was exactly one file
+    plus one helper: keystrokes are no longer parsed from runtime strings.
+    `Keystroke::parse` takes a `'static` string and `KeyBinding::new` inherits that, so the app's
+    rebindable commands (`settings.json` overrides) go through `keymap.rs::load_binding`, which
+    calls `KeyBinding::load(..., cx)` (host-OS aware, so `secondary` resolves correctly) with a
+    `KeyBindingContextPredicate`; display strings use `Keystroke::parse_with_os(.., cx.platform_info().os)`
+    (`shortcut_label` now takes `OperatingSystem`, and `keymap::conflicts` takes it too), and
+    `Modifiers::secondary()`/`secondary_key()` likewise take `&App`. The only other delta was
+    `ScrollWheelEvent`, renamed to `ScrollEvent` (with a new `source: ScrollSource` field).
   - `Cargo.lock` is committed, so pin exactly what built.
 
 ## Dependency policy
@@ -1138,7 +1147,7 @@ make more engines cheap later — do not build those features early.
   display-cycle flush — no app frames on the stack, which is why 保存并连接 (saving closes the
   connection window) crashed the user in issue #4. Upstream knows (zed-industries/zed#64819,
   longbridge/gpui-kit#3192) and the fix — replacing the subclassing adapter,
-  zed-industries/zed#65186 — is **not merged yet**, so no released `gpui-fast` (0.1.7 is newest)
+  zed-industries/zed#65186 — is **not merged yet**, so no released `gpui-fast` (0.1.12 is newest)
   carries it. Skipping `a11y_init` is the only in-process way to avoid it; the cost is that
   VoiceOver cannot read the app on macOS. **Remove the macOS arm of `application()` as soon as
   `gpui-fast` ships the fix.**
