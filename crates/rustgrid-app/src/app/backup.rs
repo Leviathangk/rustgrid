@@ -975,10 +975,13 @@ impl AppView {
                     .child(ui::rename_field(theme, input))
                     .into_any_element(),
                 None => div()
+                    .id(SharedString::from(format!("backup-tile-label-{key}")))
                     .flex_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
+                    .truncate()
+                    .tooltip(ui::text_tooltip(name.clone()))
                     .text_color(rgb(theme.text))
                     .child(name)
                     .into_any_element(),

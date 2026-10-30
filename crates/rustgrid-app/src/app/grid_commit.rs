@@ -52,9 +52,11 @@ impl GridView {
     }
 
     /// Auto-commit the pending edits to existing rows (single-cell edits), without inserts.
+    /// This is the save that happens when a cell editor loses focus, so it confirms itself with
+    /// the same "Changes saved" toast as the explicit Save / Ctrl+S path.
     pub(super) fn commit_edits(&mut self, cx: &mut Context<'_, Self>) {
         let updates = self.collect_updates();
-        self.flush_changes(Vec::new(), updates, false, cx);
+        self.flush_changes(Vec::new(), updates, true, cx);
     }
 
     /// Build the pending insert rows as engine-agnostic [`RowInsert`]s.
@@ -118,8 +120,8 @@ impl GridView {
     }
 
     /// Write the pending inserts and updates in one transaction-ish pass, then reload the page.
-    /// `notify_saved` is set by the explicit Save path (button / Ctrl+S), never by the silent
-    /// auto-commit of a single cell edit, so a save always confirms itself.
+    /// `notify_saved` is set by both the explicit Save path (button / Ctrl+S) and the auto-commit
+    /// of a single cell edit, so every write that reaches the database confirms itself.
     fn flush_changes(
         &mut self,
         inserts: Vec<RowInsert>,

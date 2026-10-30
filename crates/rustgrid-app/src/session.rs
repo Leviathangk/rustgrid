@@ -236,6 +236,63 @@ impl CellSelection {
             })
     }
 
+    /// Remove `span` from every range, splitting a range the span cuts through into the pieces
+    /// around it. Returns whether any cell was actually removed. Ctrl+click uses this so a click
+    /// inside 全选's single big range deselects just the clicked cell (like Excel) instead of
+    /// dropping the whole selection.
+    pub fn subtract(&mut self, span: CellRange) -> bool {
+        let (span_start_row, span_end_row) = span.rows();
+        let (span_start_col, span_end_col) = span.cols();
+        let mut pieces = Vec::new();
+        let mut changed = false;
+        for range in &self.ranges {
+            let (start_row, end_row) = range.rows();
+            let (start_col, end_col) = range.cols();
+            let hit_start_row = start_row.max(span_start_row);
+            let hit_end_row = end_row.min(span_end_row);
+            let hit_start_col = start_col.max(span_start_col);
+            let hit_end_col = end_col.min(span_end_col);
+            if hit_start_row > hit_end_row || hit_start_col > hit_end_col {
+                pieces.push(*range);
+                continue;
+            }
+            changed = true;
+            if start_row < hit_start_row {
+                pieces.push(CellRange {
+                    anchor: (start_row, start_col),
+                    cursor: (hit_start_row - 1, end_col),
+                });
+            }
+            if hit_end_row < end_row {
+                pieces.push(CellRange {
+                    anchor: (hit_end_row + 1, start_col),
+                    cursor: (end_row, end_col),
+                });
+            }
+            if start_col < hit_start_col {
+                pieces.push(CellRange {
+                    anchor: (hit_start_row, start_col),
+                    cursor: (hit_end_row, hit_start_col - 1),
+                });
+            }
+            if hit_end_col < end_col {
+                pieces.push(CellRange {
+                    anchor: (hit_start_row, hit_end_col + 1),
+                    cursor: (hit_end_row, end_col),
+                });
+            }
+        }
+        if changed {
+            self.ranges = pieces;
+            if self.ranges.is_empty() {
+                self.active = 0;
+            } else {
+                self.active = self.active.min(self.ranges.len() - 1);
+            }
+        }
+        changed
+    }
+
     /// Every selected cell, de-duplicated across ranges.
     pub fn cells(&self) -> Vec<(usize, usize)> {
         let mut cells: Vec<(usize, usize)> = Vec::new();
@@ -1523,6 +1580,78 @@ mod tests {
             ),
             "SELECT * FROM [app].[dbo].[users] WHERE [name] = 'ann' ORDER BY [id] DESC \
              OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY"
+        );
+    }
+
+    #[test]
+    fn subtracting_a_cell_splits_a_select_all_range_in_four() {
+        let mut selection = CellSelection::single((0, 0), (9, 2));
+        assert!(selection.subtract(CellRange {
+            anchor: (5, 1),
+            cursor: (5, 1),
+        }));
+        assert_eq!(selection.ranges.len(), 4);
+        assert!(!selection.contains(5, 1));
+        assert_eq!(selection.cells().len(), 30 - 1);
+        assert_eq!(
+            selection.ranges,
+            vec![
+                CellRange {
+                    anchor: (0, 0),
+                    cursor: (4, 2),
+                },
+                CellRange {
+                    anchor: (6, 0),
+                    cursor: (9, 2),
+                },
+                CellRange {
+                    anchor: (5, 0),
+                    cursor: (5, 0),
+                },
+                CellRange {
+                    anchor: (5, 2),
+                    cursor: (5, 2),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn subtracting_a_cell_drops_a_single_cell_range() {
+        let mut selection = CellSelection::single((2, 2), (2, 2));
+        assert!(selection.subtract(CellRange {
+            anchor: (2, 2),
+            cursor: (2, 2),
+        }));
+        assert!(selection.ranges.is_empty());
+        assert!(!selection.contains(2, 2));
+    }
+
+    #[test]
+    fn subtracting_a_row_span_removes_the_row_from_select_all() {
+        let mut selection = CellSelection::single((0, 0), (3, 2));
+        assert!(selection.subtract(CellRange {
+            anchor: (1, 0),
+            cursor: (1, 2),
+        }));
+        assert!(!selection.contains(1, 0));
+        assert!(!selection.contains(1, 2));
+        assert_eq!(selection.cells().len(), 12 - 3);
+    }
+
+    #[test]
+    fn subtracting_something_unselected_changes_nothing() {
+        let mut selection = CellSelection::single((0, 0), (1, 1));
+        assert!(!selection.subtract(CellRange {
+            anchor: (5, 5),
+            cursor: (5, 5),
+        }));
+        assert_eq!(
+            selection.ranges,
+            vec![CellRange {
+                anchor: (0, 0),
+                cursor: (1, 1),
+            }]
         );
     }
 }

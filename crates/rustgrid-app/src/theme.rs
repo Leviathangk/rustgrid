@@ -100,6 +100,12 @@ pub struct Theme {
     pub tree_hover_bg: u32,
     pub tree_selected_bg: u32,
     pub tree_selected_text: u32,
+    /// The connection tree's selected-row fill and text. More saturated than
+    /// [`Theme::tree_selected_bg`] (which doubles as a subtle hover fill elsewhere), so a
+    /// selected connection or database stays obvious over an environment-colour tint and while
+    /// the pointer rests on the row.
+    pub tree_active_bg: u32,
+    pub tree_active_text: u32,
     pub chevron: u32,
     pub icon_connection: u32,
     pub icon_database: u32,
@@ -171,6 +177,8 @@ impl Theme {
             tree_hover_bg: 0xf4f4f5,
             tree_selected_bg: 0xdbeafe,
             tree_selected_text: 0x09090b,
+            tree_active_bg: 0x93c5fd,
+            tree_active_text: 0x09090b,
             chevron: 0x71717a,
             icon_connection: 0x16a34a,
             icon_database: 0x71717a,
@@ -229,6 +237,8 @@ impl Theme {
             tree_hover_bg: 0x18181b,
             tree_selected_bg: 0x1e3a8a,
             tree_selected_text: 0xfafafa,
+            tree_active_bg: 0x1d4ed8,
+            tree_active_text: 0xfafafa,
             chevron: 0xa1a1aa,
             icon_connection: 0x4ade80,
             icon_database: 0xa1a1aa,

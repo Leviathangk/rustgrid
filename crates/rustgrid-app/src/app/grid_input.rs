@@ -81,13 +81,17 @@ impl GridView {
                 }
             }
         }
-        self.selecting_cells = true;
+        // A Ctrl+click toggles a range and must not start a drag: the smallest pointer jitter
+        // would otherwise extend the active range again and undo the cell just removed.
+        self.selecting_cells = !ctrl || event.modifiers.shift;
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
     /// Add a range spanning `(start_row, start_col)..=(end_row, end_col)` to the selection, or
-    /// remove the range that already contains that cell (Ctrl+click toggle).
+    /// subtract it from the selection when it already contains that cell (Ctrl+click toggle).
+    /// Subtracting a single cell from 全选's one big range splits the range around the cell, so
+    /// Ctrl+click clears just that cell instead of dropping the whole selection.
     fn add_or_remove_range(
         &mut self,
         anchor_row: usize,
@@ -95,36 +99,26 @@ impl GridView {
         cursor_row: usize,
         cursor_col: usize,
     ) {
-        if self.state.selection.is_none() {
+        let Some(selection) = self.state.selection.as_mut() else {
             self.state.selection = Some(CellSelection::single(
                 (anchor_row, anchor_col),
                 (cursor_row, cursor_col),
             ));
             return;
-        }
-        let empty = {
-            let Some(selection) = self.state.selection.as_mut() else {
-                return;
-            };
-            if let Some(position) = selection
-                .ranges
-                .iter()
-                .position(|range| range.contains(anchor_row, anchor_col))
-            {
-                selection.ranges.remove(position);
-            } else {
-                selection.ranges.push(CellRange {
-                    anchor: (anchor_row, anchor_col),
-                    cursor: (cursor_row, cursor_col),
-                });
-                selection.active = selection.ranges.len() - 1;
-            }
-            if !selection.ranges.is_empty() {
-                selection.active = selection.active.min(selection.ranges.len() - 1);
-            }
-            selection.ranges.is_empty()
         };
-        if empty {
+        if !selection.contains(anchor_row, anchor_col) {
+            selection.ranges.push(CellRange {
+                anchor: (anchor_row, anchor_col),
+                cursor: (cursor_row, cursor_col),
+            });
+            selection.active = selection.ranges.len() - 1;
+            return;
+        }
+        selection.subtract(CellRange {
+            anchor: (anchor_row, anchor_col),
+            cursor: (cursor_row, cursor_col),
+        });
+        if selection.ranges.is_empty() {
             self.state.selection = None;
         }
     }

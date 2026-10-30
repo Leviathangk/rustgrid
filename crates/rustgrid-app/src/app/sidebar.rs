@@ -690,11 +690,15 @@ impl TreePane {
         let drag_app = self.app.clone();
         let drag_id = connection.id.clone();
         // The environment colour is painted on the node itself, so it is visible even while the
-        // connection is closed (no children to tint) and while the row is selected (a darker shade
-        // replaces the generic selection blue).
+        // connection is closed (no children to tint). A selected row uses the tree's strong
+        // selection fill so it does not get lost in the tint; the colour stays visible through
+        // the accent strip on its left edge.
         let node_tint = connection.color.map(|color| rgba(color.tint(theme, 0x66)));
-        let node_selected = connection.color.map(|color| rgba(color.tint(theme, 0x99)));
         let node_hover = connection.color.map(|color| rgba(color.tint(theme, 0x80)));
+        let node_accent = connection
+            .color
+            .filter(|_| selected)
+            .map(|color| color.accent(theme));
         let row = div()
             .id(SharedString::from(conn_id.clone()))
             .flex()
@@ -705,17 +709,20 @@ impl TreePane {
             .h(px(22.0))
             .pl_1()
             .pr_2()
+            .relative()
             .rounded_sm()
             .cursor_pointer()
             .overflow_hidden()
             .when_some(node_tint, |style, bg| style.bg(bg))
             .when(selected, move |style| {
                 style
-                    .bg(node_selected.unwrap_or(rgba((theme.tree_selected_bg << 8) | 0xff)))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| {
-                style.bg(node_hover.unwrap_or(rgba((theme.tree_hover_bg << 8) | 0xff)))
+            .when(!selected, move |style| {
+                style.hover(move |style| {
+                    style.bg(node_hover.unwrap_or(rgba((theme.tree_hover_bg << 8) | 0xff)))
+                })
             })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 // Releasing a drag of the multi-selection must not collapse it to this row.
@@ -830,6 +837,18 @@ impl TreePane {
                         .text_color(rgb(theme.warning))
                         .child(t!("connection.connecting").to_string()),
                 )
+            })
+            // Keep the environment colour readable on the selected row as a thin left strip.
+            .when_some(node_accent, |row, color| {
+                row.child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .w(px(3.0))
+                        .bg(rgb(color)),
+                )
             });
 
         // A failed connection keeps its error, surfaced when the row is hovered (the dialog from
@@ -840,9 +859,8 @@ impl TreePane {
         };
 
         // A connection's environment colour paints a tint behind the connection and every row
-        // under it, so the environment is visible at a glance (参考 Navicat). The connection's own
-        // row takes a stronger shade; rows keep their own hover/selection background, which paints
-        // over this tint.
+        // under it, so the environment is visible at a glance (参考 Navicat). Rows keep their own
+        // hover/selection background, which paints over this tint.
         let mut body = div().flex().flex_col().w_full();
         if let Some(color) = connection.color {
             body = body.bg(rgba(color.tint(theme, 0x33)));
@@ -931,10 +949,12 @@ impl TreePane {
             .cursor_pointer()
             .when(selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .when(!selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
@@ -1138,10 +1158,12 @@ impl TreePane {
             .cursor_pointer()
             .when(all_selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .when(!all_selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
             .on_click(cx.listener(move |this, _event, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
@@ -1203,10 +1225,12 @@ impl TreePane {
                         .cursor_pointer()
                         .when(selected, move |style| {
                             style
-                                .bg(rgb(theme.tree_selected_bg))
-                                .text_color(rgb(theme.tree_selected_text))
+                                .bg(rgb(theme.tree_active_bg))
+                                .text_color(rgb(theme.tree_active_text))
                         })
-                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        .when(!selected, move |style| {
+                            style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        })
                         .on_click(cx.listener(move |this, _event, window, cx| {
                             this.commit_pending_rename(cx);
                             this.selected_table = None;
@@ -1293,10 +1317,12 @@ impl TreePane {
             .cursor_pointer()
             .when(selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .when(!selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
@@ -1453,10 +1479,12 @@ impl TreePane {
             .cursor_pointer()
             .when(selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .when(!selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
             .on_click(cx.listener(move |this, _event, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
@@ -1725,10 +1753,12 @@ impl TreePane {
             .cursor_pointer()
             .when(selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .when(!selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
@@ -1852,10 +1882,12 @@ impl TreePane {
             .cursor_pointer()
             .when(selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .when(!selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if editing_here {
                     return;
@@ -1964,10 +1996,12 @@ impl TreePane {
             .cursor_pointer()
             .when(selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .when(!selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.commit_pending_rename(cx);
                 this.selected_table = None;
@@ -2068,10 +2102,12 @@ impl TreePane {
             .overflow_hidden()
             .when(selected, move |style| {
                 style
-                    .bg(rgb(theme.tree_selected_bg))
-                    .text_color(rgb(theme.tree_selected_text))
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
             })
-            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .when(!selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if editing_here {
                     return;
@@ -2217,7 +2253,18 @@ impl Render for TreePane {
         self.theme = theme;
         self.rename_row = rename;
         self.group_renaming = group_renaming;
-        self.selection = tree_selection.into_iter().collect();
+        // A database/schema/object click moves the single selection off the connections: the
+        // connection/group multi-selection must not stay painted behind it and make two rows look
+        // selected. (Keyboard navigation already clears the multi-selection the same way.)
+        let moved_off_connections = self
+            .selected
+            .as_deref()
+            .is_some_and(|id| !list_ops::is_tree_selectable(id));
+        self.selection = if moved_off_connections {
+            BTreeSet::new()
+        } else {
+            tree_selection.into_iter().collect()
+        };
 
         // The row renderers record every drawn row here, in draw order (see `nav_row`).
         self.nav_build.borrow_mut().clear();

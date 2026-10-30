@@ -722,6 +722,7 @@ impl AppView {
         database_index: usize,
         cx: &mut Context<'_, Self>,
     ) {
+        self.clear_tree_selection(cx);
         let mut should_load = false;
         let mut should_load_routines = false;
         let mut should_load_schemas = false;
@@ -855,6 +856,7 @@ impl AppView {
         database_index: usize,
         cx: &mut Context<'_, Self>,
     ) {
+        self.clear_tree_selection(cx);
         let opened = matches!(
             self.connections
                 .get(connection_index)
@@ -878,6 +880,7 @@ impl AppView {
         schema: String,
         cx: &mut Context<'_, Self>,
     ) {
+        self.clear_tree_selection(cx);
         let opened = self
             .connections
             .get(connection_index)
@@ -1051,6 +1054,7 @@ impl AppView {
         if category == Category::Backups && !self.driver_supports_backup(connection_index) {
             return;
         }
+        self.clear_tree_selection(cx);
         self.clear_info_selection();
         if category == Category::Backups {
             // Selecting the Backups category scopes the Backup main tab to this database. The
@@ -1140,6 +1144,7 @@ impl AppView {
         schema: String,
         cx: &mut Context<'_, Self>,
     ) {
+        self.clear_tree_selection(cx);
         let already_open = self.object_pane.as_ref().is_some_and(|pane| {
             let pane = pane.read(cx);
             pane.connection_index == connection_index

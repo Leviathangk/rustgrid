@@ -1005,23 +1005,27 @@ pub(crate) fn grid_item_sized(
         .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
 }
 
-/// An approximate rendered width of `text` at the 12px UI font (CJK counts double).
+/// An approximate rendered width of `text` at the 12.5px UI font. The metrics deliberately
+/// over-estimate a little (13px per CJK glyph, 7.5px per ASCII character): an under-estimate made
+/// a fitted 平铺网格 tile a few pixels too narrow, clipping the last glyph of a long name.
 pub(crate) fn approx_text_width(text: &str) -> f32 {
     text.chars()
         .map(|character| {
             if (character as u32) >= 0x1100 {
-                12.0
+                13.0
             } else {
-                7.0
+                7.5
             }
         })
         .sum()
 }
 
 /// The tile width for a 平铺网格 whose longest name is `longest` pixels wide: the default/minimum
-/// plus the leading icon and padding, capped at [`GRID_ITEM_MAX_WIDTH`].
+/// plus the leading icon, the gap and the horizontal padding, capped at
+/// [`GRID_ITEM_MAX_WIDTH`]. The extra room keeps a name measured by [`approx_text_width`] from
+/// ending flush against the tile edge (which clipped its last character).
 pub(crate) fn grid_item_width(longest: f32) -> f32 {
-    (longest + 30.0).clamp(GRID_ITEM_WIDTH, GRID_ITEM_MAX_WIDTH)
+    (longest + 38.0).clamp(GRID_ITEM_WIDTH, GRID_ITEM_MAX_WIDTH)
 }
 
 /// The horizontal scroll state of a 平铺网格: the column-major list scrolls sideways, so it needs

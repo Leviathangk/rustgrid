@@ -267,6 +267,16 @@ impl AppView {
         cx.notify();
     }
 
+    /// Clear the connection/group multi-selection when the user moves the tree selection onto a
+    /// non-selectable row (a database, schema, category or object), so only the row just clicked
+    /// stays highlighted.
+    pub(super) fn clear_tree_selection(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.tree_selection.items().is_empty() {
+            self.tree_selection.clear();
+            cx.notify();
+        }
+    }
+
     /// The connection-tree multi-selection's connection profile ids, with each selected group
     /// expanded to every connection under it (used by 打开连接 / 关闭连接).
     pub(super) fn tree_selection_connection_ids(&self) -> Vec<String> {
