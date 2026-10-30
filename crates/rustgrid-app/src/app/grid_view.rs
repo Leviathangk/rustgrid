@@ -90,6 +90,14 @@ impl GridView {
             cell_editor_blur_subscription: None,
             cell_editor_focus_pending: false,
             date_picker: None,
+            key_string_format: KeyStringFormat::Raw,
+            key_string_editor: None,
+            key_json_editor: None,
+            key_string_text: String::new(),
+            key_string_loaded: None,
+            key_string_dirty: false,
+            key_string_saving: false,
+            key_string_error: None,
             inserts: Vec::new(),
             column_resize: None,
             sort_hover: None,
@@ -255,6 +263,9 @@ impl Render for GridView {
         self.prepare_frame(window, cx);
         let theme = self.theme;
         let key_page = self.is_key_page();
+        if key_page && self.is_string_key_page() {
+            return self.render_string_key_page(cx);
+        }
         if key_page {
             self.layout_key_page_columns();
         }
@@ -1108,6 +1119,7 @@ impl Render for GridView {
                 }
             }),
         )
+        .into_any_element()
     }
 }
 

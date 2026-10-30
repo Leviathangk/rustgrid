@@ -961,6 +961,25 @@ impl TreePane {
         let database_index = database.index;
         let db_id = format!("db-{connection_index}-{database_index}");
         let selected = self.selected.as_deref() == Some(db_id.as_str());
+        // The prototype puts the database's key count on its row. The namespace list covers every
+        // scanned key (including the prefix-less ones under the empty name), so its counts are the
+        // best available total; fall back to the loaded key table.
+        let key_count = if supports_key_value {
+            match &database.namespaces {
+                Loadable::Loaded(namespaces) => Some(
+                    namespaces
+                        .iter()
+                        .map(|namespace| namespace.objects)
+                        .sum::<u64>(),
+                ),
+                _ => match &database.tables {
+                    Loadable::Loaded(tables) => Some(tables.len() as u64),
+                    _ => None,
+                },
+            }
+        } else {
+            None
+        };
 
         let open_app = self.app.clone();
         let chevron_app = self.app.clone();
@@ -1063,7 +1082,16 @@ impl TreePane {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(database.name.clone()),
-            );
+            )
+            .when_some(key_count, |row, count| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(rgb(theme.text_muted))
+                        .child(format!("({count})")),
+                )
+            });
         let nav_id = format!("db-{connection_index}-{database_index}");
         let toggle_id = nav_id.clone();
         let row = self.nav_row(
@@ -1080,22 +1108,13 @@ impl TreePane {
             self.nav_depth.set(self.nav_depth.get() + 1);
             if supports_key_value {
                 // Redis: the database node expands to its key prefixes (the prototype's
-                // namespace folders), not to SQL categories. Saved queries stay. The namespaces
-                // render even while the key list reloads, so selecting one does not collapse the
-                // whole branch.
+                // namespace folders), not to SQL categories. The database row itself is the
+                // "all keys" view, so there is no separate 全部 row and no 查询 category here
+                // (saved queries live on the 查询 main tab).
                 sub = sub.child(self.render_namespaces(
                     connection_index,
                     database_index,
                     database,
-                    cx,
-                ));
-                sub = sub.child(self.render_category(
-                    connection_index,
-                    database_index,
-                    None,
-                    Category::Queries,
-                    database,
-                    saved_queries,
                     cx,
                 ));
             } else {
@@ -1156,8 +1175,8 @@ impl TreePane {
     }
 
     /// The key-value namespaces (Redis key prefixes) under a database. Clicking one filters the
-    /// key list to that prefix; 全部 clears the filter. This is the tree equivalent of Navicat's
-    /// 命名空间选择 and of the HTML prototype's namespace folders.
+    /// key list to that prefix; clicking the database row clears the filter. This is the tree
+    /// equivalent of Navicat's 命名空间选择 and of the HTML prototype's namespace folders.
     fn render_namespaces(
         &self,
         connection_index: usize,
@@ -1168,54 +1187,6 @@ impl TreePane {
         let theme = self.theme;
         let app = self.app.clone();
         let mut sub = div().flex().flex_col().w_full();
-
-        let all_id = format!("keys-{connection_index}-{database_index}-all");
-        let all_selected = database.object_pattern.is_none();
-        let all_app = app.clone();
-        let nav_app = all_app.clone();
-        let nav_id = all_id.clone();
-        let all_row = div()
-            .id(SharedString::from(all_id.clone()))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .w_full()
-            .h(px(22.0))
-            .pl(px(36.0))
-            .pr_2()
-            .rounded_sm()
-            .cursor_pointer()
-            .when(all_selected, move |style| {
-                style
-                    .bg(rgb(theme.tree_active_bg))
-                    .text_color(rgb(theme.tree_active_text))
-            })
-            .when(!all_selected, move |style| {
-                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
-            })
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                this.commit_pending_rename(cx);
-                this.selected_table = None;
-                window.focus(&this.focus, cx);
-                this.selected = Some(all_id.clone());
-                let _ = all_app.update(cx, |app, cx| {
-                    app.select_key_namespace(connection_index, database_index, None, cx);
-                });
-            }))
-            .child(tree_icon("icons/folder.svg", theme.icon_tables))
-            .child(
-                div()
-                    .flex_1()
-                    .child(t!("redis.tools.namespace_all").to_string()),
-            );
-        let nav_row = NavRow::new(nav_id.clone(), t!("redis.tools.namespace_all").to_string())
-            .opens(Rc::new(move |_this, _window, cx| {
-                let _ = nav_app.update(cx, |app, cx| {
-                    app.select_key_namespace(connection_index, database_index, None, cx);
-                });
-            }));
-        sub = sub.child(self.nav_row(all_row, nav_row));
 
         match &database.namespaces {
             Loadable::Idle | Loadable::Loading => {}
@@ -1276,7 +1247,7 @@ impl TreePane {
                                 );
                             });
                         }))
-                        .child(tree_icon("icons/folder.svg", theme.icon_tables))
+                        .child(tree_icon("icons/folder.svg", theme.warning))
                         .child(
                             div()
                                 .flex_1()

@@ -93,9 +93,11 @@ writes such as `JSON.SET`, and every grid edit.
 The object list is the key list. For key-value engines (`DriverCapability::KeyValue`) its detailed
 layout is # / 键名 / 类型 / TTL / 内存 and it is the **only** layout for a key list (the 详细列表 /
 平铺网格 switch is not shown), the tree under a database shows the **namespace folders** (with key
-counts) instead of SQL categories, and the toolbar adds **新建键 / 设置 TTL / Redis 工具**. The key
-list shows **加载更多** while the last `SCAN` page left a cursor. The Redis tools window's 键 pane
-carries the same operations plus a namespace picker:
+counts) instead of SQL categories, and the toolbar adds **新建键 / 设置 TTL / Redis 工具**. The
+database row itself is the all-keys view and carries the key count (the prototype's `(11)`); there
+is no separate 全部 row and no 查询 category under a Redis database. The key list shows **加载更多**
+while the last `SCAN` page left a cursor. The Redis tools window's 键 pane carries the same
+operations plus a namespace picker:
 
 - **new key**: name, type (`string`/`hash`/`list`/`set`/`zset`/`stream`), field/member, value/score
   and an optional TTL;
@@ -103,14 +105,18 @@ carries the same operations plus a namespace picker:
   list;
 - **namespaces**: `list_namespaces` groups the scanned keys by their first `:` prefix and shows the
   counts; picking one in the tree (or the tools window) applies `prefix*` as the `SCAN MATCH`
-  pattern (`object_pattern`) and reloads the object list, picking 全部 clears it.
+  pattern (`object_pattern`) and reloads the object list; clicking the database row clears it.
 
-Opening a key shows the normal grid with its columns chosen from `TYPE`, prefixed by a key header
-with the type badge, key name, type, TTL and memory. **Hash and set keys open on a dedicated key
-page** (`app/grid_key.rs`) instead of the SQL grid: the page has a key header bar with 添加字段 /
-添加成员, 删除选中, 保存修改 and 刷新, a numbered Field/Value or Member table (the cells edit in
-place like the grid), and a compact pager. There is no WHERE/sort/field-layout toolbar or record
-toolbar on that page.
+Every key opens on its **own key page** (`app/grid_key.rs`), never the SQL grid. The header bar
+carries the type badge, key name, type, TTL, memory and the available actions:
+
+- **string / ReJSON**: the prototype's RAW / JSON switch above a large editor. RAW is editable for
+  a string key; JSON is a read-only pretty print, and invalid JSON falls back to the raw text with
+  a warning. ReJSON keys stay read-only.
+- **hash / set / list / zset / stream**: a numbered 字段/值, 成员, 索引/值, 成员/分数 or
+  ID/字段/值 table. Editable types get 添加字段/添加成员/添加元素, 删除选中 and 保存修改; streams
+  are read-only. The table pages have a compact pager instead of the SQL WHERE/sort/field-layout
+  toolbar and record toolbar.
 
 The object list holds at most `redis.key_limit` keys (default 1000) per *page load*; each 加载更多
 reads the next `SCAN` page (200 keys). Cluster mode has no cross-node cursor, so a cluster lists its

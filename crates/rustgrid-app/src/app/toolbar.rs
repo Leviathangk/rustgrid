@@ -248,7 +248,7 @@ impl AppView {
         // Hide the tabs it cannot use instead of greying out five of them (the prototype's ribbon
         // is just 表 / 查询).
         let key_value = self
-            .users_connection_index(cx)
+            .active_connection_index(cx)
             .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
         for (tab, icon, label_key) in MAIN_TABS {
             if key_value && !matches!(tab, MainTab::Tables | MainTab::Queries) {

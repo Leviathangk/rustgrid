@@ -846,18 +846,20 @@ shadcn chrome described above. Implemented today:
 19. Redis (`crates/rustgrid-redis` + `app/redis_tools.rs`): a Redis connection is browsed through
     the shared object list. For `DriverCapability::KeyValue` the database node expands to its
     **namespace folders** (key prefixes with counts, from `list_namespaces`) instead of SQL
-    categories, and the Tables list is a key table (# / 键名 / 类型 / TTL / 内存) that **always**
-    uses the detailed layout (its 详细列表 / 平铺网格 switch is not shown). Keys open in the normal
-    grid,
-    whose columns follow `TYPE` (list `index`/`value`, zset `member`/`score`, stream
-    `id`/`field`/`value`, string/ReJSON `value`), with a key header (type badge, name, type, TTL,
-    memory) above it. **Hash and set keys open on their own key page instead** (`app/grid_key.rs`):
-    a key header bar with 添加字段/添加成员, 删除选中, 保存修改 and 刷新, a numbered Field/Value or
-    Member table, and a compact pager — no SQL grid toolbar, WHERE/sort panels or record controls.
-    The toolbar items are 打开键 / 新建键 / 设置 TTL / Redis 工具 / 加载更多
-    (`list_objects_page` returns a `SCAN` cursor); SQL-only designer/import/export items are hidden.
-    The main ribbon keeps only 表 / 查询 for a Redis connection (the tools window still carries
-    慢日志 and 命令监控). The tools window
+    categories; the database row itself is the all-keys view (the prototype's key count sits on
+    it), so there is no 全部 row and no 查询 category under it. The Tables list is a key table
+    (# / 键名 / 类型 / TTL / 内存) that **always** uses the detailed layout (its 详细列表 / 平铺网格
+    switch is not shown). **Every key opens on its own key page** (`app/grid_key.rs`), never the
+    SQL grid: string/ReJSON keys get the prototype's RAW / JSON switch and a large editor (JSON is
+    a read-only pretty print; invalid JSON falls back to RAW, with a warning), while hash, set,
+    list, zset and stream use a numbered Field/Value, Member, Index/Value, Member/Score or
+    ID/Field/Value table with 添加字段/添加成员/添加元素, 删除选中, 保存修改 and 刷新. Streams and
+    ReJSON keys are read-only. The key header bar shows the type badge, key name, TTL, memory and
+    collection actions; the table pages carry a compact pager instead of the SQL record toolbar,
+    WHERE/sort panels or field layout. The toolbar items are 打开键 / 新建键 / 设置 TTL / Redis 工具
+    / 加载更多 (`list_objects_page` returns a `SCAN` cursor); SQL-only designer/import/export items
+    are hidden. The main ribbon keeps only 表 / 查询 for a Redis connection (the tools window still
+    carries 慢日志 and 命令监控). The tools window
     (`app/redis_tools.rs`) is one OS window with five panes: 键 (create key, TTL, namespaces),
     发布订阅 (`watch` → `SUBSCRIBE`/`PSUBSCRIBE` + `PUBLISH`), 命令监控 (`watch` → `MONITOR`),
     慢日志 (`SLOWLOG GET 100`) and ACL 用户 (`ACL LIST`/`ACL SETUSER`/`ACL DELUSER`). Live streams

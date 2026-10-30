@@ -1667,6 +1667,17 @@ struct GridView {
     cell_editor_focus_pending: bool,
     date_picker: Option<DatePicker>,
 
+    /// The dedicated key page's string editor (RAW), the pretty-printed JSON preview, and their
+    /// state. Only used while this grid shows a `string` / `json` key.
+    key_string_format: KeyStringFormat,
+    key_string_editor: Option<Entity<ui::SqlEditor>>,
+    key_json_editor: Option<Entity<ui::SqlEditor>>,
+    key_string_text: String,
+    key_string_loaded: Option<String>,
+    key_string_dirty: bool,
+    key_string_saving: bool,
+    key_string_error: Option<String>,
+
     /// Pending rows added with the "+" button that have not been written to the database yet.
     /// They render after `state.rows` (gutter `*`) and are flushed by Save. Each row maps a
     /// column index to its staged value: `None` is an explicit SQL `NULL`, an absent entry means
@@ -1769,6 +1780,14 @@ struct CellEditor {
     cells: Vec<(usize, usize)>,
     value: String,
     input: Entity<TextInput>,
+}
+
+/// Which representation the string key page shows: the editable raw value, or a read-only
+/// pretty-printed JSON view of it (the prototype's RAW / JSON switch).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyStringFormat {
+    Raw,
+    Json,
 }
 
 /// Column metadata for a referenced table, loaded on demand by the query editor's completion.

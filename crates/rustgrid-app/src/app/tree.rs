@@ -17,6 +17,30 @@ impl AppView {
         })
     }
 
+    /// The connection the active tab belongs to, falling back to the tree's current selection.
+    /// The main ribbon's key-value gating uses this so a restored key tab (whose tree row may not
+    /// be selected yet) still hides the SQL-only tabs.
+    pub(super) fn active_connection_index(&self, cx: &App) -> Option<usize> {
+        if let Some(grid) = self.active_grid.and_then(|index| self.grids.get(index))
+            && let Some(index) = self.connection_index_of(&grid.read(cx).state.connection)
+        {
+            return Some(index);
+        }
+        if let Some(design) = self.active_design.and_then(|index| self.designs.get(index))
+            && let Some(index) = self.connection_index_of(&design.read(cx).connection)
+        {
+            return Some(index);
+        }
+        if let Some(index) = self
+            .active_query
+            .and_then(|index| self.queries.get(index))
+            .and_then(|query| query.connection_index)
+        {
+            return Some(index);
+        }
+        self.users_connection_index(cx)
+    }
+
     /// Resolve a grid's `(connection, database name)` back to the tree's indices, so per-table
     /// actions (import/export) can reuse the connection-tree-scoped wizards.
     pub(super) fn table_scope(
@@ -1693,6 +1717,10 @@ impl AppView {
             None
         };
         let layout = self.field_layout(&connection_id, &database, &table);
+        let key_read_only = key_status
+            .as_ref()
+            .and_then(|status| status.engine.as_deref())
+            .is_some_and(|kind| matches!(kind, "stream" | "json"));
         let id = self.next_grid_id;
         self.next_grid_id += 1;
         // For a key grid whose overview was not loaded yet (e.g. a restored session), fetch it
@@ -1736,7 +1764,7 @@ impl AppView {
             sql: None,
             show_toolbar: true,
             show_footer: true,
-            editable: true,
+            editable: !key_read_only,
             sort_rules: Vec::new(),
             sort_open: false,
             sort_draft: Vec::new(),
@@ -1769,6 +1797,10 @@ impl AppView {
                 if let Ok(Ok(status)) = status {
                     grid.update(cx, |grid, cx| {
                         if grid.state.key_status.is_none() {
+                            grid.state.editable = !status
+                                .engine
+                                .as_deref()
+                                .is_some_and(|kind| matches!(kind, "stream" | "json"));
                             grid.state.key_status = Some(status);
                             cx.notify();
                         }
