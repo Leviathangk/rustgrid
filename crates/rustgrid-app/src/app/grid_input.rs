@@ -762,7 +762,6 @@ impl GridView {
             let input = editor.input.clone();
             input.update(cx, |input, cx| input.set_text(value, cx));
         }
-        self.caret_visible = true;
     }
 
     /// Stage the current cell edit, then auto-commit single-cell edits to the database.

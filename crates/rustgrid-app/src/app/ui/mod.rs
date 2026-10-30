@@ -482,21 +482,6 @@ pub(super) fn text_field(theme: Theme) -> Div {
         .border_color(rgb(theme.border))
 }
 
-/// A zero-layout caret anchor: a 0px box with an absolutely positioned 1px bar, so toggling it
-/// never pushes the text around (unlike a `"|"` glyph). Used by the simple append-only inputs;
-/// the full [`TextInput`](text_input::TextInput) paints its own caret.
-pub(super) fn text_caret(theme: Theme) -> impl IntoElement {
-    div().relative().flex_none().w(px(0.0)).h_full().child(
-        div()
-            .absolute()
-            .left_0()
-            .top(px(2.0))
-            .bottom(px(2.0))
-            .w(px(1.0))
-            .bg(rgb(theme.text)),
-    )
-}
-
 /// Thumb length and its travel range for a scrollbar track of `viewport` px showing
 /// `viewport + max` px of content.
 pub(super) fn scrollbar_thumb(viewport: f32, max: f32) -> (f32, f32) {

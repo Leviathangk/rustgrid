@@ -1290,7 +1290,7 @@ impl GridView {
                     !at_first,
                     cx.listener(|this, _event, _window, cx| this.prev_page(cx)),
                 ))
-                .child(self.render_page_input(cx))
+                .child(self.render_page_input())
                 .child(self.grid_icon_button(
                     "grid-next",
                     "icons/next.svg",
@@ -1381,11 +1381,10 @@ impl GridView {
             )
     }
 
-    pub(super) fn render_page_input(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    pub(super) fn render_page_input(&self) -> impl IntoElement {
         let theme = self.theme;
         ui::text_field(theme)
             .id("grid-page-input")
-            .track_focus(&self.page_input_focus)
             .relative()
             .flex()
             .items_center()
@@ -1396,29 +1395,18 @@ impl GridView {
             .pr(px(2.0))
             .text_size(px(12.0))
             .cursor_text()
-            .on_key_down(cx.listener(|this, event, _window, cx| this.page_input_key(event, cx)))
-            .on_click(cx.listener(|this, _event, window, cx| {
-                window.focus(&this.page_input_focus, cx);
-                cx.notify();
-            }))
-            .child(self.page_input.clone())
-            .when(self.page_input_focused && self.caret(), move |input| {
-                input.child(ui::text_caret(theme))
-            })
-            .child(self.ime_probe(&self.page_input_focus))
+            .child(self.page_input_view.clone())
     }
 
     /// The collapsible "Limit Records [n] records per page" bar, revealed by the gear button.
-    pub(super) fn render_record_limit_panel(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    pub(super) fn render_record_limit_panel(
+        &self,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let theme = self.theme;
-        let focused = self.page_size_focused;
-        let page_size = self.state.page_size;
+        let focused = self.page_size_view.read(cx).is_focused(window, cx);
         let limit_records = self.limit_records(cx);
-        let value = if focused {
-            self.page_size_input.clone()
-        } else {
-            page_size.to_string()
-        };
 
         div()
             .flex()
@@ -1456,7 +1444,6 @@ impl GridView {
             .child(
                 div()
                     .id("page-size-input")
-                    .track_focus(&self.page_size_focus)
                     .relative()
                     .flex()
                     .items_center()
@@ -1474,26 +1461,7 @@ impl GridView {
                     .border_color(rgb(if focused { theme.primary } else { theme.border }))
                     .text_size(px(12.0))
                     .cursor_text()
-                    .on_key_down(
-                        cx.listener(|this, event, _window, cx| this.page_size_key(event, cx)),
-                    )
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.page_size_input = page_size.to_string();
-                        window.focus(&this.page_size_focus, cx);
-                        cx.notify();
-                    }))
-                    .child(
-                        div().flex().flex_row().items_center().child(value).child(
-                            div()
-                                .w(px(1.5))
-                                .h(px(13.0))
-                                .flex_none()
-                                .when(focused && self.caret(), move |caret| {
-                                    caret.bg(rgb(theme.text))
-                                }),
-                        ),
-                    )
-                    .child(self.ime_probe(&self.page_size_focus)),
+                    .child(self.page_size_view.clone()),
             )
             .child(
                 div()

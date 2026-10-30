@@ -1,5 +1,74 @@
 use super::*;
 
+/// The pager's page box: a digits-only [`TextInput`], so caret, mouse selection, clipboard and
+/// IME all come from the shared field. Enter jumps to the typed page and Escape restores the
+/// current one; the text stays in [`GridView::page_input`], which the navigation buttons rewrite.
+pub(super) fn make_page_input(
+    theme: Theme,
+    text: String,
+    weak: WeakEntity<GridView>,
+    cx: &mut Context<'_, GridView>,
+) -> Entity<TextInput> {
+    let options = TextInputOptions {
+        accepts: Some(Rc::new(|character: char| character.is_ascii_digit())),
+        text_size: Some(12.0),
+        bare: true,
+        ..Default::default()
+    };
+    let change = weak.clone();
+    let submit = weak.clone();
+    let cancel = weak;
+    cx.new(move |cx| {
+        TextInput::new(theme, text, options, cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |grid, _cx| grid.page_input = text.to_string());
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit.update(cx, |grid, cx| grid.commit_page_input(cx));
+            }))
+            .on_cancel(Rc::new(move |_window, cx| {
+                let _ = cancel.update(cx, |grid, cx| grid.sync_page_input(cx));
+            }))
+    })
+}
+
+/// The page-size box of the 限制记录 panel. Same digits-only field as the page box, with Up/Down
+/// stepping the value by 100 (the compact stepper Navicat's record limit has).
+pub(super) fn make_page_size_input(
+    theme: Theme,
+    text: String,
+    weak: WeakEntity<GridView>,
+    cx: &mut Context<'_, GridView>,
+) -> Entity<TextInput> {
+    let options = TextInputOptions {
+        accepts: Some(Rc::new(|character: char| character.is_ascii_digit())),
+        text_size: Some(12.0),
+        bare: true,
+        ..Default::default()
+    };
+    let change = weak.clone();
+    let submit = weak.clone();
+    let cancel = weak.clone();
+    let arrow = weak;
+    cx.new(move |cx| {
+        TextInput::new(theme, text, options, cx)
+            .on_change(Rc::new(move |text, _window, cx| {
+                let _ = change.update(cx, |grid, _cx| grid.page_size_input = text.to_string());
+            }))
+            .on_submit(Rc::new(move |_window, cx| {
+                let _ = submit.update(cx, |grid, cx| grid.page_size_apply(cx));
+            }))
+            .on_cancel(Rc::new(move |_window, cx| {
+                let _ = cancel.update(cx, |grid, cx| {
+                    grid.set_page_size_text(grid.state.page_size.to_string(), cx);
+                });
+            }))
+            .on_arrow(Rc::new(move |down, _window, cx| {
+                let _ = arrow.update(cx, |grid, cx| grid.step_page_size(down, cx));
+            }))
+    })
+}
+
 /// The filter node at `path`, where each element indexes into the previous group's children.
 pub(super) fn filter_node<'a>(nodes: &'a [FilterNode], path: &[usize]) -> Option<&'a FilterNode> {
     let (index, parents) = path.split_last()?;
@@ -374,7 +443,7 @@ impl GridView {
                         grid.state.error = Some(error.to_string());
                     }
                 }
-                grid.sync_page_input();
+                grid.sync_page_input(cx);
                 cx.notify();
                 // The scroll extents are only known after this frame's paint, so schedule one
                 // more frame to reveal the scrollbars without waiting for a hover/resize.
@@ -498,7 +567,7 @@ impl GridView {
                     }
                     Err(error) => grid.state.error = Some(error.to_string()),
                 }
-                grid.sync_page_input();
+                grid.sync_page_input(cx);
                 cx.notify();
                 // Same as `load_page`: measure the scroll extents on a follow-up frame so the
                 // scrollbars show up as soon as the results paint.
@@ -525,7 +594,7 @@ impl GridView {
         if self.state.has_next() {
             self.state.page_index += 1;
         }
-        self.sync_page_input();
+        self.sync_page_input(cx);
         self.load_page(cx);
     }
 
@@ -538,7 +607,7 @@ impl GridView {
 
     pub(super) fn prev_page_now(&mut self, cx: &mut Context<'_, Self>) {
         self.state.page_index = self.state.page_index.saturating_sub(1);
-        self.sync_page_input();
+        self.sync_page_input(cx);
         self.load_page(cx);
     }
 
@@ -551,7 +620,7 @@ impl GridView {
 
     pub(super) fn first_page_now(&mut self, cx: &mut Context<'_, Self>) {
         self.state.page_index = 0;
-        self.sync_page_input();
+        self.sync_page_input(cx);
         self.load_page(cx);
     }
 
@@ -566,52 +635,55 @@ impl GridView {
         if let Some(last) = self.state.last_page() {
             self.state.page_index = last;
         }
-        self.sync_page_input();
+        self.sync_page_input(cx);
         self.load_page(cx);
     }
 
-    pub(super) fn sync_page_input(&mut self) {
+    pub(super) fn sync_page_input(&mut self, cx: &mut Context<'_, Self>) {
         self.page_input = (self.state.page_index + 1).to_string();
+        let text = self.page_input.clone();
+        self.page_input_view
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// Replace the page-size box's text and keep its field in step.
+    pub(super) fn set_page_size_text(&mut self, text: String, cx: &mut Context<'_, Self>) {
+        self.page_size_input = text.clone();
+        self.page_size_view
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// The text the page box holds right now, including a keystroke the shared field has not
+    /// flushed back to [`Self::page_input`] yet (Enter can arrive before the next render).
+    fn page_text_now(&self, cx: &App) -> String {
+        self.page_input_view
+            .read(cx)
+            .current_text(cx)
+            .unwrap_or_else(|| self.page_input.clone())
+    }
+
+    /// The text the page-size box holds right now, for the same reason as [`Self::page_text_now`].
+    fn page_size_text_now(&self, cx: &App) -> String {
+        self.page_size_view
+            .read(cx)
+            .current_text(cx)
+            .unwrap_or_else(|| self.page_size_input.clone())
     }
 
     pub(super) fn commit_page_input(&mut self, cx: &mut Context<'_, Self>) {
+        self.page_input = self.page_text_now(cx);
         let requested = self.page_input.trim().parse::<u64>().unwrap_or(1).max(1);
         let target = match self.state.last_page() {
             Some(last) => (requested - 1).min(last),
             None => requested - 1,
         };
         if self.guard_pending(GridNav::Page(target), cx) {
-            self.sync_page_input();
+            self.sync_page_input(cx);
             return;
         }
         self.state.page_index = target;
-        self.sync_page_input();
+        self.sync_page_input(cx);
         self.load_page(cx);
-    }
-
-    pub(super) fn page_input_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform {
-            return;
-        }
-
-        match keystroke.key.as_str() {
-            "backspace" => {
-                self.page_input.pop();
-            }
-            "enter" => {
-                self.commit_page_input(cx);
-                return;
-            }
-            "escape" => {
-                self.sync_page_input();
-            }
-            _ => {
-                // Digits (and IME) arrive through the grid's input handler, which filters to
-                // ASCII digits for the page field.
-            }
-        }
-        cx.notify();
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<'_, Self>) {
@@ -799,7 +871,7 @@ impl GridView {
         self.sync_sort_controls(cx);
         self.state.sort_rules = self.state.sort_draft.clone();
         self.state.page_index = 0;
-        self.sync_page_input();
+        self.sync_page_input(cx);
         self.load_page(cx);
     }
 
@@ -850,7 +922,7 @@ impl GridView {
             self.state.sort_selected = Some(0);
         }
         self.state.page_index = 0;
-        self.sync_page_input();
+        self.sync_page_input(cx);
         self.load_page(cx);
     }
 
@@ -1224,7 +1296,7 @@ impl GridView {
         self.sync_filter_controls(cx);
         self.state.filters = self.state.filter_draft.clone();
         self.state.page_index = 0;
-        self.sync_page_input();
+        self.sync_page_input(cx);
         self.load_page(cx);
     }
 
@@ -1307,7 +1379,7 @@ impl GridView {
         if self.state.sql.is_some() {
             return;
         }
-        self.page_size_input = self.state.page_size.to_string();
+        self.set_page_size_text(self.state.page_size.to_string(), cx);
         self.page_size_menu_open = true;
         self.page_size_focus_pending = true;
         cx.notify();
@@ -1324,37 +1396,19 @@ impl GridView {
         }
     }
 
-    pub(super) fn page_size_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform {
-            return;
-        }
-        match keystroke.key.as_str() {
-            "backspace" => {
-                self.page_size_input.pop();
-            }
-            "enter" => {
-                self.page_size_apply(cx);
-                return;
-            }
-            "escape" => {
-                self.page_size_input = self.state.page_size.to_string();
-            }
-            "up" | "down" => {
-                let current = self.page_size_input.parse::<u64>().unwrap_or(1000);
-                let next = if keystroke.key == "up" {
-                    current.saturating_add(100)
-                } else {
-                    current.saturating_sub(100).max(1)
-                };
-                self.page_size_input = next.to_string();
-            }
-            _ => {
-                // Digits (and IME) arrive through the grid's input handler, which filters to
-                // ASCII digits for the page-size field.
-            }
-        }
-        cx.notify();
+    /// The page-size box's Up/Down step: 100 records up, 100 down, never below one.
+    pub(super) fn step_page_size(&mut self, down: bool, cx: &mut Context<'_, Self>) {
+        let current = self
+            .page_size_text_now(cx)
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(1000);
+        let next = if down {
+            current.saturating_sub(100).max(1)
+        } else {
+            current.saturating_add(100)
+        };
+        self.set_page_size_text(next.to_string(), cx);
     }
 
     pub(super) fn page_size_apply(&mut self, cx: &mut Context<'_, Self>) {
@@ -1368,6 +1422,7 @@ impl GridView {
     }
 
     pub(super) fn page_size_apply_now(&mut self, cx: &mut Context<'_, Self>) {
+        self.page_size_input = self.page_size_text_now(cx);
         let requested = self.page_size_input.trim().parse::<u64>().unwrap_or(1000);
         let size = if self.limit_records(cx) {
             requested.clamp(1, NO_LIMIT_PAGE_SIZE)
@@ -1383,7 +1438,8 @@ impl GridView {
             });
         }
         self.page_size_menu_open = false;
-        self.sync_page_input();
+        self.set_page_size_text(size.to_string(), cx);
+        self.sync_page_input(cx);
         self.load_page(cx);
     }
 
@@ -1416,7 +1472,7 @@ impl GridView {
             GridNav::Last => self.last_page_now(cx),
             GridNav::Page(target) => {
                 self.state.page_index = target;
-                self.sync_page_input();
+                self.sync_page_input(cx);
                 self.load_page(cx);
             }
             GridNav::Sort => self.sort_apply_now(cx),
@@ -1429,7 +1485,7 @@ impl GridView {
                     self.state.sort_selected = Some(0);
                 }
                 self.state.page_index = 0;
-                self.sync_page_input();
+                self.sync_page_input(cx);
                 self.load_page(cx);
             }
             GridNav::Filter => self.filter_apply_now(cx),

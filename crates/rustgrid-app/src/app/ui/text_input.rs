@@ -93,6 +93,8 @@ pub(crate) struct TextInput {
     pending: Vec<Pending>,
     /// Text handed to the inner input at creation time.
     initial_text: String,
+    /// A focus request made before the inner state existed (see [`Self::focus_state`]).
+    focus_pending: bool,
     /// A change reported by the inner input, waiting for the next render to reach the callback.
     pending_change: Option<String>,
     /// The value of the last programmatic `set_text`, so the change it may report is not echoed
@@ -137,6 +139,7 @@ impl TextInput {
             subscriptions: Vec::new(),
             pending: Vec::new(),
             initial_text: text.into(),
+            focus_pending: false,
             pending_change: None,
             programmatic_value: None,
             pending_submit: false,
@@ -191,14 +194,28 @@ impl TextInput {
         self.focus.clone()
     }
 
+    /// Whether the field has keyboard focus right now. A click focuses the kit input inside the
+    /// wrapper, so ask the inner state once it exists (the wrapper's own handle only sees the
+    /// focus requests the host made).
+    pub(crate) fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        let handle = self
+            .state
+            .as_ref()
+            .map(|state| state.read(cx).focus_handle(cx))
+            .unwrap_or_else(|| self.focus.clone());
+        handle.is_focused(window)
+    }
+
     /// Focus the field, forwarding to the inner gpui-kit input when its lazily-created state
-    /// already exists. Focusing the wrapper handle beforehand is not enough once the dialog's
-    /// focus handling has moved on: the wrapper has no input handler, so keystrokes would be lost.
-    pub(crate) fn focus_state(&self, window: &mut Window, cx: &mut App) {
+    /// already exists. Otherwise the request waits for the first render, where the state is
+    /// created: focusing the wrapper's own handle is not enough, because the wrapper has no
+    /// input handler, so keystrokes would be lost.
+    pub(crate) fn focus_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(state) = self.state.clone() {
             state.update(cx, |state, cx| state.focus(window, cx));
         } else {
-            self.focus.focus(window, cx);
+            self.focus_pending = true;
+            cx.notify();
         }
     }
 
@@ -295,13 +312,17 @@ impl TextInput {
         self.state = Some(state);
         // Callers often focus the wrapper right after creating it, before its lazy inner state
         // exists (in-place cell editors, form fields, prompts). `on_focus` above only fires when
-        // focus *changes*, so forward the already-held focus now or the field is never typable.
+        // focus *changes*, so either forward the already-held focus or take the focus request
+        // that arrived while the state was missing — otherwise the field is never typable.
         // Put the caret at the end (rather than the default start) so the field opens ready to
         // keep typing, like a plain input.
-        if self.focus.is_focused(window) {
+        let focused = self.focus.is_focused(window);
+        if focused || self.focus_pending {
+            self.focus_pending = false;
             let state = self.state.clone().expect("text input state");
             let end = self.initial_text.chars().count() as u32;
             state.update(cx, |state, cx| {
+                state.focus(window, cx);
                 state.set_cursor_position(Position::new(0, end), window, cx);
             });
         }

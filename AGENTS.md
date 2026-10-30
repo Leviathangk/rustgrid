@@ -952,9 +952,12 @@ make more engines cheap later — do not build those features early.
 - **The filter builder's value fields are ordinary `ui::TextInput`s** (caret, mouse selection,
   clipboard and IME from gpui-kit), one entity per `(node path, slot)` in
   `GridView::filter_value_inputs` and dropped on any structural change (like the field/operator
-  combos). Only the page / page-size boxes remain bespoke append-only editors routed through
-  `GridView`'s `EntityInputHandler` (`grid_ime.rs`, `GridTextField`); do not add a new `GridTextField`
-  variant for a field that can be a `TextInput`.
+  combos). The pager's 页码 / 每页记录数 boxes are `ui::TextInput`s too (`grid.rs::make_page_input` /
+  `make_page_size_input`): the shared field owns caret, selection, clipboard and IME, `accepts`
+  keeps them digits-only, `on_submit` commits (Enter), `on_cancel` restores the current value
+  (Escape) and the page-size box's `on_arrow` steps by 100. `GridView` no longer implements
+  `EntityInputHandler`; a new single-line field should be a `ui::TextInput` rather than a bespoke
+  append-only editor.
 
 - **SQL Server (tiberius) is not sqlx.** `tiberius::Client` drives one request at a time and is
   `Send` but **not `Sync`**, so `SqlServerConnection` holds a `bb8::Pool` and checks a client out per

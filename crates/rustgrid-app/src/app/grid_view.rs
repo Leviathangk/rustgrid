@@ -1,3 +1,4 @@
+use super::grid::{make_page_input, make_page_size_input};
 use super::grid_fields::make_field_filter_search_input;
 use super::*;
 use gpui::HitboxBehavior;
@@ -71,6 +72,8 @@ impl GridView {
         let page_size_input = state.page_size.to_string();
         let weak = cx.weak_entity();
         let field_filter_search_input = make_field_filter_search_input(theme, weak.clone(), cx);
+        let page_input_view = make_page_input(theme, page_input.clone(), weak.clone(), cx);
+        let page_size_view = make_page_size_input(theme, page_size_input.clone(), weak, cx);
         Self {
             state,
             app,
@@ -112,13 +115,11 @@ impl GridView {
             filter_rendered_width: FILTER_CONTENT_WIDTH_DEFAULT,
             filter_resize: None,
             page_input,
-            page_input_focus: cx.focus_handle(),
-            page_input_focused: false,
+            page_input_view,
             page_size_menu_open: false,
             page_size_input,
-            page_size_focus: cx.focus_handle(),
+            page_size_view,
             page_size_focus_pending: false,
-            page_size_focused: false,
             field_filter_open: false,
             field_filter_focus_pending: false,
             field_filter_search: String::new(),
@@ -127,8 +128,6 @@ impl GridView {
             field_filter_drag: None,
             field_filter_anchor: Rc::new(RefCell::new(Point::default())),
             grid_pane_bounds: Rc::new(RefCell::new(Bounds::default())),
-            caret_visible: true,
-            caret_blink_running: false,
             status_sql_focus: cx.focus_handle(),
             status_sql_layout: TextLayout::default(),
             status_sql_text: String::new(),
@@ -137,8 +136,6 @@ impl GridView {
             status_sql_selecting: false,
             empty_grid_height: 0.0,
             self_weak: cx.weak_entity(),
-            ime_field: None,
-            ime_marked: None,
             sum_cache: RefCell::new(None),
         }
     }
@@ -173,53 +170,15 @@ impl GridView {
             self.cell_editor_focus_pending = false;
         }
         if self.page_size_focus_pending {
-            window.focus(&self.page_size_focus, cx);
+            self.page_size_view
+                .update(cx, |input, cx| input.focus_state(window, cx));
             self.page_size_focus_pending = false;
         }
         if self.field_filter_focus_pending {
-            let focus = self.field_filter_search_input.read(cx).focus_handle();
-            window.focus(&focus, cx);
+            self.field_filter_search_input
+                .update(cx, |input, cx| input.focus_state(window, cx));
             self.field_filter_focus_pending = false;
         }
-        self.page_input_focused = self.page_input_focus.is_focused(window);
-        self.page_size_focused = self.page_size_focus.is_focused(window);
-        self.update_blink(cx);
-    }
-
-    fn has_focused_input(&self) -> bool {
-        self.page_input_focused || self.page_size_focused
-    }
-
-    fn update_blink(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.has_focused_input() || self.caret_blink_running {
-            return;
-        }
-        self.caret_blink_running = true;
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
-            loop {
-                executor.timer(Duration::from_millis(530)).await;
-                let keep_going = this.update(cx, |grid, cx| {
-                    if grid.has_focused_input() {
-                        grid.caret_visible = !grid.caret_visible;
-                        cx.notify();
-                        true
-                    } else {
-                        grid.caret_blink_running = false;
-                        grid.caret_visible = true;
-                        false
-                    }
-                });
-                if !matches!(keep_going, Ok(true)) {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    pub(super) fn caret(&self) -> bool {
-        self.caret_visible
     }
 
     /// Whether the grid header paints each field's comment under its name: the 数据 option is on
@@ -1078,7 +1037,7 @@ impl Render for GridView {
         );
 
         if self.state.show_toolbar && self.page_size_menu_open {
-            root = root.child(self.render_record_limit_panel(cx));
+            root = root.child(self.render_record_limit_panel(window, cx));
         }
 
         // F2's value editor sits under the rows, above the footer (as in Navicat).

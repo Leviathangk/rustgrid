@@ -8,13 +8,13 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use gpui::{
     Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
-    DispatchPhase, Div, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight,
-    HighlightStyle, ImageSource, KeyBinding, KeyDownEvent, Keystroke, ListHorizontalSizingBehavior,
-    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels,
-    Point, Render, Resource, ScrollDelta, ScrollEvent, ScrollHandle, ScrollStrategy, SharedString,
-    Stateful, StyledText, Subscription, Svg, TextLayout, UTF16Selection, UniformListScrollHandle,
-    WeakEntity, Window, WindowBounds, WindowHandle, WindowId, WindowOptions, anchored, canvas,
-    deferred, div, img, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
+    DispatchPhase, Div, Entity, FocusHandle, FontWeight, HighlightStyle, ImageSource, KeyBinding,
+    KeyDownEvent, Keystroke, ListHorizontalSizingBehavior, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, Point, Render, Resource, ScrollDelta,
+    ScrollEvent, ScrollHandle, ScrollStrategy, SharedString, Stateful, StyledText, Subscription,
+    Svg, TextLayout, UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowHandle,
+    WindowId, WindowOptions, anchored, canvas, deferred, div, img, prelude::*, px, relative, rgb,
+    rgba, size, svg, uniform_list,
 };
 use rustgrid_config::{
     AppSettings, ConfigStore, ConnectionGroup, DEFAULT_EDITOR_FONT_SIZE, FieldLayout, GroupEntry,
@@ -1615,16 +1615,6 @@ struct TreePane {
     nav_generation: u64,
 }
 
-/// Which bespoke text field of a grid owns the platform text input (IME / `WM_CHAR`). The page /
-/// page-size boxes are append-only single-line editors with static focus handles, so `GridView`
-/// implements `EntityInputHandler` itself and routes input to whichever of them is focused. (The
-/// filter builder's value fields are ordinary [`TextInput`]s, so they handle their own input.)
-#[derive(Clone, PartialEq, Eq)]
-enum GridTextField {
-    PageInput,
-    PageSize,
-}
-
 /// The app-wide cell clipboard: the last block copied from any grid, with the SQL `NULL`s the OS
 /// clipboard text cannot represent, plus the exact text written with it so a paste can tell our
 /// own copy from an external one. Shared by every grid (`Rc`), so copying a record in one table
@@ -1717,14 +1707,14 @@ struct GridView {
     /// `(pointer x, width)` captured when the filter-width drag started.
     filter_resize: Option<(f32, f32)>,
 
+    /// The pager's fields: the model text each one commits on Enter, and the shared
+    /// [`TextInput`]s that own caret, selection, clipboard and IME.
     page_input: String,
-    page_input_focus: FocusHandle,
-    page_input_focused: bool,
+    page_input_view: Entity<TextInput>,
     page_size_menu_open: bool,
     page_size_input: String,
-    page_size_focus: FocusHandle,
+    page_size_view: Entity<TextInput>,
     page_size_focus_pending: bool,
-    page_size_focused: bool,
 
     /// Whether the 字段筛选 popup is open.
     field_filter_open: bool,
@@ -1743,9 +1733,6 @@ struct GridView {
     /// The grid pane's own window-space bounds, so the popup can be clamped inside it.
     grid_pane_bounds: Rc<RefCell<Bounds<Pixels>>>,
 
-    caret_visible: bool,
-    caret_blink_running: bool,
-
     /// The status bar's SQL line is hand-selectable (drag, double-click to select all, Ctrl+C),
     /// mirroring the database dialog's SQL preview: the laid-out text is kept so a pointer
     /// position maps to a byte offset.
@@ -1760,12 +1747,9 @@ struct GridView {
     /// grid paints an empty table (gutter + column separators) tall enough to fill it.
     empty_grid_height: f32,
 
-    /// A weak handle to this view, used to register the input handler from a paint callback
-    /// without forming an `Entity` reference cycle.
+    /// A weak handle to this view, used for the pager's field callbacks and the toolbar's
+    /// deferred work without forming an `Entity` reference cycle.
     self_weak: WeakEntity<GridView>,
-    /// The field the platform IME is currently driving and its composing byte range.
-    ime_field: Option<GridTextField>,
-    ime_marked: Option<std::ops::Range<usize>>,
     /// Cache of the status bar's numeric selection sum, keyed by a cheap state signature, so a
     /// huge selection is not re-summed on every render.
     sum_cache: RefCell<Option<(u64, Option<String>)>>,
@@ -2743,7 +2727,6 @@ mod grid;
 mod grid_cell;
 mod grid_commit;
 mod grid_fields;
-mod grid_ime;
 mod grid_input;
 mod grid_key;
 mod grid_menu;
@@ -4403,34 +4386,6 @@ fn sort_plus_badge(theme: Theme) -> impl IntoElement {
                 .flex_none()
                 .text_color(rgb(0xffffff)),
         )
-}
-
-/// The byte offset for a UTF-16 offset (used by the platform IME protocol).
-fn offset_from_utf16(text: &str, offset: usize) -> usize {
-    let mut utf8 = 0;
-    let mut utf16 = 0;
-    for character in text.chars() {
-        if utf16 >= offset {
-            break;
-        }
-        utf16 += character.len_utf16();
-        utf8 += character.len_utf8();
-    }
-    utf8
-}
-
-/// The UTF-16 offset for a byte offset (used by the platform IME protocol).
-fn offset_to_utf16(text: &str, offset: usize) -> usize {
-    let mut utf8 = 0;
-    let mut utf16 = 0;
-    for character in text.chars() {
-        if utf8 >= offset {
-            break;
-        }
-        utf8 += character.len_utf8();
-        utf16 += character.len_utf16();
-    }
-    utf16
 }
 
 /// The built-in SQL editor font, matching VS Code's default monospace family for the platform.
