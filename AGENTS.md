@@ -481,7 +481,11 @@ touching UI code.
   `OBJECT_ROW_HEIGHT` per row) so a column fills top-to-bottom and then wraps to the next column
   to the right, and it scrolls **horizontally** (`overflow_x_scroll`), not vertically. The
   number of rows per column therefore adapts to the window height. Do not switch it back to
-  `flex_row()`/`overflow_scroll()`. gpui-pre does **not** paint scrollbars for `overflow_*`
+  `flex_row()`/`overflow_scroll()`. A plain mouse wheel pans it horizontally: `ColumnGrid::scroller`
+  wraps the scroll area in gpui-kit's `ScrollableMask::vertical_wheel`, because gpui gives an
+  `overflow_x_scroll` container only the horizontal delta, so the wheel would otherwise do nothing
+  (trackpad and horizontal wheels are left to the scroller, and the wheel chains to the parent at
+  the edge). gpui-pre does **not** paint scrollbars for `overflow_*`
   (it only scrolls and reserves space), so the list ships its own horizontal scrollbar
   (`render_object_hscrollbar`, driven by `object_scroll`); keep it in sync when touching the
   object list.

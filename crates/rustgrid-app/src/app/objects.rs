@@ -2439,7 +2439,7 @@ impl ObjectPane {
             .min_h(px(0.0))
             .min_w(px(0.0))
             .overflow_hidden();
-        grid = grid.child(self.grid.scroller("object-grid-scroll").child(columns));
+        grid = grid.child(self.grid.scroller("object-grid-scroll", columns));
         if self.grid.overflows() {
             grid = grid.child(
                 self.grid

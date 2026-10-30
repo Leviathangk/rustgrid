@@ -1040,11 +1040,7 @@ impl AppView {
             .min_h(px(0.0))
             .min_w(px(0.0))
             .overflow_hidden();
-        grid = grid.child(
-            self.backup_grid
-                .scroller("backup-grid-scroll")
-                .child(columns),
-        );
+        grid = grid.child(self.backup_grid.scroller("backup-grid-scroll", columns));
         if self.backup_grid.overflows() {
             grid = grid.child(
                 self.backup_grid

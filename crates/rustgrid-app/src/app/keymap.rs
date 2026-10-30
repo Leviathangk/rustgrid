@@ -822,4 +822,34 @@ mod tests {
         // designer.save also uses Ctrl/⌘+S, but in the designer's context.
         assert!(conflicts(designer_save, &overrides, OS).is_empty());
     }
+
+    /// gpui-kit 0.8 parses a runtime keystroke against the host OS, so a rebindable
+    /// `secondary-…` command must resolve to Ctrl (⌘ on macOS) when it is bound.
+    #[gpui::test]
+    fn a_secondary_binding_resolves_to_the_platform_modifier(cx: &mut gpui::TestAppContext) {
+        use gpui::AsKeystroke as _;
+
+        cx.update(|cx| {
+            let binding = load_binding("secondary-r", TreeUp, Some(TREE_CONTEXT), cx)
+                .expect("secondary-r parses");
+            let key = binding
+                .keystrokes()
+                .first()
+                .expect("one keystroke")
+                .as_keystroke();
+            assert_eq!(key.key, "r");
+            match cx.platform_info().os {
+                OperatingSystem::Mac | OperatingSystem::Ios => assert!(key.modifiers.platform),
+                _ => assert!(key.modifiers.control),
+            }
+        });
+    }
+
+    /// A keystroke that does not parse is skipped, not bound, and never panics.
+    #[gpui::test]
+    fn an_unparseable_binding_is_skipped(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert!(load_binding("ctrl-a-b", TreeUp, Some(TREE_CONTEXT), cx).is_none());
+        });
+    }
 }

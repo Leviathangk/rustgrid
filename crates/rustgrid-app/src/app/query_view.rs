@@ -841,7 +841,7 @@ impl AppView {
             .min_h(px(0.0))
             .min_w(px(0.0))
             .overflow_hidden();
-        grid = grid.child(self.query_grid.scroller("query-grid-scroll").child(columns));
+        grid = grid.child(self.query_grid.scroller("query-grid-scroll", columns));
         if self.query_grid.overflows() {
             grid = grid.child(
                 self.query_grid

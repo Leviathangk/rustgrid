@@ -2873,8 +2873,7 @@ impl AppView {
         grid = grid.child(
             self.sync
                 .transfer_grid
-                .scroller("transfer-grid-scroll")
-                .child(columns),
+                .scroller("transfer-grid-scroll", columns),
         );
         if self.sync.transfer_grid.overflows() {
             grid = grid.child(

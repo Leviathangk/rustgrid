@@ -1145,17 +1145,36 @@ impl ColumnGrid {
     }
 
     /// The scroller that holds the [`grid_columns`] body.
-    pub(crate) fn scroller(&self, id: impl Into<SharedString>) -> Stateful<Div> {
+    ///
+    /// gpui only feeds an `overflow_x_scroll` container a horizontal delta, so a plain mouse wheel
+    /// over a column-major list does nothing on its own. gpui-kit's `ScrollableMask` maps the
+    /// wheel's vertical lines onto the horizontal axis (trackpad gestures and horizontal wheels
+    /// are left to the scroller, and it hands the wheel to the parent at the edge).
+    pub(crate) fn scroller(
+        &self,
+        id: impl Into<SharedString>,
+        content: impl IntoElement,
+    ) -> impl IntoElement {
         div()
-            .id(id.into())
+            .relative()
             .flex()
             .flex_col()
             .items_start()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .overflow_x_scroll()
-            .track_scroll(&self.scroll)
+            .child(
+                div()
+                    .id(id.into())
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .size_full()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(content),
+            )
+            .child(gpui_kit::base::ScrollableMask::vertical_wheel(&self.scroll))
     }
 
     /// Capture the scrollbar thumb at `mouse_x` and jump the view there. Returns whether a drag is

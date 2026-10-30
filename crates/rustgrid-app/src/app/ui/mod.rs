@@ -6,8 +6,8 @@
 //! `AGENTS.md` under "UI conventions".
 
 use gpui::{
-    AnyView, App, BoxShadow, ClickEvent, Context, CursorStyle, Div, FontWeight, IntoElement, Point,
-    Render, SharedString, Stateful, Window, div, prelude::*, px, relative, rgb, rgba, svg,
+    AnyView, App, BoxShadow, ClickEvent, CursorStyle, Div, FontWeight, IntoElement, Point,
+    SharedString, Stateful, Window, div, prelude::*, px, relative, rgb, rgba, svg,
 };
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -96,28 +96,16 @@ fn sized_button(
 }
 
 /// A simple text bubble tooltip, shared by chrome items that would otherwise have none.
+///
+/// It renders gpui-kit's own tooltip surface, so the app's tooltips match the kit's components
+/// (same popover background, border, radius and shadow) instead of hand-drawing a bubble.
 pub(super) fn text_tooltip(
     text: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView {
     let text = text.into();
-    move |_, cx| cx.new(|_| TextTooltip(text.clone())).into()
-}
-
-struct TextTooltip(SharedString);
-
-impl Render for TextTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = gpui_kit::component::Theme::global(cx);
-        div()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .bg(theme.popover)
-            .text_color(theme.popover_foreground)
-            .border_1()
-            .border_color(theme.border)
-            .text_size(px(12.0))
-            .child(self.0.clone())
+    move |_, cx| {
+        cx.new(|_| gpui_kit::component::tooltip::Tooltip::new(text.clone()))
+            .into()
     }
 }
 
