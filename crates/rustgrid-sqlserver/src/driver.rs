@@ -264,6 +264,7 @@ impl Driver for SqlServerDriver {
                     ConnectionPage::Tunnel,
                     ConnectionPage::Advanced,
                 ],
+                optional_fields: Vec::new(),
                 labels: vec![ConnectionFieldLabel {
                     field: ConnectionStandardField::Database,
                     label_key: "form.sqlserver.database",

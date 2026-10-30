@@ -83,8 +83,8 @@ impl AppView {
             _ => current,
         };
         if let Some(form) = self.form.as_mut() {
-            // Never jump to a page this driver does not show.
-            form.page = if form.pages.contains(&target) {
+            // Never jump to a page this driver (or the current optional transport) does not show.
+            form.page = if form.visible_pages().contains(&target) {
                 target
             } else {
                 ConnectionPage::General

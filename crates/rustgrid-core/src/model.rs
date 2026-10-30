@@ -699,6 +699,9 @@ pub struct TableStatus {
     pub collation: Option<String>,
     pub create_options: Option<String>,
     pub comment: Option<String>,
+    /// A key-value object's remaining lifetime in seconds (`-1` = it never expires). `None` for
+    /// engines and objects without a TTL concept.
+    pub ttl: Option<i64>,
 }
 
 /// The kind of database object a backup can contain. Mirrors Navicat's object-selection

@@ -236,6 +236,15 @@ impl RedisConnection {
         let key_limit = parse_key_limit(config.options.get(OPT_KEY_LIMIT))?;
         let tls = TlsPlan::resolve(&config.settings)?;
         let mut username = text(config.username.as_str());
+        // `default` is Redis's built-in user. Sending `AUTH default <password>` needs Redis 6+;
+        // `AUTH <password>` reaches the same default user (and is the only form Redis 5 knows),
+        // so a `default` user name is normalised away for compatibility.
+        if username
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("default"))
+        {
+            username = None;
+        }
         let password = config.password.clone().filter(|value| !value.is_empty());
         // An ACL username without a password cannot authenticate (Redis 6 `AUTH user ""` is a
         // different thing); a blank password field means "no AUTH at all".
@@ -619,7 +628,7 @@ impl RedisConnection {
             .await
             .ok()
             .and_then(|value| reply::reply_integer(&value))
-            .filter(|ttl| *ttl >= 0);
+            .filter(|ttl| *ttl != -2);
         let memory = if self.info.version.has_memory_usage() {
             self.run(db, &cmd_value("MEMORY", &["USAGE", key]))
                 .await
@@ -647,9 +656,8 @@ impl RedisConnection {
             engine: Some(key_type.label().to_string()),
             rows,
             data_length: memory,
-            comment: ttl
-                .map(|ttl| format!("TTL {ttl}s"))
-                .or_else(|| encoding.clone()),
+            comment: encoding.clone(),
+            ttl,
             ..Default::default()
         })
     }

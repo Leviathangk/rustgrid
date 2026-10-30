@@ -23,8 +23,8 @@ pub use descriptor::{
 };
 pub use dialect::DriverDialect;
 pub use driver::{
-    Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, ScriptSession, UserEditorSpec, Watch,
-    WatchEvent, WatchSpec,
+    Connection, DatabaseEditorSpec, DatabaseEditorTab, Driver, ScriptSession, UserEditorSpec,
+    Watch, WatchEvent, WatchSpec,
 };
 pub use error::{Error, Result};
 pub use model::{

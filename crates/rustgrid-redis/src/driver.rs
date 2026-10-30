@@ -98,6 +98,9 @@ impl Driver for RedisDriver {
                     ConnectionPage::Tunnel,
                     ConnectionPage::Advanced,
                 ],
+                // A Redis user name is an ACL account (Redis 6+); password-only AUTH and the
+                // `default` user need no user name, so an empty field is valid.
+                optional_fields: vec![ConnectionStandardField::Username],
                 labels: vec![
                     ConnectionFieldLabel {
                         field: ConnectionStandardField::Database,

@@ -59,6 +59,8 @@ pub struct DatabaseNode {
     pub object_cursor: Option<String>,
     /// The namespace filter (`user:*`) applied to the object list, if any.
     pub object_pattern: Option<String>,
+    /// The key-value namespaces (key prefixes) of this database, with their key counts.
+    pub namespaces: Loadable<Vec<rustgrid_core::ObjectNamespace>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -802,6 +804,9 @@ pub struct GridState {
     pub database: String,
     pub table: String,
     pub is_view: bool,
+    /// The key-value object's overview (type / TTL / memory), when this grid shows a key. `None`
+    /// for SQL tables and query results.
+    pub key_status: Option<rustgrid_core::TableStatus>,
     pub page_index: u64,
     pub page_size: u64,
     pub loading: bool,

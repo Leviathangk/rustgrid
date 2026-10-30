@@ -275,7 +275,11 @@ touching UI code.
   `ConnectionFieldKind` (`Text`/`Secret`/`Folder`/`Select`), the `page` it sits on and an optional
   `visible_when` condition. `advanced` (`AdvancedFields`) gates the standard 高级 fields
   (connect/query timeout, keep-alive, read-only, init SQL) to the ones an engine honors, so no
-  driver shows a dead knob. The app renders each driver's pages generically (never matching an
+  driver shows a dead knob. `optional_fields` lists standard fields the engine treats as optional
+  — Redis's user name is an ACL account, so a blank one means password-only `AUTH` / the `default`
+  user and the label carries no `*`. 常规 also carries **使用 TLS/SSL** and **使用 SSH/HTTP/SOCKS
+  隧道** switches; the TLS and tunnel tabs are only listed while those settings are on, so a plain
+  local connection shows just 常规 + 高级. The app renders each driver's pages generically (never matching an
   engine id) and round-trips the options through `ConnectionProfile::options`, so an engine gets its
   own page set without touching UI code and without migrating `connections.json`. Engine option
   fields on 常规 render **before** 记住密码, so a controlling field (Oracle's 连接类型) sits directly
@@ -840,11 +844,15 @@ shadcn chrome described above. Implemented today:
     and selecting a result scrolls its tag into view.
 
 19. Redis (`crates/rustgrid-redis` + `app/redis_tools.rs`): a Redis connection is browsed through
-    the shared object list. Keys open in the normal grid, whose columns follow `TYPE` (hash
+    the shared object list. For `DriverCapability::KeyValue` the database node expands to its
+    **namespace folders** (key prefixes with counts, from `list_namespaces`) instead of SQL
+    categories, and the Tables list is a key table (键名 / 类型 / TTL / 内存) that defaults to the
+    detailed layout. Keys open in the normal grid, whose columns follow `TYPE` (hash
     `field`/`value`, list `index`/`value`, set `member`, zset `member`/`score`, stream
-    `id`/`field`/`value`, string/ReJSON `value`). `DriverCapability::KeyValue` turns on the Redis
-    toolbar items (新建键 / 设置 TTL / Redis 工具), the 加载更多 page button (`list_objects_page`
-    returns a `SCAN` cursor) and the namespace picker in the tools window. The tools window
+    `id`/`field`/`value`, string/ReJSON `value`), with a key header (type badge, name, type, TTL,
+    memory) above it. The toolbar items are 打开键 / 新建键 / 设置 TTL / Redis 工具 / 加载更多
+    (`list_objects_page` returns a `SCAN` cursor); SQL-only designer/import/export items are hidden.
+    The main ribbon keeps 表 / 查询 and adds 慢日志 / 监控 for a Redis connection. The tools window
     (`app/redis_tools.rs`) is one OS window with five panes: 键 (create key, TTL, namespaces),
     发布订阅 (`watch` → `SUBSCRIBE`/`PSUBSCRIBE` + `PUBLISH`), 命令监控 (`watch` → `MONITOR`),
     慢日志 (`SLOWLOG GET 100`) and ACL 用户 (`ACL LIST`/`ACL SETUSER`/`ACL DELUSER`). Live streams

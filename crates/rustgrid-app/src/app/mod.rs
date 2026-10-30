@@ -1535,6 +1535,9 @@ struct ObjectPane {
     /// The schema the list is scoped to (SQL Server), or `None` for the whole database.
     schema: Option<String>,
     category: Category,
+    /// Whether the connection is a key-value engine (Redis): the Tables list is a key list with
+    /// type/TTL/memory columns and its grid defaults to the detailed layout.
+    key_value: bool,
     selected: Option<String>,
     /// The kind of the selected routine, when `category` is [`Category::Functions`].
     selected_routine: Option<RoutineKind>,
@@ -3717,6 +3720,15 @@ impl AppView {
             .get(page)
             .map(|value| ViewMode::from_id(value))
             .unwrap_or_default()
+    }
+
+    /// A page's list layout, using `default` until the user picks one explicitly. Key-value
+    /// engines default to the detailed key table instead of the tile grid.
+    pub(super) fn view_mode_or(&self, page: &str, default: ViewMode) -> ViewMode {
+        self.view_modes
+            .get(page)
+            .map(|value| ViewMode::from_id(value))
+            .unwrap_or(default)
     }
 
     /// Remember a page's list layout and re-render it.

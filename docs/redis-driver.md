@@ -90,17 +90,23 @@ writes such as `JSON.SET`, and every grid edit.
 
 ## Key management and namespaces
 
-The object list is the key list. For key-value engines (`DriverCapability::KeyValue`) it shows
-**加载更多** while the last `SCAN` page left a cursor, and the toolbar adds **新建键 / 设置 TTL /
-Redis 工具**. The Redis tools window's 键 pane carries the same operations plus a namespace picker:
+The object list is the key list. For key-value engines (`DriverCapability::KeyValue`) its detailed
+layout is 键名 / 类型 / TTL / 内存 (and it is the default layout for a key list), the tree under a
+database shows the **namespace folders** (with key counts) instead of SQL categories, and the
+toolbar adds **新建键 / 设置 TTL / Redis 工具**. The key list shows **加载更多** while the last `SCAN`
+page left a cursor. The Redis tools window's 键 pane carries the same operations plus a namespace
+picker:
 
 - **new key**: name, type (`string`/`hash`/`list`/`set`/`zset`/`stream`), field/member, value/score
   and an optional TTL;
 - **TTL**: `EXPIRE` (or `PERSIST` for 永久), with the key name prefilled by 设置 TTL from the object
   list;
 - **namespaces**: `list_namespaces` groups the scanned keys by their first `:` prefix and shows the
-  counts; picking one applies `prefix*` as the `SCAN MATCH` pattern (`object_pattern`) and reloads
-  the object list, picking 全部 clears it.
+  counts; picking one in the tree (or the tools window) applies `prefix*` as the `SCAN MATCH`
+  pattern (`object_pattern`) and reloads the object list, picking 全部 clears it.
+
+Opening a key shows the normal grid with its columns chosen from `TYPE`, prefixed by a key header
+with the type badge, key name, type, TTL and memory.
 
 The object list holds at most `redis.key_limit` keys (default 1000) per *page load*; each 加载更多
 reads the next `SCAN` page (200 keys). Cluster mode has no cross-node cursor, so a cluster lists its
@@ -127,8 +133,8 @@ on an older server the error is shown in the window's status line.
 
 - The object list still labels its container 表: the shared tab/noun vocabulary has no per-driver
   key label yet.
-- Namespaces are a picker (as in Navicat's 命名空间选择), not a collapsible tree in the left sidebar.
-- There is no separate key-detail tab: a key opens in the normal grid, whose columns depend on `TYPE`.
+- There is no separate key-detail tab: a key opens in the normal grid, whose columns depend on
+  `TYPE`, with a key header above it.
 - The Users main tab stays disabled (`supports_users` is `false`); Redis ACL is managed in the tools
   window instead.
 - Backup/Restore (`Backup` tab) is disabled: the SQL dump pipeline does not apply to keys.

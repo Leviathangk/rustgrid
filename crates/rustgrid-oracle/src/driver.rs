@@ -212,6 +212,7 @@ impl Driver for OracleDriver {
                 // like OCI/Navicat, Oracle has no separate SSL tab. So the wallet lives on 高级
                 // next to the tnsnames.ora directory.
                 tabs: vec![ConnectionPage::Tunnel, ConnectionPage::Advanced],
+                optional_fields: Vec::new(),
                 // The universal "default database" field is Oracle's service/SID target, decided
                 // by 连接类型. It is meaningless (and ignored by `connect_string`) for the TNS
                 // alias / connect string types, so it hides for them.

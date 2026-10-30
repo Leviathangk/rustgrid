@@ -47,6 +47,9 @@ impl GridView {
 
     pub(super) fn render_grid_toolbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
+        // A key's detail grid is a content editor (hash fields, list items, ...), not a table:
+        // WHERE/sort/field layout do not apply.
+        let key_value = self.state.key_status.is_some();
         div()
             .flex()
             .flex_row()
@@ -63,7 +66,7 @@ impl GridView {
                 "icons/filter.svg",
                 t!("grid.filter").to_string(),
                 theme.text,
-                self.state.sql.is_none(),
+                !key_value && self.state.sql.is_none(),
                 self.state.filter_open,
                 false,
                 cx.listener(|this, _event, _window, cx| this.toggle_filter_panel(cx)),
@@ -73,7 +76,7 @@ impl GridView {
                 "icons/sort.svg",
                 t!("grid.sort").to_string(),
                 theme.text,
-                self.state.sql.is_none(),
+                !key_value && self.state.sql.is_none(),
                 self.state.sort_open,
                 false,
                 cx.listener(|this, _event, _window, cx| this.toggle_sort_panel(cx)),
@@ -83,7 +86,7 @@ impl GridView {
                 "icons/import.svg",
                 t!("grid.import").to_string(),
                 theme.icon_views,
-                self.state.sql.is_none(),
+                !key_value && self.state.sql.is_none(),
                 false,
                 false,
                 cx.listener(|this, _event, _window, cx| this.open_grid_import(cx)),
@@ -120,7 +123,9 @@ impl GridView {
                         "icons/field_filter.svg",
                         t!("grid.fields").to_string(),
                         self.field_filter_color(),
-                        self.state.sql.is_none() && !self.state.all_columns.is_empty(),
+                        !key_value
+                            && self.state.sql.is_none()
+                            && !self.state.all_columns.is_empty(),
                         configured && self.field_filter_open,
                         false,
                         cx.listener(|this, _event, _window, cx| this.toggle_field_filter(cx)),
@@ -137,7 +142,7 @@ impl GridView {
     /// Open the Import Wizard scoped to this grid's database, defaulting a single source table to
     /// the table the grid is showing. Table grids only (SQL result grids have no import target).
     fn open_grid_import(&mut self, cx: &mut Context<'_, Self>) {
-        if self.state.sql.is_some() {
+        if self.state.sql.is_some() || self.state.key_status.is_some() {
             return;
         }
         let connection = self.state.connection.clone();
@@ -1183,6 +1188,12 @@ impl GridView {
 
     pub(super) fn render_grid_controls(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
+        // A string/JSON key is one value: there is no row to add or delete.
+        let scalar_key = self
+            .state
+            .key_status
+            .as_ref()
+            .is_some_and(|status| matches!(status.engine.as_deref(), Some("string" | "json")));
         let last = self.state.last_page();
         let at_first = self.state.page_index == 0;
         let at_last = match last {
@@ -1214,6 +1225,7 @@ impl GridView {
                         "icons/plus.svg",
                         theme.icon_connection,
                         self.state.editable
+                            && !scalar_key
                             && !self.state.loading
                             && self.state.visible_columns > 0,
                         cx.listener(|this, _event, window, cx| this.add_insert_row(window, cx)),
@@ -1223,6 +1235,7 @@ impl GridView {
                         "icons/minus.svg",
                         theme.danger,
                         self.state.editable
+                            && !scalar_key
                             && self.state.selection.is_some()
                             && !self.state.rows.is_empty(),
                         cx.listener(|this, _event, _window, cx| this.open_delete_confirm(cx)),

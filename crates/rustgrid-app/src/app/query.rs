@@ -1189,6 +1189,7 @@ impl AppView {
                             database,
                             table,
                             is_view: false,
+                            key_status: None,
                             page_index: 0,
                             page_size: total.max(1),
                             loading: false,

@@ -1222,13 +1222,25 @@ impl AppView {
                     t!(button_key).to_string(),
                 )
             }
-            Some(DeleteConfirm::Tables { names, .. }) => {
+            Some(DeleteConfirm::Tables {
+                names,
+                connection_index,
+                ..
+            }) => {
                 let count = names.len();
-                (
-                    t!("object.delete_tables_title").to_string(),
-                    t!("object.drop_tables_confirm", count = count).to_string(),
-                    t!("object.drop_tables_button", count = count).to_string(),
-                )
+                if self.driver_supports(*connection_index, DriverCapability::KeyValue) {
+                    (
+                        t!("redis.key.delete_title").to_string(),
+                        t!("redis.key.delete_confirm", count = count).to_string(),
+                        t!("redis.key.delete_button", count = count).to_string(),
+                    )
+                } else {
+                    (
+                        t!("object.delete_tables_title").to_string(),
+                        t!("object.drop_tables_confirm", count = count).to_string(),
+                        t!("object.drop_tables_button", count = count).to_string(),
+                    )
+                }
             }
             Some(DeleteConfirm::TablesOperation {
                 names, operation, ..

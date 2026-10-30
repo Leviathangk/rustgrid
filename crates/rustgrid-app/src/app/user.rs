@@ -243,7 +243,7 @@ impl AppView {
             return Some(connection_index);
         }
         if let Some(selected) = tree.selected.as_deref() {
-            for prefix in ["conn-", "db-", "cat-"] {
+            for prefix in ["conn-", "db-", "cat-", "keys-"] {
                 if let Some(rest) = selected.strip_prefix(prefix) {
                     let end = rest.find('-').unwrap_or(rest.len());
                     if let Ok(index) = rest[..end].parse::<usize>() {

@@ -490,12 +490,7 @@ pub trait Connection: Send + Sync {
     }
 
     /// Create an object (a key). Engines without key objects keep the default error.
-    async fn create_object(
-        &self,
-        _database: &str,
-        name: &str,
-        _spec: &ObjectCreate,
-    ) -> Result<()> {
+    async fn create_object(&self, _database: &str, name: &str, _spec: &ObjectCreate) -> Result<()> {
         Err(Error::Query(format!(
             "this driver cannot create {name}: it has no key objects"
         )))
@@ -508,12 +503,7 @@ pub trait Connection: Send + Sync {
     }
 
     /// Set (or, with `None`, remove) an object's expiry.
-    async fn set_object_ttl(
-        &self,
-        _database: &str,
-        name: &str,
-        _ttl: Option<i64>,
-    ) -> Result<()> {
+    async fn set_object_ttl(&self, _database: &str, name: &str, _ttl: Option<i64>) -> Result<()> {
         Err(Error::Query(format!(
             "this driver cannot set a TTL on {name}"
         )))

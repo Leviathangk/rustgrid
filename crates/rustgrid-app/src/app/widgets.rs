@@ -570,12 +570,15 @@ impl AppView {
                 let rename_name = name.clone();
                 let export_name = name.clone();
                 let import_target = name.clone();
+                let key_value = self.driver_supports(ci, DriverCapability::KeyValue);
 
                 items = items.child(
                     self.context_item(
                         "table-open",
                         t!(if is_view {
                             "view.open"
+                        } else if key_value {
+                            "redis.key.open"
                         } else {
                             "object.open_table"
                         })
@@ -646,7 +649,72 @@ impl AppView {
                     ));
                 }
 
-                if !is_view {
+                if !is_view && key_value {
+                    // A Redis key has no rows to empty/truncate and no SQL import/export: offer
+                    // TTL, delete and rename, matching the key list's own toolbar.
+                    let ttl_name = name.clone();
+                    items = items
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "key-ttl",
+                            t!("redis.tools.key_apply_ttl").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                let Some(database) = this.database_name(ci, di) else {
+                                    return;
+                                };
+                                this.open_redis_tools(
+                                    ci,
+                                    di,
+                                    database,
+                                    super::redis_tools::RedisToolsSection::Keys,
+                                    Some(ttl_name.clone()),
+                                    cx,
+                                );
+                            }),
+                        ))
+                        .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
+                        .child(self.context_item(
+                            "table-drop",
+                            t!("redis.key.delete").to_string(),
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.context_menu = None;
+                                let selected = this.objects_selection.contains(&drop_name);
+                                let mut names = if selected {
+                                    this.objects_selection.items()
+                                } else {
+                                    Vec::new()
+                                };
+                                if names.is_empty() {
+                                    names.push(drop_name.clone());
+                                }
+                                this.delete_confirm = Some(DeleteConfirm::Tables {
+                                    connection_index: ci,
+                                    database_index: di,
+                                    names,
+                                });
+                                cx.notify();
+                            }),
+                        ))
+                        .child(self.context_item(
+                            "table-rename",
+                            t!("redis.key.rename").to_string(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.context_menu = None;
+                                this.begin_rename_table(
+                                    pane,
+                                    ci,
+                                    di,
+                                    rename_name.clone(),
+                                    is_view,
+                                    window,
+                                    cx,
+                                );
+                                this.notify_rename_pane(pane, cx);
+                                cx.notify();
+                            }),
+                        ));
+                } else if !is_view {
                     items = items
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                         .child(self.context_item(

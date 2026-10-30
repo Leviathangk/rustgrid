@@ -244,8 +244,74 @@ impl AppView {
             ))
             .child(main_separator(theme));
 
+        // A key-value engine has keys and a query console, not views/routines/accounts/backups.
+        // Hide the tabs it cannot use instead of greying out five of them (the prototype's ribbon
+        // is just 表 / 查询).
+        let key_value = self
+            .users_connection_index(cx)
+            .is_some_and(|index| self.driver_supports(index, DriverCapability::KeyValue));
         for (tab, icon, label_key) in MAIN_TABS {
+            if key_value && !matches!(tab, MainTab::Tables | MainTab::Queries) {
+                continue;
+            }
             bar = bar.child(self.render_main_tab(tab, icon, t!(label_key).to_string(), cx));
+        }
+
+        // Redis's slow log and command monitor live in the tools window; their ribbon buttons sit
+        // next to 表/查询 as in the prototype.
+        if key_value
+            && let Some(index) = self.users_connection_index(cx)
+            && self
+                .connections
+                .get(index)
+                .is_some_and(|node| matches!(node.status, ConnectionStatus::Connected(_)))
+            && let Some(database) = self.default_query_database(index, cx)
+            && let Some(database_index) = self.database_index_by_name(index, &database)
+        {
+            let slowlog_database = database.clone();
+            let monitor_database = database.clone();
+            bar = bar
+                .child(main_separator(theme))
+                .child(self.main_button(
+                    "main-redis-slowlog",
+                    "icons/clock.svg",
+                    t!("redis.tools.slowlog").to_string(),
+                    MainButtonState {
+                        active: false,
+                        enabled: true,
+                        caret: false,
+                    },
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.open_redis_tools(
+                            index,
+                            database_index,
+                            slowlog_database.clone(),
+                            super::redis_tools::RedisToolsSection::Slowlog,
+                            None,
+                            cx,
+                        );
+                    }),
+                ))
+                .child(self.main_button(
+                    "main-redis-monitor",
+                    "icons/activity.svg",
+                    t!("redis.tools.monitor").to_string(),
+                    MainButtonState {
+                        active: false,
+                        enabled: true,
+                        caret: false,
+                    },
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.open_redis_tools(
+                            index,
+                            database_index,
+                            monitor_database.clone(),
+                            super::redis_tools::RedisToolsSection::Monitor,
+                            None,
+                            cx,
+                        );
+                    }),
+                ));
         }
 
         bar

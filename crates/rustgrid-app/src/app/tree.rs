@@ -638,6 +638,7 @@ impl AppView {
                                             schemas: existing.schemas,
                                             object_cursor: existing.object_cursor,
                                             object_pattern: existing.object_pattern,
+                                            namespaces: existing.namespaces,
                                         }
                                     } else {
                                         let expanded = remembered.contains(&database.name);
@@ -654,6 +655,7 @@ impl AppView {
                                             schemas: None,
                                             object_cursor: None,
                                             object_pattern: None,
+                                            namespaces: Loadable::Idle,
                                         }
                                     }
                                 })
@@ -726,6 +728,7 @@ impl AppView {
         let mut just_opened = false;
         let supports_routines = self.driver_supports(connection_index, DriverCapability::Routines);
         let supports_schemas = self.driver_supports(connection_index, DriverCapability::Schemas);
+        let supports_key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
         // Do not leave a stale Functions tab selected on an engine without routines.
         if !supports_routines && self.main_tab == MainTab::Functions {
             self.main_tab = MainTab::Tables;
@@ -742,6 +745,11 @@ impl AppView {
                 database.expanded = true;
                 just_opened = true;
                 if matches!(database.tables, Loadable::Idle | Loadable::Failed(_)) {
+                    should_load = true;
+                }
+                if supports_key_value
+                    && matches!(database.namespaces, Loadable::Idle | Loadable::Failed(_))
+                {
                     should_load = true;
                 }
                 if supports_routines
@@ -1006,6 +1014,7 @@ impl AppView {
                 database_index,
                 schema,
                 category,
+                self.driver_supports(connection_index, DriverCapability::KeyValue),
                 theme,
                 grid_viewport,
                 cx,
@@ -1293,11 +1302,7 @@ impl AppView {
     }
 
     /// Whether the object list has another page waiting (key-value engines).
-    pub(super) fn has_more_objects(
-        &self,
-        connection_index: usize,
-        database_index: usize,
-    ) -> bool {
+    pub(super) fn has_more_objects(&self, connection_index: usize, database_index: usize) -> bool {
         self.connections
             .get(connection_index)
             .and_then(|node| match &node.databases {
@@ -1370,6 +1375,19 @@ impl AppView {
         .detach();
     }
 
+    /// Select a key-value namespace from the tree: filter the key list and bring it to the front.
+    pub(super) fn select_key_namespace(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        namespace: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.main_tab = MainTab::Tables;
+        self.set_object_namespace(connection_index, database_index, namespace, cx);
+        self.show_database_objects(connection_index, database_index, cx);
+    }
+
     /// Sets (or clears) the object list's namespace filter and reloads the first page.
     pub(super) fn set_object_namespace(
         &mut self,
@@ -1398,6 +1416,7 @@ impl AppView {
         database_name: String,
         cx: &mut Context<'_, Self>,
     ) {
+        let key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
         if let Some(node) = self.connections.get_mut(connection_index)
             && let Loadable::Loaded(databases) = &mut node.databases
             && let Some(database) = databases.get_mut(database_index)
@@ -1405,21 +1424,31 @@ impl AppView {
             database.tables = Loadable::Loading;
             database.table_statuses = Loadable::Loading;
             database.object_cursor = None;
+            if key_value && matches!(database.namespaces, Loadable::Idle | Loadable::Failed(_)) {
+                database.namespaces = Loadable::Loading;
+            }
         }
 
         // The namespace filter (key-value engines) narrows the listing server-side.
-        let pattern = self
-            .connections
-            .get(connection_index)
-            .and_then(|node| match &node.databases {
-                Loadable::Loaded(databases) => databases
-                    .get(database_index)
-                    .and_then(|database| database.object_pattern.clone()),
-                _ => None,
-            });
+        let pattern =
+            self.connections
+                .get(connection_index)
+                .and_then(|node| match &node.databases {
+                    Loadable::Loaded(databases) => databases
+                        .get(database_index)
+                        .and_then(|database| database.object_pattern.clone()),
+                    _ => None,
+                });
 
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
+            // The key-value namespace list (a full bounded SCAN) runs alongside the first page.
+            let namespaces_handle = key_value.then(|| {
+                let connection = connection.clone();
+                let database = database_name.clone();
+                runtime.spawn(async move { connection.list_namespaces(&database).await })
+            });
+
             // The table list is published first: the default 平铺网格 does not show any of the
             // overview columns, and the per-table `COUNT(*)` pass behind `table_statuses` can take
             // seconds on a large database. Waiting for both made the list appear only after the
@@ -1472,6 +1501,23 @@ impl AppView {
             });
             if failed {
                 return;
+            }
+
+            if let Some(handle) = namespaces_handle {
+                let namespaces = match handle.await {
+                    Ok(Ok(namespaces)) => Loadable::Loaded(namespaces),
+                    Ok(Err(error)) => Loadable::Failed(error.to_string()),
+                    Err(error) => Loadable::Failed(error.to_string()),
+                };
+                let _ = this.update(cx, |view, cx| {
+                    if let Some(node) = view.connections.get_mut(connection_index)
+                        && let Loadable::Loaded(databases) = &mut node.databases
+                        && let Some(database) = databases.get_mut(database_index)
+                    {
+                        database.namespaces = namespaces;
+                    }
+                    cx.notify();
+                });
             }
 
             // The overview columns fill in when the extra query returns; the list itself is
@@ -1621,9 +1667,36 @@ impl AppView {
             .get(connection_index)
             .map(|node| node.profile.id.clone())
             .unwrap_or_default();
+        let key_status = if self.driver_supports(connection_index, DriverCapability::KeyValue) {
+            self.database_index_by_name(connection_index, &database)
+                .and_then(|database_index| {
+                    self.connections
+                        .get(connection_index)
+                        .and_then(|node| match &node.databases {
+                            Loadable::Loaded(databases) => databases.get(database_index),
+                            _ => None,
+                        })
+                })
+                .and_then(|database| match &database.table_statuses {
+                    Loadable::Loaded(statuses) => statuses
+                        .iter()
+                        .find(|(name, _)| name == &table)
+                        .map(|(_, status)| status.clone()),
+                    _ => None,
+                })
+        } else {
+            None
+        };
         let layout = self.field_layout(&connection_id, &database, &table);
         let id = self.next_grid_id;
         self.next_grid_id += 1;
+        // For a key grid whose overview was not loaded yet (e.g. a restored session), fetch it
+        // after the grid opens so the key header (type/TTL/memory) still appears.
+        let status_connection = (key_status.is_none()
+            && self.driver_supports(connection_index, DriverCapability::KeyValue))
+        .then(|| connection.clone());
+        let status_database = database.clone();
+        let status_table = table.clone();
 
         let state = GridState {
             id,
@@ -1634,6 +1707,7 @@ impl AppView {
             database,
             table,
             is_view,
+            key_status,
             page_index: 0,
             page_size: self.page_size,
             loading: false,
@@ -1675,6 +1749,29 @@ impl AppView {
         self.grids.push(entity.clone());
         self.active_grid = Some(self.grids.len() - 1);
         entity.update(cx, |grid, cx| grid.load_page(cx));
+
+        if let Some(connection) = status_connection {
+            let grid = entity.clone();
+            let runtime = self.runtime.clone();
+            cx.spawn(async move |_this, cx| {
+                let status = runtime
+                    .spawn(async move {
+                        connection
+                            .table_status(&status_database, &status_table)
+                            .await
+                    })
+                    .await;
+                if let Ok(Ok(status)) = status {
+                    grid.update(cx, |grid, cx| {
+                        if grid.state.key_status.is_none() {
+                            grid.state.key_status = Some(status);
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .detach();
+        }
 
         cx.notify();
     }

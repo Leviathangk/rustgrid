@@ -749,6 +749,7 @@ impl Connection for MysqlConnection {
             collation: value("Collation").and_then(text_value),
             create_options: value("Create_options").and_then(text_value),
             comment: value("Comment").and_then(text_value),
+            ttl: None,
         })
     }
 

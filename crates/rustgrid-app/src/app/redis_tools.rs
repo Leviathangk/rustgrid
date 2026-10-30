@@ -127,7 +127,25 @@ impl AppView {
                 .update(cx, |_, window, _| window.activate_window())
                 .is_ok()
         {
+            let database_name = database.clone();
             if let Some(state) = self.redis_tools.as_mut() {
+                if state.connection_index != connection_index || state.database != database_name {
+                    // The window follows the connection/database it was reopened for; do not
+                    // keep streaming the previous server.
+                    if let Some(stream) = state.stream.take() {
+                        stream.abort();
+                    }
+                    state.streaming = false;
+                    state.connection_index = connection_index;
+                    state.database_index = database_index;
+                    state.database = database_name;
+                    state.namespace_pattern = None;
+                    state.messages.clear();
+                    state.monitor.clear();
+                    state.slowlog.clear();
+                    state.acl_users.clear();
+                    state.acl_selected = None;
+                }
                 state.section = section;
                 if let Some(key) = preset_key {
                     state
@@ -137,6 +155,10 @@ impl AppView {
             }
             if section == RedisToolsSection::Keys {
                 self.redis_tools_refresh_namespaces(cx);
+            } else if section == RedisToolsSection::Slowlog {
+                self.redis_tools_refresh_slowlog(cx);
+            } else if section == RedisToolsSection::Acl {
+                self.redis_tools_refresh_acl(cx);
             }
             cx.notify();
             return;
@@ -238,6 +260,14 @@ impl AppView {
                 cx,
             )
         });
+        let namespace_pattern = self
+            .connections
+            .get(connection_index)
+            .and_then(|node| match &node.databases {
+                Loadable::Loaded(databases) => databases.get(database_index),
+                _ => None,
+            })
+            .and_then(|database| database.object_pattern.clone());
         self.redis_tools = Some(RedisToolsState {
             connection_index,
             database_index,
@@ -253,7 +283,7 @@ impl AppView {
             key_ttl_input: key_ttl,
             key_kind: "string".to_string(),
             namespaces: Vec::new(),
-            namespace_pattern: None,
+            namespace_pattern,
             channels: Vec::new(),
             messages: Vec::new(),
             monitor: Vec::new(),
@@ -267,6 +297,10 @@ impl AppView {
         });
         if section == RedisToolsSection::Keys {
             self.redis_tools_refresh_namespaces(cx);
+        } else if section == RedisToolsSection::Slowlog {
+            self.redis_tools_refresh_slowlog(cx);
+        } else if section == RedisToolsSection::Acl {
+            self.redis_tools_refresh_acl(cx);
         }
 
         let weak = cx.weak_entity();

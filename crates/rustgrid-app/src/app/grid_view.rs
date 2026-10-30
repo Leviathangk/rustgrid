@@ -3,6 +3,62 @@ use super::*;
 use gpui::HitboxBehavior;
 
 impl GridView {
+    /// The key-value detail header above the grid: type badge, key name, type, TTL and memory.
+    /// Shown only for a Redis key (a SQL table grid has no `key_status`).
+    fn render_key_header(&self, theme: Theme) -> AnyElement {
+        let Some(status) = self.state.key_status.as_ref() else {
+            return div().into_any_element();
+        };
+        let kind = status.engine.clone().unwrap_or_default();
+        let ttl = match status.ttl {
+            Some(-1) => t!("redis.key.persist").to_string(),
+            Some(ttl) => ttl.to_string(),
+            None => String::new(),
+        };
+        let memory = status.data_length.map(human_size).unwrap_or_default();
+        let mut header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .h(px(34.0))
+            .flex_none()
+            .px_3()
+            .bg(rgb(theme.toolbar_bg))
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .text_size(px(12.0))
+            .child(super::objects::key_type_badge(&kind, theme))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme.text))
+                    .child(self.state.table.clone()),
+            );
+        if !kind.is_empty() {
+            header = header.child(
+                div()
+                    .text_color(rgb(theme.text_muted))
+                    .child(kind.to_uppercase()),
+            );
+        }
+        if !ttl.is_empty() {
+            header = header.child(
+                div()
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!("{}: {ttl}", t!("redis.key.ttl"))),
+            );
+        }
+        if !memory.is_empty() {
+            header = header.child(
+                div()
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!("{}: {memory}", t!("redis.key.memory"))),
+            );
+        }
+        header.into_any_element()
+    }
+
     pub(super) fn new(
         state: GridState,
         app: WeakEntity<AppView>,
@@ -799,6 +855,9 @@ impl Render for GridView {
             );
 
         let mut root = div().relative().flex().flex_col().size_full();
+        if self.state.key_status.is_some() {
+            root = root.child(self.render_key_header(theme));
+        }
         if self.state.show_toolbar {
             root = root.child(self.render_grid_toolbar(cx));
             if self.state.filter_open {

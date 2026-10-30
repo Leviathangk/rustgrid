@@ -97,6 +97,53 @@ fn table_sort_key(
     }
 }
 
+/// The small type badge before a key name in the key list (`S`/`H`/`L`/`E`/`Z`/`X`, like the
+/// HTML prototype's type icons).
+pub(super) fn key_type_badge(kind: &str, theme: Theme) -> AnyElement {
+    let lower = kind.to_ascii_lowercase();
+    let (letter, color) = match lower.as_str() {
+        "string" => ("S", theme.brand),
+        "hash" => ("H", theme.icon_database),
+        "list" => ("L", theme.icon_functions),
+        "set" => ("E", theme.icon_view),
+        "zset" => ("Z", theme.danger),
+        "stream" => ("X", theme.icon_tables),
+        "json" => ("J", theme.brand),
+        _ => {
+            return div().w(px(16.0)).flex_none().into_any_element();
+        }
+    };
+    div()
+        .w(px(16.0))
+        .h(px(16.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(color))
+        .text_size(px(9.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(color))
+        .child(letter)
+        .into_any_element()
+}
+
+/// The sort value of one key-value key-list cell: 键名 / 类型 / TTL / 内存.
+fn key_sort_key(
+    table: &rustgrid_core::TableInfo,
+    status: Option<&rustgrid_core::TableStatus>,
+    column: usize,
+) -> SortKey {
+    match column {
+        1 => SortKey::opt_text(status.and_then(|s| s.engine.as_deref())),
+        2 => SortKey::number(status.and_then(|s| s.ttl).map(|v| v as f64)),
+        3 => SortKey::number(status.and_then(|s| s.data_length).map(|v| v as f64)),
+        _ => SortKey::text(&object_display(&table.name)),
+    }
+}
+
 /// The sort value of one Functions 详细列表 cell: 名 / 修改日期 / 函数类型 / 决定性 / 注释.
 fn routine_sort_key(routine: &RoutineInfo, column: usize) -> SortKey {
     let yes = t!("common.yes").to_string();
@@ -214,6 +261,16 @@ impl AppView {
         }
         let designer_enabled = self.driver_supports_table_designer(connection_index);
         let key_value = self.driver_supports(connection_index, DriverCapability::KeyValue);
+        let open_label = if key_value {
+            t!("redis.key.open").to_string()
+        } else {
+            t!("object.open_table").to_string()
+        };
+        let delete_label = if key_value {
+            t!("redis.key.delete").to_string()
+        } else {
+            t!("object.delete_table").to_string()
+        };
         let design_enabled = category == Category::Tables && open_enabled && designer_enabled;
         let new_enabled = category == Category::Tables && designer_enabled;
         // Deleting works off the multi-selection: enabled when at least one row is selected, even
@@ -259,7 +316,7 @@ impl AppView {
                     .child(self.toolbar_item(
                         "obj-open",
                         "icons/tables.svg",
-                        t!("object.open_table").to_string(),
+                        open_label.clone(),
                         open_enabled,
                         cx.listener(move |this, _event, _window, cx| {
                             let Some((connection_index, database_index, name, is_view)) =
@@ -275,50 +332,58 @@ impl AppView {
                             this.select_table(connection_index, database, name, is_view, cx);
                         }),
                     ))
-                    .child(toolbar_separator(theme))
-                    .child(self.toolbar_item(
-                        "obj-design",
-                        "icons/design_table.svg",
-                        t!("object.design_table").to_string(),
-                        design_enabled,
-                        cx.listener(move |this, _event, _window, cx| {
-                            let Some((connection_index, database_index, name, is_view)) =
-                                object_selection(&pane_for_design, cx)
-                            else {
-                                return;
-                            };
-                            let Some(database) =
-                                this.database_name(connection_index, database_index)
-                            else {
-                                return;
-                            };
-                            this.open_design_table(connection_index, database, name, is_view, cx);
-                        }),
-                    ))
-                    .child(toolbar_separator(theme))
-                    .child(self.toolbar_item(
-                        "obj-new",
-                        "icons/new_table.svg",
-                        t!("object.new_table").to_string(),
-                        new_enabled,
-                        cx.listener(move |this, _event, _window, cx| {
-                            let (connection_index, database_index) = {
-                                let pane = pane_for_new.read(cx);
-                                (pane.connection_index, pane.database_index)
-                            };
-                            let Some(database) =
-                                this.database_name(connection_index, database_index)
-                            else {
-                                return;
-                            };
-                            this.open_new_table(connection_index, database, cx);
-                        }),
-                    ))
+                    .when(!key_value, |bar| {
+                        bar.child(toolbar_separator(theme))
+                            .child(self.toolbar_item(
+                                "obj-design",
+                                "icons/design_table.svg",
+                                t!("object.design_table").to_string(),
+                                design_enabled,
+                                cx.listener(move |this, _event, _window, cx| {
+                                    let Some((connection_index, database_index, name, is_view)) =
+                                        object_selection(&pane_for_design, cx)
+                                    else {
+                                        return;
+                                    };
+                                    let Some(database) =
+                                        this.database_name(connection_index, database_index)
+                                    else {
+                                        return;
+                                    };
+                                    this.open_design_table(
+                                        connection_index,
+                                        database,
+                                        name,
+                                        is_view,
+                                        cx,
+                                    );
+                                }),
+                            ))
+                            .child(toolbar_separator(theme))
+                            .child(self.toolbar_item(
+                                "obj-new",
+                                "icons/new_table.svg",
+                                t!("object.new_table").to_string(),
+                                new_enabled,
+                                cx.listener(move |this, _event, _window, cx| {
+                                    let (connection_index, database_index) = {
+                                        let pane = pane_for_new.read(cx);
+                                        (pane.connection_index, pane.database_index)
+                                    };
+                                    let Some(database) =
+                                        this.database_name(connection_index, database_index)
+                                    else {
+                                        return;
+                                    };
+                                    this.open_new_table(connection_index, database, cx);
+                                }),
+                            ))
+                    })
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(
                         "obj-delete",
                         "icons/delete_table.svg",
-                        t!("object.delete_table").to_string(),
+                        delete_label.clone(),
                         delete_enabled,
                         cx.listener(move |this, _event, _window, cx| {
                             let (connection_index, database_index, is_view) =
@@ -343,20 +408,21 @@ impl AppView {
                             cx.notify();
                         }),
                     ))
-                    .child(toolbar_separator(theme))
-                    .child(self.toolbar_item(
-                        "obj-import",
-                        "icons/import.svg",
-                        t!("object.import").to_string(),
-                        import_enabled,
-                        cx.listener(move |this, _event, _window, cx| {
-                            let (connection_index, database_index) = {
-                                let pane = pane_for_import.read(cx);
-                                (pane.connection_index, pane.database_index)
-                            };
-                            this.open_import_wizard(connection_index, database_index, None, cx);
-                        }),
-                    ))
+                    .when(!key_value, |bar| {
+                        bar.child(toolbar_separator(theme)).child(self.toolbar_item(
+                            "obj-import",
+                            "icons/import.svg",
+                            t!("object.import").to_string(),
+                            import_enabled,
+                            cx.listener(move |this, _event, _window, cx| {
+                                let (connection_index, database_index) = {
+                                    let pane = pane_for_import.read(cx);
+                                    (pane.connection_index, pane.database_index)
+                                };
+                                this.open_import_wizard(connection_index, database_index, None, cx);
+                            }),
+                        ))
+                    })
                     .when(key_value, |bar| {
                         bar.child(toolbar_separator(theme))
                             .child(self.toolbar_item(
@@ -436,31 +502,38 @@ impl AppView {
                                 }),
                             ))
                     })
-                    .child(toolbar_separator(theme))
-                    .child(self.toolbar_item(
-                        "obj-export",
-                        "icons/export.svg",
-                        t!("object.export").to_string(),
-                        export_enabled,
-                        cx.listener(move |this, _event, _window, cx| {
-                            let (connection_index, database_index, is_view) =
-                                object_scope(&pane_for_export, cx);
-                            if is_view {
-                                return;
-                            }
-                            let names = this.objects_selection.items();
-                            let names = if names.is_empty() {
-                                let Some((_, _, name, _)) = object_selection(&pane_for_export, cx)
-                                else {
+                    .when(!key_value, |bar| {
+                        bar.child(toolbar_separator(theme)).child(self.toolbar_item(
+                            "obj-export",
+                            "icons/export.svg",
+                            t!("object.export").to_string(),
+                            export_enabled,
+                            cx.listener(move |this, _event, _window, cx| {
+                                let (connection_index, database_index, is_view) =
+                                    object_scope(&pane_for_export, cx);
+                                if is_view {
                                     return;
+                                }
+                                let names = this.objects_selection.items();
+                                let names = if names.is_empty() {
+                                    let Some((_, _, name, _)) =
+                                        object_selection(&pane_for_export, cx)
+                                    else {
+                                        return;
+                                    };
+                                    vec![name]
+                                } else {
+                                    names
                                 };
-                                vec![name]
-                            } else {
-                                names
-                            };
-                            this.open_export_wizard(connection_index, database_index, &names, cx);
-                        }),
-                    ))
+                                this.open_export_wizard(
+                                    connection_index,
+                                    database_index,
+                                    &names,
+                                    cx,
+                                );
+                            }),
+                        ))
+                    })
                     .child(toolbar_separator(theme))
                     .child(self.toolbar_item(
                         "obj-refresh",
@@ -1026,6 +1099,13 @@ impl AppView {
             schema.as_deref(),
             category,
         );
+        let noun = if category == Category::Tables
+            && self.driver_supports(connection_index, DriverCapability::KeyValue)
+        {
+            t!("redis.key.noun").to_string()
+        } else {
+            t!(category.label()).to_string()
+        };
 
         div()
             .flex()
@@ -1035,11 +1115,11 @@ impl AppView {
             .w_full()
             .px_2()
             .text_size(px(12.0))
-            .child(div().text_color(rgb(theme.text)).child(format!(
-                "{} {}",
-                count,
-                t!(category.label())
-            )))
+            .child(
+                div()
+                    .text_color(rgb(theme.text))
+                    .child(format!("{count} {noun}")),
+            )
             .child(
                 div()
                     .flex()
@@ -1121,6 +1201,7 @@ impl ObjectPane {
         database_index: usize,
         schema: Option<String>,
         category: Category,
+        key_value: bool,
         theme: Theme,
         grid_viewport: f32,
         cx: &mut Context<'_, Self>,
@@ -1131,6 +1212,7 @@ impl ObjectPane {
             database_index,
             schema,
             category,
+            key_value,
             selected: None,
             selected_routine: None,
             grid: ColumnGrid::with_viewport(grid_viewport),
@@ -1154,6 +1236,8 @@ impl ObjectPane {
     fn effective_table_sort(&self) -> DetailSort {
         let columns = if self.category == Category::Views {
             2
+        } else if self.key_value {
+            4
         } else {
             7
         };
@@ -1272,6 +1356,7 @@ impl ObjectPane {
                 // The clicked header decides the order (name order by default, Navicat's default),
                 // not the driver's catalog order.
                 let category = self.category;
+                let key_value = self.key_value;
                 let sort = self.effective_table_sort();
                 sort.sort_by(&mut items, |table| {
                     let status = table_statuses.as_ref().and_then(|list| {
@@ -1279,10 +1364,29 @@ impl ObjectPane {
                             .find(|(name, _)| name == &table.name)
                             .map(|(_, status)| status)
                     });
-                    table_sort_key(table, status, category, sort.column)
+                    if key_value && category == Category::Tables {
+                        key_sort_key(table, status, sort.column)
+                    } else {
+                        table_sort_key(table, status, category, sort.column)
+                    }
                 });
                 self.visible_keys
                     .extend(items.iter().map(|table| table.name.clone()));
+                if self.key_value && self.category == Category::Tables {
+                    return match mode {
+                        ViewMode::Detail => self.render_key_detail(
+                            &items,
+                            table_statuses.as_deref(),
+                            &selected,
+                            rename.as_ref(),
+                            theme,
+                            cx,
+                        ),
+                        ViewMode::Grid => {
+                            self.render_table_grid(&items, &selected, rename.as_ref(), theme, cx)
+                        }
+                    };
+                }
                 match mode {
                     ViewMode::Detail => self.render_table_detail(
                         &items,
@@ -1466,6 +1570,247 @@ impl ObjectPane {
             list = list.child(object_row_with_rect(self.app.clone(), row, key));
         }
         list.render(theme)
+    }
+
+    /// The key-value list: 键名 / 类型 / TTL / 内存 (the HTML prototype's key table).
+    fn render_key_detail(
+        &self,
+        tables: &[&rustgrid_core::TableInfo],
+        statuses: Option<&[(String, rustgrid_core::TableStatus)]>,
+        selected: &std::collections::HashSet<String>,
+        rename: Option<&RenameRow>,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let labels = vec![
+            t!("redis.key.name").to_string(),
+            t!("redis.key.type").to_string(),
+            t!("redis.key.ttl").to_string(),
+            t!("redis.key.memory").to_string(),
+        ];
+        let mut longest = vec![ui::approx_text_width(&labels[0]) + 30.0];
+        longest.push(ui::approx_text_width(&labels[1]));
+        longest.push(ui::approx_text_width(&labels[2]));
+        longest.push(ui::approx_text_width(&labels[3]));
+        for table in tables {
+            let status = statuses.and_then(|list| {
+                list.iter()
+                    .find(|(name, _)| name == &table.name)
+                    .map(|(_, status)| status)
+            });
+            longest[0] = longest[0].max(ui::approx_text_width(&object_display(&table.name)) + 30.0);
+            longest[1] = longest[1].max(ui::approx_text_width(
+                status
+                    .and_then(|status| status.engine.as_deref())
+                    .unwrap_or_default(),
+            ));
+            longest[2] = longest[2].max(ui::approx_text_width(
+                &status
+                    .and_then(|status| status.ttl)
+                    .map(|ttl| ttl.to_string())
+                    .unwrap_or_default(),
+            ));
+            longest[3] = longest[3].max(ui::approx_text_width(
+                &status
+                    .and_then(|status| status.data_length)
+                    .map(human_size)
+                    .unwrap_or_default(),
+            ));
+        }
+        let mins: [f32; 4] = [220.0, 90.0, 80.0, 100.0];
+        let fitted: Vec<f32> = longest
+            .iter()
+            .zip(mins)
+            .map(|(longest, min)| ui::detail_column_width(*longest, min))
+            .collect();
+        let widths = self.table_columns.borrow_mut().resolve(&fitted);
+        let sort = self.effective_table_sort();
+        let mut header = ui::detail_header_row(theme);
+        for (index, label) in labels.into_iter().enumerate() {
+            let width = widths[index];
+            let cell = ui::detail_header_cell(
+                SharedString::from(format!("key-sort-{index}")),
+                label,
+                sort.indicator(index),
+                theme,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.table_sort.toggle(index);
+                    cx.notify();
+                }),
+            );
+            header = header.child(ui::detail_header_column(
+                SharedString::from(format!("key-resize-{index}")),
+                width,
+                self.table_columns.borrow().resizing(index),
+                theme,
+                cell,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.table_columns
+                        .borrow_mut()
+                        .begin_resize(index, event.position.x, width);
+                    cx.notify();
+                }),
+            ));
+        }
+
+        let mut list = ui::DetailList::new(
+            "key-detail",
+            &self.detail_scroll,
+            ui::detail_content_width(&widths),
+            header,
+        );
+        for table in tables {
+            let key = table.name.clone();
+            let status = statuses.and_then(|list| {
+                list.iter()
+                    .find(|(name, _)| name == &table.name)
+                    .map(|(_, status)| status)
+            });
+            let row = self.key_row(
+                table,
+                status,
+                selected.contains(&key),
+                rename,
+                &widths,
+                theme,
+                cx,
+            );
+            list = list.child(object_row_with_rect(self.app.clone(), row, key));
+        }
+        list.render(theme)
+    }
+
+    /// One key row of the key list, with its type badge, TTL and memory.
+    #[allow(clippy::too_many_arguments)]
+    fn key_row(
+        &self,
+        table: &rustgrid_core::TableInfo,
+        status: Option<&rustgrid_core::TableStatus>,
+        selected: bool,
+        rename: Option<&RenameRow>,
+        widths: &[f32],
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement + use<> {
+        let connection_index = self.connection_index;
+        let database_index = self.database_index;
+        let name = table.name.clone();
+        let label_name = object_display(&name);
+        let hit_key = name.clone();
+        let open_name = name.clone();
+        let menu_name = name.clone();
+        let menu_app = self.app.clone();
+        let rename = rename.filter(|row| {
+            row.connection_index == connection_index
+                && row.database_index == database_index
+                && row.old_name == table.name
+        });
+        let editing_here = rename.is_some();
+        let label: AnyElement = match rename {
+            Some(row) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(22.0))
+                .child(ui::rename_field(theme, row.input.clone()))
+                .into_any_element(),
+            None => div()
+                .min_w(px(0.0))
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!(
+                        "key-name-{connection_index}-{database_index}-{name}"
+                    )),
+                    label_name,
+                ))
+                .into_any_element(),
+        };
+        let kind = status
+            .and_then(|status| status.engine.clone())
+            .unwrap_or_default();
+        let badge = key_type_badge(&kind, theme);
+        let name_cell = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w(px(widths[0]))
+            .flex_none()
+            .overflow_hidden()
+            .child(badge)
+            .child(label);
+        let kind_text = status
+            .and_then(|status| status.engine.as_deref())
+            .unwrap_or_default()
+            .to_string();
+        let ttl = status.and_then(|status| status.ttl);
+        let ttl_text = ttl.map(|ttl| ttl.to_string()).unwrap_or_default();
+        let ttl_color = if ttl.is_some_and(|ttl| ttl >= 0) {
+            theme.warning
+        } else {
+            theme.text_muted
+        };
+        let memory = status
+            .and_then(|status| status.data_length)
+            .map(human_size)
+            .unwrap_or_default();
+        let cell = |column: usize, width: f32, text: String, color: u32| {
+            div()
+                .w(px(width))
+                .flex_none()
+                .text_color(rgb(color))
+                .child(ui::detail_cell_text(
+                    SharedString::from(format!(
+                        "key-cell-{connection_index}-{database_index}-{name}-{column}"
+                    )),
+                    text,
+                ))
+        };
+
+        ui::detail_row(
+            SharedString::from(format!("key-{connection_index}-{database_index}-{name}")),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if editing_here {
+                return;
+            }
+            let opens = this.click_opens(event.click_count(), event.modifiers(), cx);
+            this.commit_pending_rename(cx);
+            window.focus(&this.focus, cx);
+            this.hit_object(&hit_key, event.modifiers(), cx);
+            if opens {
+                this.open_object_named(open_name.clone(), cx);
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                if editing_here {
+                    return;
+                }
+                cx.stop_propagation();
+                window.focus(&this.focus, cx);
+                this.ensure_object_selected(&menu_name, cx);
+                let _ = menu_app.update(cx, |app, cx| {
+                    app.context_menu = Some(ContextMenu {
+                        target: ContextTarget::Table {
+                            connection_index,
+                            database_index,
+                            name: menu_name.clone(),
+                            is_view: false,
+                            pane: RowPane::Objects,
+                        },
+                        position: event.position,
+                    });
+                    cx.notify();
+                });
+            }),
+        )
+        .child(name_cell)
+        .child(cell(1, widths[1], kind_text, theme.text_muted))
+        .child(cell(2, widths[2], ttl_text, ttl_color))
+        .child(cell(3, widths[3], memory, theme.text_muted))
     }
 
     /// One table/view row of the 详细列表.
@@ -2511,7 +2856,14 @@ impl Render for ObjectPane {
                 Loadable::Failed(error) => Loadable::Failed(error.clone()),
                 Loadable::Loaded(items) => Loadable::Loaded(items.clone()),
             });
-            let mode = app.view_mode(view_page_for_category(self.category));
+            let mode = app.view_mode_or(
+                view_page_for_category(self.category),
+                if self.key_value {
+                    ViewMode::Detail
+                } else {
+                    ViewMode::default()
+                },
+            );
             let selected: std::collections::HashSet<String> =
                 app.objects_selection.items().into_iter().collect();
             let supports_schemas =

@@ -214,6 +214,10 @@ pub struct ConnectionFormSpec {
     pub tabs: Vec<ConnectionPage>,
     /// Per-engine renames/hints for the standard fields.
     pub labels: Vec<ConnectionFieldLabel>,
+    /// Standard fields the engine treats as optional: no `*` on the label and no required-field
+    /// validation. (Redis user names are only needed for ACL accounts, so a blank one means the
+    /// `default` user / password-only `AUTH`.)
+    pub optional_fields: Vec<ConnectionStandardField>,
     /// Engine-specific option fields, each placed on a page.
     pub options: Vec<ConnectionFieldSpec>,
     /// Which standard 高级 fields the engine honors; the rest are hidden.
@@ -232,6 +236,7 @@ impl Default for ConnectionFormSpec {
                 ConnectionPage::Advanced,
             ],
             labels: Vec::new(),
+            optional_fields: Vec::new(),
             options: Vec::new(),
             advanced: AdvancedFields::ALL,
         }

@@ -27,6 +27,9 @@ struct TreeConnection {
     /// Whether the connection supports `.rgbak` backup/restore; when false the Backups category is
     /// hidden (the MySQL driver's StarRocks compatibility mode turns this off).
     supports_backups: bool,
+    /// Whether the engine is a key-value store (Redis): objects are keys with namespaces, so the
+    /// tree shows namespace folders instead of table/view/function categories.
+    supports_key_value: bool,
     status: TreeStatus,
     /// The error from the last failed connect, shown as a tooltip on the node.
     failed_error: Option<String>,
@@ -51,6 +54,10 @@ struct TreeDatabase {
     schemas: Vec<String>,
     expanded_schemas: BTreeSet<String>,
     opened_schemas: BTreeSet<String>,
+    /// The key-value namespaces (Redis key prefixes) under this database.
+    namespaces: Loadable<Vec<rustgrid_core::ObjectNamespace>>,
+    /// The namespace filter currently applied to the key list.
+    object_pattern: Option<String>,
 }
 
 #[derive(Clone)]
@@ -200,6 +207,15 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                                 schemas,
                                 expanded_schemas: database.expanded_schemas.clone(),
                                 opened_schemas: database.opened_schemas.clone(),
+                                namespaces: match &database.namespaces {
+                                    Loadable::Idle => Loadable::Idle,
+                                    Loadable::Loading => Loadable::Loading,
+                                    Loadable::Failed(error) => Loadable::Failed(error.clone()),
+                                    Loadable::Loaded(namespaces) => {
+                                        Loadable::Loaded(namespaces.clone())
+                                    }
+                                },
+                                object_pattern: database.object_pattern.clone(),
                             }
                         })
                         .collect(),
@@ -222,6 +238,7 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                 supports_routines: app.driver_supports(index, DriverCapability::Routines),
                 supports_schemas: app.driver_supports(index, DriverCapability::Schemas),
                 supports_backups: app.driver_supports_backup(index),
+                supports_key_value: app.driver_supports(index, DriverCapability::KeyValue),
                 status,
                 failed_error,
                 expanded: node.expanded,
@@ -867,6 +884,7 @@ impl TreePane {
                                 connection.supports_routines,
                                 connection.supports_schemas,
                                 connection.supports_backups,
+                                connection.supports_key_value,
                                 cx,
                             ));
                         }
@@ -888,6 +906,7 @@ impl TreePane {
         supports_routines: bool,
         supports_schemas: bool,
         supports_backups: bool,
+        supports_key_value: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -934,6 +953,9 @@ impl TreePane {
                     if app.click_opens(click_count, event.modifiers()) {
                         app.open_database(connection_index, database_index, cx);
                     } else if app.click_is_plain(click_count) {
+                        if app.driver_supports(connection_index, DriverCapability::KeyValue) {
+                            app.set_object_namespace(connection_index, database_index, None, cx);
+                        }
                         app.show_database_objects(connection_index, database_index, cx);
                     }
                 });
@@ -1006,51 +1028,73 @@ impl TreePane {
 
         if database.expanded {
             self.nav_depth.set(self.nav_depth.get() + 1);
-            match &database.tables {
-                Loadable::Idle => {}
-                Loadable::Loading => {
-                    sub = sub.child(tree_message(
-                        t!("common.loading").to_string(),
-                        36.0,
-                        theme.text_muted,
-                    ));
-                }
-                Loadable::Failed(error) => {
-                    sub = sub.child(tree_message(error.clone(), 36.0, theme.danger));
-                }
-                Loadable::Loaded(_) => {
-                    if !supports_schemas || database.schemas.is_empty() {
-                        // Schema-less engines (MySQL/SQLite), or a schema engine whose database has
-                        // no user schemas yet, keep the flat category list.
-                        for category in Category::ALL {
-                            if category == Category::Functions && !supports_routines {
-                                continue;
+            if supports_key_value {
+                // Redis: the database node expands to its key prefixes (the prototype's
+                // namespace folders), not to SQL categories. Saved queries stay. The namespaces
+                // render even while the key list reloads, so selecting one does not collapse the
+                // whole branch.
+                sub = sub.child(self.render_namespaces(
+                    connection_index,
+                    database_index,
+                    database,
+                    cx,
+                ));
+                sub = sub.child(self.render_category(
+                    connection_index,
+                    database_index,
+                    None,
+                    Category::Queries,
+                    database,
+                    saved_queries,
+                    cx,
+                ));
+            } else {
+                match &database.tables {
+                    Loadable::Idle => {}
+                    Loadable::Loading => {
+                        sub = sub.child(tree_message(
+                            t!("common.loading").to_string(),
+                            36.0,
+                            theme.text_muted,
+                        ));
+                    }
+                    Loadable::Failed(error) => {
+                        sub = sub.child(tree_message(error.clone(), 36.0, theme.danger));
+                    }
+                    Loadable::Loaded(_) => {
+                        if !supports_schemas || database.schemas.is_empty() {
+                            // Schema-less engines (MySQL/SQLite), or a schema engine whose database
+                            // has no user schemas yet, keep the flat category list.
+                            for category in Category::ALL {
+                                if category == Category::Functions && !supports_routines {
+                                    continue;
+                                }
+                                if category == Category::Backups && !supports_backups {
+                                    continue;
+                                }
+                                sub = sub.child(self.render_category(
+                                    connection_index,
+                                    database_index,
+                                    None,
+                                    category,
+                                    database,
+                                    saved_queries,
+                                    cx,
+                                ));
                             }
-                            if category == Category::Backups && !supports_backups {
-                                continue;
+                        } else {
+                            for schema in &database.schemas {
+                                sub = sub.child(self.render_schema(
+                                    connection_index,
+                                    database_index,
+                                    database,
+                                    schema,
+                                    saved_queries,
+                                    supports_routines,
+                                    supports_backups,
+                                    cx,
+                                ));
                             }
-                            sub = sub.child(self.render_category(
-                                connection_index,
-                                database_index,
-                                None,
-                                category,
-                                database,
-                                saved_queries,
-                                cx,
-                            ));
-                        }
-                    } else {
-                        for schema in &database.schemas {
-                            sub = sub.child(self.render_schema(
-                                connection_index,
-                                database_index,
-                                database,
-                                schema,
-                                saved_queries,
-                                supports_routines,
-                                supports_backups,
-                                cx,
-                            ));
                         }
                     }
                 }
@@ -1059,6 +1103,156 @@ impl TreePane {
         }
 
         div().flex().flex_col().w_full().child(row).child(sub)
+    }
+
+    /// The key-value namespaces (Redis key prefixes) under a database. Clicking one filters the
+    /// key list to that prefix; 全部 clears the filter. This is the tree equivalent of Navicat's
+    /// 命名空间选择 and of the HTML prototype's namespace folders.
+    fn render_namespaces(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        database: &TreeDatabase,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let app = self.app.clone();
+        let mut sub = div().flex().flex_col().w_full();
+
+        let all_id = format!("keys-{connection_index}-{database_index}-all");
+        let all_selected = database.object_pattern.is_none();
+        let all_app = app.clone();
+        let nav_app = all_app.clone();
+        let nav_id = all_id.clone();
+        let all_row = div()
+            .id(SharedString::from(all_id.clone()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .h(px(22.0))
+            .pl(px(36.0))
+            .pr_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .when(all_selected, move |style| {
+                style
+                    .bg(rgb(theme.tree_selected_bg))
+                    .text_color(rgb(theme.tree_selected_text))
+            })
+            .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.commit_pending_rename(cx);
+                this.selected_table = None;
+                window.focus(&this.focus, cx);
+                this.selected = Some(all_id.clone());
+                let _ = all_app.update(cx, |app, cx| {
+                    app.select_key_namespace(connection_index, database_index, None, cx);
+                });
+            }))
+            .child(tree_icon("icons/folder.svg", theme.icon_tables))
+            .child(
+                div()
+                    .flex_1()
+                    .child(t!("redis.tools.namespace_all").to_string()),
+            );
+        let nav_row = NavRow::new(nav_id.clone(), t!("redis.tools.namespace_all").to_string())
+            .opens(Rc::new(move |_this, _window, cx| {
+                let _ = nav_app.update(cx, |app, cx| {
+                    app.select_key_namespace(connection_index, database_index, None, cx);
+                });
+            }));
+        sub = sub.child(self.nav_row(all_row, nav_row));
+
+        match &database.namespaces {
+            Loadable::Idle | Loadable::Loading => {}
+            Loadable::Failed(error) => {
+                sub = sub.child(tree_message(error.clone(), 36.0, theme.danger));
+            }
+            Loadable::Loaded(namespaces) => {
+                for namespace in namespaces {
+                    if namespace.name.is_empty() {
+                        continue;
+                    }
+                    let id = format!(
+                        "keys-{connection_index}-{database_index}-{}",
+                        namespace.name
+                    );
+                    let selected =
+                        database.object_pattern.as_deref() == Some(namespace.name.as_str());
+                    let name = namespace.name.clone();
+                    let label = format!("{name}*");
+                    let clicked = namespace.name.clone();
+                    let row_app = app.clone();
+                    let nav_app = app.clone();
+                    let nav_id = id.clone();
+                    let nav_name = label.clone();
+                    let nav_pick = name.clone();
+                    let row = div()
+                        .id(SharedString::from(id.clone()))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .w_full()
+                        .h(px(22.0))
+                        .pl(px(36.0))
+                        .pr_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .when(selected, move |style| {
+                            style
+                                .bg(rgb(theme.tree_selected_bg))
+                                .text_color(rgb(theme.tree_selected_text))
+                        })
+                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        .on_click(cx.listener(move |this, _event, window, cx| {
+                            this.commit_pending_rename(cx);
+                            this.selected_table = None;
+                            window.focus(&this.focus, cx);
+                            this.selected = Some(id.clone());
+                            let name = clicked.clone();
+                            let _ = row_app.update(cx, |app, cx| {
+                                app.select_key_namespace(
+                                    connection_index,
+                                    database_index,
+                                    Some(name),
+                                    cx,
+                                );
+                            });
+                        }))
+                        .child(tree_icon("icons/folder.svg", theme.icon_tables))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(rgb(theme.text_muted))
+                                .child(namespace.objects.to_string()),
+                        );
+                    let nav_row =
+                        NavRow::new(nav_id, nav_name).opens(Rc::new(move |_this, _window, cx| {
+                            let _ = nav_app.update(cx, |app, cx| {
+                                app.select_key_namespace(
+                                    connection_index,
+                                    database_index,
+                                    Some(nav_pick.clone()),
+                                    cx,
+                                );
+                            });
+                        }));
+                    sub = sub.child(self.nav_row(row, nav_row));
+                }
+            }
+        }
+        sub
     }
 
     /// One schema node under a database (SQL Server), holding all of the database's categories

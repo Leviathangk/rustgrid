@@ -438,6 +438,7 @@ impl AppView {
                 database,
                 table: String::new(),
                 is_view: true,
+                key_status: None,
                 page_index: 0,
                 page_size: total.max(1),
                 loading: false,

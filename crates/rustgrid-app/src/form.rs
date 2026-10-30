@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rustgrid_core::{
     AdvancedFields, ConnectionFieldKind, ConnectionFieldLabel, ConnectionFieldSpec,
     ConnectionFormSpec, ConnectionHomePage, ConnectionOptions, ConnectionPage, ConnectionProfile,
-    ConnectionStandardField, DriverId,
+    ConnectionStandardField, DriverId, TlsMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -73,6 +73,8 @@ pub struct ConnectionForm {
     pub page: ConnectionPage,
     /// Per-engine renames of the standard fields, resolved from the driver's spec.
     pub labels: Vec<ConnectionFieldLabel>,
+    /// Standard fields this engine treats as optional (no `*`, no validation).
+    pub optional_fields: Vec<ConnectionStandardField>,
     /// The engine's option fields (each with its page), resolved from the driver's spec.
     pub option_fields: Vec<ConnectionFieldSpec>,
     /// Which standard 高级 fields the engine honors; the rest are hidden.
@@ -114,6 +116,7 @@ impl Default for ConnectionForm {
             ],
             page: ConnectionPage::General,
             labels: Vec::new(),
+            optional_fields: Vec::new(),
             option_fields: Vec::new(),
             advanced: AdvancedFields::ALL,
         }
@@ -193,6 +196,7 @@ impl ConnectionForm {
             ],
             page: ConnectionPage::General,
             labels: Vec::new(),
+            optional_fields: Vec::new(),
             option_fields: Vec::new(),
             advanced: AdvancedFields::ALL,
         }
@@ -205,6 +209,7 @@ impl ConnectionForm {
         self.file_based = spec.home == ConnectionHomePage::File;
         self.odbc = spec.home == ConnectionHomePage::Odbc;
         self.labels = spec.labels.clone();
+        self.optional_fields = spec.optional_fields.clone();
         self.option_fields = spec.options.clone();
         self.advanced = spec.advanced;
         self.pages = std::iter::once(ConnectionPage::General)
@@ -218,6 +223,31 @@ impl ConnectionForm {
     /// The per-engine rename/hint of a standard field, if the driver declares one.
     pub fn label_override(&self, field: ConnectionStandardField) -> Option<&ConnectionFieldLabel> {
         self.labels.iter().find(|label| label.field == field)
+    }
+
+    /// Whether the connection uses TLS. The 常规 page shows a checkbox for this; the TLS tab is
+    /// only listed once it is on, so a plain local connection is not offered three empty pages.
+    pub fn tls_enabled(&self) -> bool {
+        self.settings.tls.mode != TlsMode::Disabled
+    }
+
+    /// Whether the connection goes through at least one tunnel/proxy hop.
+    pub fn tunnel_enabled(&self) -> bool {
+        !self.settings.tunnel.is_empty()
+    }
+
+    /// The pages to show: the driver's page set minus the optional pages whose settings are off.
+    /// 常规 is always first; 高级 is always kept (it holds the timeout/read-only knobs).
+    pub fn visible_pages(&self) -> Vec<ConnectionPage> {
+        self.pages
+            .iter()
+            .copied()
+            .filter(|page| match page {
+                ConnectionPage::Tls => self.tls_enabled(),
+                ConnectionPage::Tunnel => self.tunnel_enabled(),
+                _ => true,
+            })
+            .collect()
     }
 
     /// The option fields shown on `page`, in declaration order.
@@ -315,6 +345,13 @@ impl ConnectionForm {
     /// The required general-page fields that are currently empty. A network engine needs alias,
     /// host, port and username; a file-based engine (SQLite) needs the alias and its file path.
     /// Password and default database stay optional.
+    /// Whether a standard field is required by this engine. Fields the driver lists in
+    /// [`ConnectionFormSpec::optional_fields`](rustgrid_core::ConnectionFormSpec::optional_fields)
+    /// are optional even when another engine requires them (Redis user names).
+    pub fn field_required(&self, field: ConnectionStandardField) -> bool {
+        !self.optional_fields.contains(&field)
+    }
+
     pub fn missing_required(&self) -> Vec<FormField> {
         let mut missing = Vec::new();
         if self.name.trim().is_empty() {
@@ -342,7 +379,9 @@ impl ConnectionForm {
             if self.port.trim().is_empty() {
                 missing.push(FormField::Port);
             }
-            if self.username.trim().is_empty() {
+            if self.field_required(ConnectionStandardField::Username)
+                && self.username.trim().is_empty()
+            {
                 missing.push(FormField::Username);
             }
         }
@@ -535,6 +574,58 @@ mod tests {
         assert!(form.missing_required().is_empty());
     }
 
+    /// A driver can make a standard field optional (Redis: the ACL user name may be blank).
+    #[test]
+    fn optional_fields_are_not_required() {
+        use rustgrid_core::ConnectionStandardField;
+
+        let mut form = ConnectionForm {
+            name: "redis".to_string(),
+            host: "localhost".to_string(),
+            port: "6379".to_string(),
+            ..Default::default()
+        };
+        form.username.clear();
+        assert_eq!(form.missing_required(), vec![FormField::Username]);
+
+        form.optional_fields = vec![ConnectionStandardField::Username];
+        assert!(!form.field_required(ConnectionStandardField::Username));
+        assert!(form.missing_required().is_empty());
+    }
+
+    /// TLS / tunnel tabs only appear once their switch on 常规 is on.
+    #[test]
+    fn optional_transport_pages_are_hidden_until_enabled() {
+        use rustgrid_core::{TlsMode, TunnelKind, TunnelLayer};
+
+        let mut form = ConnectionForm::default();
+        assert_eq!(
+            form.visible_pages(),
+            vec![ConnectionPage::General, ConnectionPage::Advanced]
+        );
+
+        form.settings.tls.mode = TlsMode::Required;
+        assert_eq!(
+            form.visible_pages(),
+            vec![
+                ConnectionPage::General,
+                ConnectionPage::Tls,
+                ConnectionPage::Advanced
+            ]
+        );
+
+        form.settings.tunnel.push(TunnelLayer::new(TunnelKind::Ssh));
+        assert_eq!(
+            form.visible_pages(),
+            vec![
+                ConnectionPage::General,
+                ConnectionPage::Tls,
+                ConnectionPage::Tunnel,
+                ConnectionPage::Advanced
+            ]
+        );
+    }
+
     /// The driver's spec is applied to the form: the page list, the 常规 shape, the standard-field
     /// renames, the option placement and the `visible_when` gating.
     #[test]
@@ -550,6 +641,7 @@ mod tests {
                 hint_key: Some("test.database_hint"),
                 visible_when: Some(("test.mode", &["on"])),
             }],
+            optional_fields: Vec::new(),
             options: vec![
                 ConnectionFieldSpec {
                     key: "test.mode",

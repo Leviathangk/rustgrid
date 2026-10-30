@@ -317,7 +317,7 @@ impl AppView {
         let Some(form) = self.form.as_ref() else {
             return strip;
         };
-        for tab in form.pages.iter().copied() {
+        for tab in form.visible_pages() {
             let active = form.page == tab;
             let relay = relay.clone();
             strip = strip.child(
@@ -634,8 +634,9 @@ impl AppView {
                             .gap_4()
                             .child(form_field(
                                 label(ConnectionStandardField::Username, "form.username"),
-                                true,
-                                error_hint(FormField::Username),
+                                form.field_required(ConnectionStandardField::Username),
+                                error_hint(FormField::Username)
+                                    .or_else(|| label_hint(ConnectionStandardField::Username)),
                                 input(FormField::Username),
                                 theme,
                             ))
@@ -674,12 +675,100 @@ impl AppView {
             ));
         }
 
+        // TLS and the tunnel are optional transports: a plain local connection should not show
+        // three empty pages. These checkboxes turn them on, which makes the corresponding tab
+        // appear (the tab strip lists `visible_pages`).
+        if form.home == ConnectionHomePage::Network
+            && (form.pages.contains(&ConnectionPage::Tls)
+                || form.pages.contains(&ConnectionPage::Tunnel))
+        {
+            page = page.child(self.transport_toggles(form, theme, cx));
+        }
+
         // 记住密码: the network and ODBC layouts both carry credentials; a file engine does not.
         if form.home != ConnectionHomePage::File {
             page = page.child(self.save_password_row(form, theme, cx));
         }
 
         page.into_any_element()
+    }
+
+    /// The optional transport switches on 常规 (TLS / tunnel). They only enable the page; the
+    /// page's own controls choose the mode or fill the tunnel fields.
+    fn transport_toggles(
+        &self,
+        form: &ConnectionForm,
+        theme: Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let tls_on = form.tls_enabled();
+        let tunnel_on = form.tunnel_enabled();
+        let has_tls = form.pages.contains(&ConnectionPage::Tls);
+        let has_tunnel = form.pages.contains(&ConnectionPage::Tunnel);
+        let mut row = div().flex().flex_row().items_center().gap_5();
+        if has_tls {
+            row = row.child(
+                div()
+                    .id("form-use-tls")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        if let Some(form) = this.form.as_mut() {
+                            form.settings.tls.mode = if tls_on {
+                                rustgrid_core::TlsMode::Disabled
+                            } else {
+                                rustgrid_core::TlsMode::Required
+                            };
+                            if tls_on && form.page == ConnectionPage::Tls {
+                                form.page = ConnectionPage::General;
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child(checkbox_box(tls_on, theme))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .child(t!("form.use_tls").to_string()),
+                    ),
+            );
+        }
+        if has_tunnel {
+            row = row.child(
+                div()
+                    .id("form-use-tunnel")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        if let Some(form) = this.form.as_mut() {
+                            if tunnel_on {
+                                form.settings.tunnel.clear();
+                                if form.page == ConnectionPage::Tunnel {
+                                    form.page = ConnectionPage::General;
+                                }
+                            } else {
+                                form.settings.tunnel.push(rustgrid_core::TunnelLayer::new(
+                                    rustgrid_core::TunnelKind::Ssh,
+                                ));
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child(checkbox_box(tunnel_on, theme))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .child(t!("form.use_tunnel").to_string()),
+                    ),
+            );
+        }
+        row.into_any_element()
     }
 
     /// The 记住密码 / keyring row shared by the network and ODBC 常规 layouts.
@@ -1119,6 +1208,11 @@ impl AppView {
     fn set_tls_mode(&mut self, mode: TlsMode, cx: &mut Context<'_, Self>) {
         if let Some(form) = self.form.as_mut() {
             form.settings.tls.mode = mode;
+            // Turning TLS off hides its tab; leave the page on 常规 rather than showing an
+            // unlisted page.
+            if mode == TlsMode::Disabled && form.page == ConnectionPage::Tls {
+                form.page = ConnectionPage::General;
+            }
         }
         self.form_select_open = false;
         cx.notify();
@@ -1325,7 +1419,12 @@ impl AppView {
     fn set_relay_kind(&mut self, kind: Option<TunnelKind>, cx: &mut Context<'_, Self>) {
         if let Some(form) = self.form.as_mut() {
             match kind {
-                None => form.settings.tunnel.clear(),
+                None => {
+                    form.settings.tunnel.clear();
+                    if form.page == ConnectionPage::Tunnel {
+                        form.page = ConnectionPage::General;
+                    }
+                }
                 Some(kind) => {
                     if form.settings.tunnel.first().map(|layer| layer.kind) != Some(kind) {
                         form.settings.tunnel = vec![TunnelLayer::new(kind)];

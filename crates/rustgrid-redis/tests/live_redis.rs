@@ -17,8 +17,7 @@
 //! safe against any database it is pointed at, but still: do not run it against production.
 
 use rustgrid_core::{
-    ConnectionConfig, Driver, DriverId, ObjectCreate, PageRequest, RowInsert, RowUpdate, Watch,
-    WatchSpec,
+    ConnectionConfig, Driver, DriverId, ObjectCreate, PageRequest, RowInsert, RowUpdate, WatchSpec,
 };
 use rustgrid_redis::{OPT_KEY_LIMIT, OPT_MODE, RedisDriver};
 

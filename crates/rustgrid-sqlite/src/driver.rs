@@ -136,6 +136,7 @@ impl Driver for SqliteDriver {
             connection_form: ConnectionFormSpec {
                 home: ConnectionHomePage::File,
                 tabs: vec![ConnectionPage::Advanced],
+                optional_fields: Vec::new(),
                 // SQLite's "connect timeout" is really the lock / busy timeout: relabel it so it
                 // does not read as a TCP handshake.
                 labels: vec![ConnectionFieldLabel {
