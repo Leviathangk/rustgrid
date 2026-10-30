@@ -1285,7 +1285,7 @@ impl AppView {
                     .find(|grid| grid.read(cx).state.id == grid_id)
                     .cloned();
                 if let Some(grid) = grid {
-                    let (has_selection, editable, deletable) = {
+                    let (has_selection, editable, deletable, key_value) = {
                         let g = grid.read(cx);
                         (
                             g.state.selection.is_some(),
@@ -1293,6 +1293,7 @@ impl AppView {
                             g.state.editable
                                 && g.state.selection.is_some()
                                 && !g.state.rows.is_empty(),
+                            g.state.key_status.is_some(),
                         )
                     };
                     let for_delete = grid.clone();
@@ -1301,10 +1302,15 @@ impl AppView {
                     let for_paste = grid.clone();
                     let for_refresh = grid.clone();
                     let for_null = grid.clone();
+                    let delete_label = if key_value {
+                        t!("redis.key.delete_selected").to_string()
+                    } else {
+                        t!("grid.delete_rows").to_string()
+                    };
                     items = items.child(if deletable {
                         self.context_item(
                             "grid-ctx-delete",
-                            t!("grid.delete_rows").to_string(),
+                            delete_label.clone(),
                             cx.listener(move |this, _event, _window, cx| {
                                 this.context_menu = None;
                                 // The listener already runs inside `AppView::update`: take the
@@ -1322,11 +1328,8 @@ impl AppView {
                         )
                         .into_any_element()
                     } else {
-                        self.context_item_disabled(
-                            "grid-ctx-delete",
-                            t!("grid.delete_rows").to_string(),
-                        )
-                        .into_any_element()
+                        self.context_item_disabled("grid-ctx-delete", delete_label)
+                            .into_any_element()
                     });
                     items = items.child(if has_selection {
                         self.context_item(
@@ -1343,24 +1346,27 @@ impl AppView {
                         self.context_item_disabled("grid-ctx-copy", t!("grid.copy").to_string())
                             .into_any_element()
                     });
-                    items = items.child(if has_selection {
-                        self.context_item(
-                            "grid-ctx-copy-insert",
-                            t!("grid.copy_insert").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                for_insert.update(cx, |grid, cx| grid.copy_selection_as_insert(cx));
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element()
-                    } else {
-                        self.context_item_disabled(
-                            "grid-ctx-copy-insert",
-                            t!("grid.copy_insert").to_string(),
-                        )
-                        .into_any_element()
-                    });
+                    if !key_value {
+                        items = items.child(if has_selection {
+                            self.context_item(
+                                "grid-ctx-copy-insert",
+                                t!("grid.copy_insert").to_string(),
+                                cx.listener(move |this, _event, _window, cx| {
+                                    this.context_menu = None;
+                                    for_insert
+                                        .update(cx, |grid, cx| grid.copy_selection_as_insert(cx));
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element()
+                        } else {
+                            self.context_item_disabled(
+                                "grid-ctx-copy-insert",
+                                t!("grid.copy_insert").to_string(),
+                            )
+                            .into_any_element()
+                        });
+                    }
                     items = items.child(if editable {
                         self.context_item(
                             "grid-ctx-paste",
@@ -1376,21 +1382,26 @@ impl AppView {
                         self.context_item_disabled("grid-ctx-paste", t!("grid.paste").to_string())
                             .into_any_element()
                     });
-                    items = items.child(if editable && has_selection {
-                        self.context_item(
-                            "grid-ctx-null",
-                            t!("grid.set_null").to_string(),
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.context_menu = None;
-                                for_null.update(cx, |grid, cx| grid.set_selection_null(cx));
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element()
-                    } else {
-                        self.context_item_disabled("grid-ctx-null", t!("grid.set_null").to_string())
+                    if !key_value {
+                        items = items.child(if editable && has_selection {
+                            self.context_item(
+                                "grid-ctx-null",
+                                t!("grid.set_null").to_string(),
+                                cx.listener(move |this, _event, _window, cx| {
+                                    this.context_menu = None;
+                                    for_null.update(cx, |grid, cx| grid.set_selection_null(cx));
+                                    cx.notify();
+                                }),
+                            )
                             .into_any_element()
-                    });
+                        } else {
+                            self.context_item_disabled(
+                                "grid-ctx-null",
+                                t!("grid.set_null").to_string(),
+                            )
+                            .into_any_element()
+                        });
+                    }
                     items = items
                         .child(div().h(px(1.0)).my_1().bg(rgb(theme.border)))
                         .child(self.context_item(

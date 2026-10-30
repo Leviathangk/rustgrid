@@ -130,16 +130,16 @@ pub(super) fn key_type_badge(kind: &str, theme: Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The sort value of one key-value key-list cell: 键名 / 类型 / TTL / 内存.
+/// The sort value of one key-value key-list cell: # / 键名 / 类型 / TTL / 内存.
 fn key_sort_key(
     table: &rustgrid_core::TableInfo,
     status: Option<&rustgrid_core::TableStatus>,
     column: usize,
 ) -> SortKey {
     match column {
-        1 => SortKey::opt_text(status.and_then(|s| s.engine.as_deref())),
-        2 => SortKey::number(status.and_then(|s| s.ttl).map(|v| v as f64)),
-        3 => SortKey::number(status.and_then(|s| s.data_length).map(|v| v as f64)),
+        2 => SortKey::opt_text(status.and_then(|s| s.engine.as_deref())),
+        3 => SortKey::number(status.and_then(|s| s.ttl).map(|v| v as f64)),
+        4 => SortKey::number(status.and_then(|s| s.data_length).map(|v| v as f64)),
         _ => SortKey::text(&object_display(&table.name)),
     }
 }
@@ -936,13 +936,18 @@ impl AppView {
             },
         );
         let view_mode = self.view_mode(page);
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(ui::view_mode_toggle(theme, view_mode, on_select))
-            .child(self.render_object_search(cx))
+        // The key list has one layout (the detailed key table), so its 详细列表 / 平铺网格 toggle
+        // is not shown at all.
+        let key_list = category == Category::Tables
+            && self
+                .object_pane
+                .as_ref()
+                .is_some_and(|pane| pane.read(cx).key_value);
+        let mut controls = div().flex().flex_row().items_center().gap_2();
+        if !key_list {
+            controls = controls.child(ui::view_mode_toggle(theme, view_mode, on_select));
+        }
+        controls.child(self.render_object_search(cx))
     }
 
     pub(super) fn render_object_search(&self, _cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -1219,7 +1224,10 @@ impl ObjectPane {
             detail_scroll: DetailScroll::default(),
             table_columns: Rc::new(RefCell::new(DetailColumns::default())),
             routine_columns: Rc::new(RefCell::new(DetailColumns::default())),
-            table_sort: DetailSort::default(),
+            table_sort: DetailSort {
+                column: if key_value { 1 } else { 0 },
+                descending: false,
+            },
             routine_sort: DetailSort::default(),
             visible_keys: Vec::new(),
             focus: cx.focus_handle(),
@@ -1237,14 +1245,17 @@ impl ObjectPane {
         let columns = if self.category == Category::Views {
             2
         } else if self.key_value {
-            4
+            5
         } else {
             7
         };
         if self.table_sort.column < columns {
             self.table_sort
         } else {
-            DetailSort::default()
+            DetailSort {
+                column: if self.key_value { 1 } else { 0 },
+                descending: false,
+            }
         }
     }
 
@@ -1572,7 +1583,7 @@ impl ObjectPane {
         list.render(theme)
     }
 
-    /// The key-value list: 键名 / 类型 / TTL / 内存 (the HTML prototype's key table).
+    /// The key-value list: # / 键名 / 类型 / TTL / 内存 (the HTML prototype's key table).
     fn render_key_detail(
         &self,
         tables: &[&rustgrid_core::TableInfo],
@@ -1583,41 +1594,45 @@ impl ObjectPane {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let labels = vec![
+            "#".to_string(),
             t!("redis.key.name").to_string(),
             t!("redis.key.type").to_string(),
             t!("redis.key.ttl").to_string(),
             t!("redis.key.memory").to_string(),
         ];
-        let mut longest = vec![ui::approx_text_width(&labels[0]) + 30.0];
-        longest.push(ui::approx_text_width(&labels[1]));
-        longest.push(ui::approx_text_width(&labels[2]));
-        longest.push(ui::approx_text_width(&labels[3]));
+        let mut longest = [
+            32.0,
+            ui::approx_text_width(&labels[1]) + 30.0,
+            ui::approx_text_width(&labels[2]),
+            ui::approx_text_width(&labels[3]),
+            ui::approx_text_width(&labels[4]),
+        ];
         for table in tables {
             let status = statuses.and_then(|list| {
                 list.iter()
                     .find(|(name, _)| name == &table.name)
                     .map(|(_, status)| status)
             });
-            longest[0] = longest[0].max(ui::approx_text_width(&object_display(&table.name)) + 30.0);
-            longest[1] = longest[1].max(ui::approx_text_width(
+            longest[1] = longest[1].max(ui::approx_text_width(&object_display(&table.name)) + 30.0);
+            longest[2] = longest[2].max(ui::approx_text_width(
                 status
                     .and_then(|status| status.engine.as_deref())
                     .unwrap_or_default(),
             ));
-            longest[2] = longest[2].max(ui::approx_text_width(
+            longest[3] = longest[3].max(ui::approx_text_width(
                 &status
                     .and_then(|status| status.ttl)
                     .map(|ttl| ttl.to_string())
                     .unwrap_or_default(),
             ));
-            longest[3] = longest[3].max(ui::approx_text_width(
+            longest[4] = longest[4].max(ui::approx_text_width(
                 &status
                     .and_then(|status| status.data_length)
                     .map(human_size)
                     .unwrap_or_default(),
             ));
         }
-        let mins: [f32; 4] = [220.0, 90.0, 80.0, 100.0];
+        let mins: [f32; 5] = [32.0, 220.0, 90.0, 80.0, 100.0];
         let fitted: Vec<f32> = longest
             .iter()
             .zip(mins)
@@ -1628,16 +1643,29 @@ impl ObjectPane {
         let mut header = ui::detail_header_row(theme);
         for (index, label) in labels.into_iter().enumerate() {
             let width = widths[index];
-            let cell = ui::detail_header_cell(
-                SharedString::from(format!("key-sort-{index}")),
-                label,
-                sort.indicator(index),
-                theme,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.table_sort.toggle(index);
-                    cx.notify();
-                }),
-            );
+            // The row number is not a sort key; the name column is the key table's default order.
+            let cell: AnyElement = if index == 0 {
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme.text_muted))
+                    .child(label)
+                    .into_any_element()
+            } else {
+                ui::detail_header_cell(
+                    SharedString::from(format!("key-sort-{index}")),
+                    label,
+                    sort.indicator(index),
+                    theme,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.table_sort.toggle(index);
+                        cx.notify();
+                    }),
+                )
+                .into_any_element()
+            };
             header = header.child(ui::detail_header_column(
                 SharedString::from(format!("key-resize-{index}")),
                 width,
@@ -1660,7 +1688,7 @@ impl ObjectPane {
             ui::detail_content_width(&widths),
             header,
         );
-        for table in tables {
+        for (index, table) in tables.iter().enumerate() {
             let key = table.name.clone();
             let status = statuses.and_then(|list| {
                 list.iter()
@@ -1668,6 +1696,7 @@ impl ObjectPane {
                     .map(|(_, status)| status)
             });
             let row = self.key_row(
+                index,
                 table,
                 status,
                 selected.contains(&key),
@@ -1681,10 +1710,11 @@ impl ObjectPane {
         list.render(theme)
     }
 
-    /// One key row of the key list, with its type badge, TTL and memory.
+    /// One key row of the key list, with its index, type badge, TTL and memory.
     #[allow(clippy::too_many_arguments)]
     fn key_row(
         &self,
+        index: usize,
         table: &rustgrid_core::TableInfo,
         status: Option<&rustgrid_core::TableStatus>,
         selected: bool,
@@ -1733,7 +1763,7 @@ impl ObjectPane {
             .flex_row()
             .items_center()
             .gap_2()
-            .w(px(widths[0]))
+            .w(px(widths[1]))
             .flex_none()
             .overflow_hidden()
             .child(badge)
@@ -1807,10 +1837,16 @@ impl ObjectPane {
                 });
             }),
         )
+        .child(cell(
+            0,
+            widths[0],
+            (index + 1).to_string(),
+            theme.text_muted,
+        ))
         .child(name_cell)
-        .child(cell(1, widths[1], kind_text, theme.text_muted))
-        .child(cell(2, widths[2], ttl_text, ttl_color))
-        .child(cell(3, widths[3], memory, theme.text_muted))
+        .child(cell(2, widths[2], kind_text, theme.text_muted))
+        .child(cell(3, widths[3], ttl_text, ttl_color))
+        .child(cell(4, widths[4], memory, theme.text_muted))
     }
 
     /// One table/view row of the 详细列表.
@@ -2856,14 +2892,13 @@ impl Render for ObjectPane {
                 Loadable::Failed(error) => Loadable::Failed(error.clone()),
                 Loadable::Loaded(items) => Loadable::Loaded(items.clone()),
             });
-            let mode = app.view_mode_or(
-                view_page_for_category(self.category),
-                if self.key_value {
-                    ViewMode::Detail
-                } else {
-                    ViewMode::default()
-                },
-            );
+            // A key list is always the detailed key table (键名 / 类型 / TTL / 内存); the SQL
+            // tile grid is not one of its layouts.
+            let mode = if self.key_value && self.category == Category::Tables {
+                ViewMode::Detail
+            } else {
+                app.view_mode_or(view_page_for_category(self.category), ViewMode::default())
+            };
             let selected: std::collections::HashSet<String> =
                 app.objects_selection.items().into_iter().collect();
             let supports_schemas =

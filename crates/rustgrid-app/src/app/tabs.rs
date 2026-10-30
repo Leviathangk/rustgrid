@@ -1,7 +1,10 @@
 use super::*;
 
-/// A table/design tab row: `(index, id, title, is_view, environment colour)`.
-type ObjectTabRow = (usize, u64, String, bool, Option<ConnectionColor>);
+/// A table/design tab row: `(index, id, title, is_view, is_key, environment colour)`.
+type ObjectTabRow = (usize, u64, String, bool, bool, Option<ConnectionColor>);
+
+/// A design tab row: `(index, id, title, is_view, environment colour)`.
+type DesignTabRow = (usize, u64, String, bool, Option<ConnectionColor>);
 
 /// A query/editor tab row: `(index, id, title, icon, icon colour, environment colour)`.
 type QueryTabRow = (
@@ -346,19 +349,17 @@ impl TabBar {
         id: u64,
         title: String,
         is_view: bool,
+        is_key: bool,
         color: Option<ConnectionColor>,
         active: bool,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
-        let icon = if is_view {
-            "icons/views.svg"
+        let (icon, icon_color) = if is_key {
+            ("icons/primary_key.svg", theme.brand)
+        } else if is_view {
+            ("icons/views.svg", theme.icon_view)
         } else {
-            "icons/tables.svg"
-        };
-        let icon_color = if is_view {
-            theme.icon_view
-        } else {
-            theme.icon_table
+            ("icons/tables.svg", theme.icon_table)
         };
         let tab_id = SharedString::from(format!("tab-{id}"));
         let close_id = SharedString::from(format!("tab-close-{id}"));
@@ -595,14 +596,28 @@ impl Render for TabBar {
                         "common.table"
                     })
                     .to_string();
-                    let title = format!(
-                        "{} @{} ({}) - {}",
-                        grid.state.table, grid.state.database, grid.state.connection_name, kind
-                    );
+                    let is_key = grid.state.key_status.is_some();
+                    let title = if is_key {
+                        // A Redis key opens as its own page; the tab is the key name (the full
+                        // `key @database (connection)` title would only ellipsize at 170px).
+                        grid.state.table.clone()
+                    } else {
+                        format!(
+                            "{} @{} ({}) - {}",
+                            grid.state.table, grid.state.database, grid.state.connection_name, kind
+                        )
+                    };
                     let color = app
                         .connection_index_of(&grid.state.connection)
                         .and_then(|connection| app.connection_color(connection));
-                    Some((index, grid.state.id, title, grid.state.is_view, color))
+                    Some((
+                        index,
+                        grid.state.id,
+                        title,
+                        grid.state.is_view,
+                        is_key,
+                        color,
+                    ))
                 })
                 .collect();
             let query_tabs: Vec<QueryTabRow> = app
@@ -654,7 +669,7 @@ impl Render for TabBar {
                     (index, query.id, title, icon, icon_color, color)
                 })
                 .collect();
-            let design_tabs: Vec<ObjectTabRow> = app
+            let design_tabs: Vec<DesignTabRow> = app
                 .designs
                 .iter()
                 .enumerate()
@@ -727,7 +742,7 @@ impl Render for TabBar {
             .map(|app| app.read(cx).ordered_tabs(cx))
             .unwrap_or_default();
         let mut tabs: Vec<(TabTarget, AnyElement)> = Vec::new();
-        for (index, id, title, is_view, color) in grid_tabs {
+        for (index, id, title, is_view, is_key, color) in grid_tabs {
             tabs.push((
                 TabTarget::Grid(index),
                 self.table_tab(
@@ -736,6 +751,7 @@ impl Render for TabBar {
                     id,
                     title,
                     is_view,
+                    is_key,
                     color,
                     active_grid == Some(index),
                     cx,

@@ -254,9 +254,17 @@ impl Render for GridView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.prepare_frame(window, cx);
         let theme = self.theme;
-        let header_height = self.header_height(cx);
-        let show_types = self.show_column_types(cx);
-        let show_comments = self.show_column_comments(cx);
+        let key_page = self.is_key_page();
+        if key_page {
+            self.layout_key_page_columns();
+        }
+        let header_height = if key_page {
+            GRID_ROW_HEIGHT
+        } else {
+            self.header_height(cx)
+        };
+        let show_types = !key_page && self.show_column_types(cx);
+        let show_comments = !key_page && self.show_column_comments(cx);
         // The hidden fields are kept at the tail of `columns`/`column_widths`, so only the leading
         // `visible_columns` entries are drawn.
         let all_widths: Vec<f32> = if self.state.column_widths.len() == self.state.columns.len() {
@@ -284,8 +292,14 @@ impl Render for GridView {
                     .w(px(GRID_GUTTER_WIDTH))
                     .h(px(header_height))
                     .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme.text_muted))
                     .border_r_1()
-                    .border_color(rgb(theme.grid_line)),
+                    .border_color(rgb(theme.grid_line))
+                    .when(key_page, |gutter| gutter.child("#")),
             );
         for (index, column) in self.state.columns.iter().enumerate().take(visible_count) {
             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
@@ -302,9 +316,9 @@ impl Render for GridView {
             let hovered = self.sort_hover == Some(index);
             let revealed = hovered || selected_column;
             let sort_column = column.name.clone();
-            // A query-result grid cannot be sorted (the ad-hoc SQL owns the order), so its
-            // headers do not offer the sort badge.
-            let show_badge = self.state.sql.is_none() && (revealed || sort_descending.is_some());
+            // A key page has no sort: field/member order is the server's own, so no sort badge.
+            let show_badge =
+                !key_page && self.state.sql.is_none() && (revealed || sort_descending.is_some());
             let (sort_icon, sort_color) = match sort_descending {
                 Some(true) => ("icons/arrow-down.svg", theme.primary),
                 Some(false) => ("icons/arrow-up.svg", theme.primary),
@@ -353,55 +367,68 @@ impl Render for GridView {
                 .px(px(6.0))
                 .whitespace_nowrap()
                 .overflow_hidden()
-                .cursor_pointer()
-                .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                .when(!key_page, |head| {
+                    head.cursor_pointer()
+                        .hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+                        .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                            this.set_sort_hover(index, *hovered, cx);
+                        }))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            let rows = this.state.rows.len();
+                            if rows > 0 && index < this.state.visible_columns {
+                                this.state.selection =
+                                    Some(CellSelection::single((rows - 1, index), (0, index)));
+                            }
+                            this.selecting_cells = false;
+                            cx.notify();
+                        }))
+                })
                 .border_r_1()
                 .border_color(rgb(theme.grid_line))
-                .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                    this.set_sort_hover(index, *hovered, cx);
-                }))
-                .on_click(cx.listener(move |this, _event, _window, cx| {
-                    let rows = this.state.rows.len();
-                    if rows > 0 && index < this.state.visible_columns {
-                        this.state.selection =
-                            Some(CellSelection::single((rows - 1, index), (0, index)));
-                    }
-                    this.selecting_cells = false;
-                    cx.notify();
-                }))
-                .child(header_cell_text(
-                    SharedString::from(format!("grid-head-text-{}-{}", self.state.id, index)),
-                    column,
-                    width,
-                    show_types,
-                    show_comments,
-                    theme,
-                ))
-                .child(slot)
-                .child(
+                .child(if key_page {
                     div()
-                        .id(SharedString::from(format!(
-                            "grid-resize-{}-{}",
-                            self.state.id, index
-                        )))
-                        .absolute()
-                        .right(px(0.0))
-                        .top(px(0.0))
-                        .bottom(px(0.0))
-                        .w(px(5.0))
-                        .cursor(CursorStyle::ResizeColumn)
-                        .when(
-                            self.column_resize.is_some_and(|resize| resize.col == index),
-                            |handle| handle.bg(rgb(theme.primary)),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                this.begin_column_resize(index, event.position.x, cx);
-                            }),
-                        ),
-                );
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(theme.text_muted))
+                        .child(self.key_column_label(&column.name))
+                        .into_any_element()
+                } else {
+                    header_cell_text(
+                        SharedString::from(format!("grid-head-text-{}-{}", self.state.id, index)),
+                        column,
+                        width,
+                        show_types,
+                        show_comments,
+                        theme,
+                    )
+                })
+                .when(!key_page, |head| head.child(slot))
+                .when(!key_page, |head| {
+                    head.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "grid-resize-{}-{}",
+                                self.state.id, index
+                            )))
+                            .absolute()
+                            .right(px(0.0))
+                            .top(px(0.0))
+                            .bottom(px(0.0))
+                            .w(px(5.0))
+                            .cursor(CursorStyle::ResizeColumn)
+                            .when(
+                                self.column_resize.is_some_and(|resize| resize.col == index),
+                                |handle| handle.bg(rgb(theme.primary)),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.begin_column_resize(index, event.position.x, cx);
+                                }),
+                            ),
+                    )
+                });
             header = header.child(cell);
         }
 
@@ -478,7 +505,35 @@ impl Render for GridView {
                             .flex_row()
                             .bg(rgb(base_background))
                             .h(px(GRID_ROW_HEIGHT))
-                            .child(
+                            .child(if key_page {
+                                // The key page numbers its fields/members, like the prototype.
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(GRID_ROW_HEIGHT))
+                                    .w(px(GRID_GUTTER_WIDTH))
+                                    .flex_none()
+                                    .bg(rgb(if row_selected {
+                                        theme.grid_selection_bg
+                                    } else {
+                                        base_background
+                                    }))
+                                    .border_r_1()
+                                    .border_color(rgb(theme.border))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(if row_selected {
+                                        theme.grid_selection_text
+                                    } else {
+                                        theme.text_muted
+                                    }))
+                                    .child(if insert.is_some() {
+                                        "*".to_string()
+                                    } else {
+                                        (row_index + 1).to_string()
+                                    })
+                                    .into_any_element()
+                            } else {
                                 div()
                                     .flex()
                                     .items_center()
@@ -519,8 +574,9 @@ impl Render for GridView {
                                                 }))
                                                 .child("*"),
                                         )
-                                    }),
-                            );
+                                    })
+                                    .into_any_element()
+                            });
                         for index in 0..column_count {
                             let width = widths.get(index).copied().unwrap_or(GRID_COLUMN_WIDTH);
                             let selected = selection
@@ -855,10 +911,12 @@ impl Render for GridView {
             );
 
         let mut root = div().relative().flex().flex_col().size_full();
-        if self.state.key_status.is_some() {
+        if key_page {
+            root = root.child(self.render_key_page_bar(theme, cx));
+        } else if self.state.key_status.is_some() {
             root = root.child(self.render_key_header(theme));
         }
-        if self.state.show_toolbar {
+        if !key_page && self.state.show_toolbar {
             root = root.child(self.render_grid_toolbar(cx));
             if self.state.filter_open {
                 root = root.child(self.render_filter_panel(cx));
@@ -869,7 +927,7 @@ impl Render for GridView {
         }
         // The 字段筛选 popup floats over the body (a panel, not a child window), anchored under its
         // toolbar item; the backdrop behind it dismisses the popup on a click anywhere else.
-        if self.state.show_toolbar && self.field_filter_open {
+        if !key_page && self.state.show_toolbar && self.field_filter_open {
             root = root.child(self.render_field_filter_backdrop(cx));
             root = root.child(self.render_field_filter_popup(cx));
         }
@@ -1019,7 +1077,9 @@ impl Render for GridView {
             root = root.child(panel);
         }
 
-        if self.state.show_footer {
+        if key_page {
+            root = root.child(self.render_key_page_footer(theme, cx));
+        } else if self.state.show_footer {
             root = root
                 .child(self.render_grid_controls(cx))
                 .child(self.render_grid_status(cx));
