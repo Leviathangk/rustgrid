@@ -1788,14 +1788,40 @@ impl AppView {
         // The grid takes the keyboard focus, so arrows / Tab work right after a tab switch.
         self.grid_focus_pending = index.is_some();
         // The toolbar section follows the tab: Tables for a table, Views for a view.
-        if let Some(grid) = index.and_then(|index| self.grids.get(index)) {
-            let state = &grid.read(cx).state;
-            if state.sql.is_none() {
-                self.main_tab = if state.is_view {
-                    MainTab::Views
-                } else {
-                    MainTab::Tables
-                };
+        let object_tab = index
+            .and_then(|index| self.grids.get(index))
+            .and_then(|grid| {
+                let grid = grid.read(cx);
+                if grid.state.sql.is_some() {
+                    return None;
+                }
+                Some((
+                    grid.state.is_view,
+                    grid.state.connection.clone(),
+                    grid.state.database.clone(),
+                ))
+            });
+        if let Some((is_view, connection, database)) = object_tab {
+            self.main_tab = if is_view {
+                MainTab::Views
+            } else {
+                MainTab::Tables
+            };
+            // Bring the connection tree to the tab's database: with tables open from several
+            // databases, the highlight must follow the tab on screen rather than stay where the
+            // last tree click left it.
+            if let Some(connection_index) = self.connection_index_of(&connection) {
+                if let Some(node) = self.connections.get_mut(connection_index) {
+                    node.expanded = true;
+                }
+                if let Some(database_index) =
+                    self.database_index_by_name(connection_index, &database)
+                {
+                    self.tree_selection.clear();
+                    self.tree_pane.update(cx, |pane, cx| {
+                        pane.select_database(connection_index, database_index, cx);
+                    });
+                }
             }
         }
         cx.notify();

@@ -1,11 +1,17 @@
-//! A searchable drop-down (combo box), backed by gpui-kit's shadcn [`Combobox`].
+//! A searchable drop-down (combo box), backed by gpui-kit's shadcn components.
+//!
+//! A single-select dropdown uses gpui-kit's `Select`, a multi-select one its `Combobox`. The two
+//! render the same shadcn trigger and popup (a search field over a row list with a check mark),
+//! but only `Select` closes on every item click: `Combobox` skips the close when the clicked row
+//! is already selected (it sees no selection change), which used to leave the filter builder's
+//! field dropdown hanging open when the current field was clicked again.
 //!
 //! The host owns one [`ComboBox`] entity per field and drives it through
 //! [`ComboBox::set_options`] / [`ComboBox::set_selected`], reacting to a pick through
 //! [`ComboBox::on_select`]. The popup, search field, keyboard navigation and overlay all come
 //! from the component library.
 //!
-//! gpui-kit's `ComboboxState` needs a `Window` to be constructed, but the app builds its combos
+//! gpui-kit's state types need a `Window` to be constructed, but the app builds its combos
 //! while the view is constructed. The state is therefore created on the first render and pending
 //! option/selection changes are flushed there.
 
@@ -18,7 +24,8 @@ use gpui::{
 use gpui_kit::component::Icon;
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
-use gpui_kit::component::{FocusableExt, Sizable};
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::{FocusableExt, IndexPath, Sizable};
 
 use crate::theme::Theme;
 
@@ -99,6 +106,15 @@ impl SearchableListItem for ComboOption {
 
 type ComboDelegate = SearchableVec<ComboOption>;
 type ComboState = ComboboxState<ComboDelegate>;
+type SingleSelectState = SelectState<ComboDelegate>;
+
+/// The gpui-kit state behind a [`ComboBox`]: `Select` for a single value, `Combobox` when the
+/// popup keeps several values selected.
+#[derive(Clone)]
+enum ComboBacking {
+    Single(Entity<SingleSelectState>),
+    Multiple(Entity<ComboState>),
+}
 
 pub(crate) struct ComboBox {
     theme: Theme,
@@ -125,7 +141,7 @@ pub(crate) struct ComboBox {
     on_select: Option<ComboSelectCallback>,
     on_select_many: Option<ComboSelectManyCallback>,
     /// The gpui-kit state, created on the first render.
-    state: Option<Entity<ComboState>>,
+    state: Option<ComboBacking>,
     subscriptions: Vec<Subscription>,
     pending_options: bool,
     pending_selected: bool,
@@ -265,10 +281,12 @@ impl ComboBox {
         if let Some(picked) = &self.picked {
             return Some(picked.clone());
         }
-        self.state
-            .as_ref()
-            .and_then(|state| state.read(cx).selected_value())
-            .or_else(|| (!self.selected.is_empty()).then(|| self.selected.clone()))
+        let selected = match self.state.as_ref() {
+            Some(ComboBacking::Single(state)) => state.read(cx).selected_value().cloned(),
+            Some(ComboBacking::Multiple(state)) => state.read(cx).selected_value(),
+            None => None,
+        };
+        selected.or_else(|| (!self.selected.is_empty()).then(|| self.selected.clone()))
     }
 
     pub(crate) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -313,35 +331,57 @@ impl ComboBox {
         if self.state.is_some() {
             return;
         }
-        let items = SearchableVec::new(self.options.clone());
-        let state = cx.new(|cx| {
-            ComboboxState::new(items, vec![], window, cx)
-                .multiple(self.multiple)
-                .searchable(true)
-        });
         // Deliver the pick immediately rather than on the next render. A host that reads its own
         // model in the meantime (the filter builder's 应用 is the one that bit users: the trigger
         // showed the new field while the applied condition still held the old one) then always sees
         // the value the user just chose.
-        self.subscriptions.push(cx.subscribe_in(
-            &state,
-            window,
-            |this, _state, event: &ComboboxEvent<ComboDelegate>, window, cx| {
-                if let ComboboxEvent::Change(values) = event {
-                    if this.multiple {
+        let state = if self.multiple {
+            let items = SearchableVec::new(self.options.clone());
+            let state = cx.new(|cx| {
+                ComboboxState::new(items, vec![], window, cx)
+                    .multiple(true)
+                    .searchable(true)
+            });
+            self.subscriptions.push(cx.subscribe_in(
+                &state,
+                window,
+                |this, _state, event: &ComboboxEvent<ComboDelegate>, window, cx| {
+                    if let ComboboxEvent::Change(values) = event {
                         this.picked_values = values.clone();
                         if let Some(callback) = this.on_select_many.clone() {
                             callback(values, window, cx);
                         }
-                    } else if let Some(value) = values.first() {
+                    }
+                },
+            ));
+            ComboBacking::Multiple(state)
+        } else {
+            // A single-select popup is `Select`, not `Combobox`: it closes on *every* item click,
+            // including the row that is already selected. `ComboboxState` compares the selection
+            // before/after and skips the close when nothing changed, which left the filter
+            // builder's field dropdown open when the current field was picked again.
+            let selected_index = self
+                .options
+                .iter()
+                .position(|option| option.value == self.selected)
+                .map(IndexPath::new);
+            let items = SearchableVec::new(self.options.clone());
+            let state =
+                cx.new(|cx| SelectState::new(items, selected_index, window, cx).searchable(true));
+            self.subscriptions.push(cx.subscribe_in(
+                &state,
+                window,
+                |this, _state, event: &SelectEvent<ComboDelegate>, window, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
                         this.picked = Some(value.clone());
                         if let Some(callback) = this.on_select.clone() {
                             callback(value, window, cx);
                         }
                     }
-                }
-            },
-        ));
+                },
+            ));
+            ComboBacking::Single(state)
+        };
         self.state = Some(state);
         self.pending_options = true;
         self.pending_selected = true;
@@ -355,50 +395,42 @@ impl ComboBox {
 
         if self.pending_options {
             self.pending_options = false;
-            let items = SearchableVec::new(self.options.clone());
-            state.update(cx, |state, cx| state.set_items(items, window, cx));
+            match &state {
+                ComboBacking::Single(state) => {
+                    let items = SearchableVec::new(self.options.clone());
+                    state.update(cx, |state, cx| state.set_items(items, window, cx));
+                }
+                ComboBacking::Multiple(state) => {
+                    let items = SearchableVec::new(self.options.clone());
+                    state.update(cx, |state, cx| state.set_items(items, window, cx));
+                }
+            }
         }
         if self.pending_selected {
             self.pending_selected = false;
             let selected = self.selected.clone();
             let selected_values = self.selected_values.clone();
-            let multiple = self.multiple;
-            state.update(cx, |state, cx| {
-                if multiple {
-                    state.set_selected_values(&selected_values, window, cx);
-                } else {
-                    state.set_selected_values(std::slice::from_ref(&selected), window, cx);
+            match &state {
+                ComboBacking::Single(state) => {
+                    state.update(cx, |state, cx| {
+                        state.set_selected_value(&selected, window, cx);
+                    });
                 }
-            });
+                ComboBacking::Multiple(state) => {
+                    state.update(cx, |state, cx| {
+                        state.set_selected_values(&selected_values, window, cx);
+                    });
+                }
+            }
         }
     }
 }
 
 impl Render for ComboBox {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.ensure_state(window, cx);
         self.flush(window, cx);
         let state = self.state.clone().expect("combo state");
-
-        let mut combo = Combobox::new(&state)
-            .placeholder(self.placeholder.clone())
-            .menu_width(px(self.width))
-            .cleanable(false)
-            .disabled(!self.enabled)
-            .focus_ring(false)
-            .xsmall();
-        if let Some(height) = self.height {
-            combo = combo.h(px(height));
-        }
-        if let Some(size) = self.text_size {
-            combo = combo.text_size(px(size));
-        }
-        if let Some(radius) = self.radius {
-            combo = combo.rounded(px(radius));
-        }
-        if let Some((icon, color)) = self.icon {
-            combo = combo.icon(Icon::default().path(icon).text_color(rgb(color)));
-        }
 
         let mut container = div();
         if self.full_width {
@@ -406,14 +438,61 @@ impl Render for ComboBox {
         } else if let Some(width) = self.field_width {
             container = container.w(px(width));
         }
-        container.child(combo)
+
+        let control = match &state {
+            ComboBacking::Single(state) => {
+                let mut select = Select::new(state)
+                    .placeholder(self.placeholder.clone())
+                    .menu_width(px(self.width))
+                    .cleanable(false)
+                    .disabled(!self.enabled)
+                    .focus_ring(false)
+                    .xsmall();
+                if let Some(height) = self.height {
+                    select = select.h(px(height));
+                }
+                if let Some(size) = self.text_size {
+                    select = select.text_size(px(size));
+                }
+                if let Some(radius) = self.radius {
+                    select = select.rounded(px(radius));
+                }
+                if let Some((icon, color)) = self.icon {
+                    select = select.icon(Icon::default().path(icon).text_color(rgb(color)));
+                }
+                select.into_any_element()
+            }
+            ComboBacking::Multiple(state) => {
+                let mut combo = Combobox::new(state)
+                    .placeholder(self.placeholder.clone())
+                    .menu_width(px(self.width))
+                    .cleanable(false)
+                    .disabled(!self.enabled)
+                    .focus_ring(false)
+                    .xsmall();
+                if let Some(height) = self.height {
+                    combo = combo.h(px(height));
+                }
+                if let Some(size) = self.text_size {
+                    combo = combo.text_size(px(size));
+                }
+                if let Some(radius) = self.radius {
+                    combo = combo.rounded(px(radius));
+                }
+                if let Some((icon, color)) = self.icon {
+                    combo = combo.icon(Icon::default().path(icon).text_color(rgb(color)));
+                }
+                combo.into_any_element()
+            }
+        };
+        container.child(control)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Bounds, Point, TestAppContext, WindowBounds, WindowOptions, size};
+    use gpui::{Bounds, Keystroke, Point, TestAppContext, WindowBounds, WindowOptions, size};
     use gpui_kit::TestSupportExt as _;
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
@@ -448,18 +527,24 @@ mod tests {
         ]
     }
 
-    fn query(harness: &Entity<ComboHarness>, cx: &App) -> String {
-        let combo = harness.read(cx).combo.read(cx);
-        let state = combo.state.clone().expect("combo state");
-        state.read(cx).query(cx).to_string()
-    }
-
-    fn open(cx: &mut TestAppContext) -> (gpui::AnyWindowHandle, Entity<ComboHarness>) {
+    fn open(
+        cx: &mut TestAppContext,
+        selected: &str,
+    ) -> (
+        gpui::AnyWindowHandle,
+        Entity<ComboHarness>,
+        Rc<std::cell::RefCell<Option<String>>>,
+    ) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
+            let picked = Rc::new(std::cell::RefCell::new(None::<String>));
+            let sink = picked.clone();
             let combo = cx.new(|cx| {
-                ComboBox::new(Theme::light(), options(), String::new(), 300.0, cx)
+                ComboBox::new(Theme::light(), options(), selected, 300.0, cx)
                     .field_width(300.0)
+                    .on_select(Rc::new(move |value, _window, _cx| {
+                        *sink.borrow_mut() = Some(value.to_string());
+                    }))
             });
             let harness = cx.new(|_| ComboHarness { combo, show: true });
             let (handle, _) = gpui_kit::open_window(
@@ -474,28 +559,67 @@ mod tests {
                 |_, _| harness.clone(),
             )
             .expect("open test window");
-            (handle, harness)
+            (handle, harness, picked)
         })
     }
 
-    #[gpui_kit::test]
-    fn combo_search_receives_input_in_a_plain_window(cx: &mut TestAppContext) {
-        let (handle, harness) = open(cx);
+    /// Type `text` into the open popup's search field (when non-empty) and confirm the first
+    /// match with Enter.
+    fn search_and_confirm(
+        handle: gpui::AnyWindowHandle,
+        cx: &mut TestAppContext,
+        text: &str,
+        picked: &Rc<std::cell::RefCell<Option<String>>>,
+    ) -> Option<String> {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.click("combo-host", cx);
             window.render_frame(cx);
-            window.input("mac", cx);
+            if !text.is_empty() {
+                window.input(text, cx);
+                window.render_frame(cx);
+            }
+        })
+        .unwrap();
+        // The list debounces the search for 100ms; let it settle so the filtered rows are built.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
             window.render_frame(cx);
         })
         .unwrap();
         cx.run_until_parked();
-        cx.read(|cx| assert_eq!(query(&harness, cx), "mac"));
+        picked.borrow().clone()
+    }
+
+    #[gpui_kit::test]
+    fn combo_search_receives_input_in_a_plain_window(cx: &mut TestAppContext) {
+        let (handle, _harness, picked) = open(cx, "utf8mb4");
+        assert_eq!(
+            search_and_confirm(handle, cx, "mac", &picked).as_deref(),
+            Some("macce"),
+            "typing `mac` should narrow the list to the first matching row"
+        );
+    }
+
+    /// Clicking the row that is already selected must still confirm (and close the popup). With
+    /// `ComboboxState` this emitted no event at all (it only reacts to a selection *change*), so the
+    /// filter builder's field dropdown stayed open when the current field was picked again.
+    #[gpui_kit::test]
+    fn combo_confirms_the_already_selected_row(cx: &mut TestAppContext) {
+        let (handle, _harness, picked) = open(cx, "macce");
+        assert_eq!(
+            search_and_confirm(handle, cx, "", &picked).as_deref(),
+            Some("macce")
+        );
     }
 
     #[gpui_kit::test]
     fn combo_search_receives_input_inside_a_dialog(cx: &mut TestAppContext) {
-        let (handle, harness) = open(cx);
+        let (handle, harness, picked) = open(cx, "utf8mb4");
         let combo = cx.read(|cx| harness.read(cx).combo.clone());
         // The harness must not render the combo itself, or it would appear twice (behind the
         // dialog and inside it).
@@ -522,15 +646,10 @@ mod tests {
         })
         .unwrap();
 
-        cx.update_window(handle, |_, window, cx| {
-            window.click("combo-host", cx);
-            window.render_frame(cx);
-            window.input("mac", cx);
-            window.render_frame(cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.read(|cx| assert_eq!(query(&harness, cx), "mac"));
+        assert_eq!(
+            search_and_confirm(handle, cx, "mac", &picked).as_deref(),
+            Some("macce")
+        );
     }
 
     /// The New/Edit Database dialog keeps a name field focused once and then lets the user move to
@@ -543,7 +662,7 @@ mod tests {
         use crate::app::ui::{TextInput, TextInputOptions};
         use std::cell::RefCell;
 
-        let (handle, harness) = open(cx);
+        let (handle, harness, picked) = open(cx, "utf8mb4");
         let combo = cx.read(|cx| harness.read(cx).combo.clone());
         harness.update(cx, |harness, cx| {
             harness.show = false;
@@ -599,14 +718,9 @@ mod tests {
         })
         .unwrap();
 
-        cx.update_window(handle, |_, window, cx| {
-            window.click("combo-host", cx);
-            window.render_frame(cx);
-            window.input("mac", cx);
-            window.render_frame(cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.read(|cx| assert_eq!(query(&harness, cx), "mac"));
+        assert_eq!(
+            search_and_confirm(handle, cx, "mac", &picked).as_deref(),
+            Some("macce")
+        );
     }
 }

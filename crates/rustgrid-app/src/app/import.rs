@@ -28,6 +28,11 @@ use super::*;
 /// progress updates.
 const IMPORT_BATCH_ROWS: usize = 500;
 
+/// How many per-row failure messages the run log keeps. A file whose rows all break a unique key
+/// would otherwise append thousands of lines and stall the window; the summary still counts every
+/// failure.
+const IMPORT_ERROR_LOG_LIMIT: usize = 100;
+
 impl AppView {
     // ----- Opening -----------------------------------------------------------------------------
 
@@ -938,8 +943,11 @@ impl AppView {
             .unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let mut imported_tables = 0usize;
+            // Targets that actually received rows, so their open grids can reload when the run ends.
+            let mut imported_targets: Vec<String> = Vec::new();
             let mut added = 0usize;
             let mut errors = 0usize;
+            let mut logged_errors = 0usize;
             let cancel_flag = cancel.clone();
 
             for plan in plans {
@@ -971,6 +979,7 @@ impl AppView {
                     };
                     if let Some(error) = error {
                         errors += 1;
+                        logged_errors += 1;
                         let message = t!(
                             "import.log.sheet_failed",
                             name = plan.sheet.clone(),
@@ -983,10 +992,11 @@ impl AppView {
                 }
 
                 let mut sheet_rows = 0usize;
-                let mut failed = false;
-                for chunk in plan.rows.chunks(IMPORT_BATCH_ROWS) {
+                let mut sheet_errors = 0usize;
+                let mut cancelled = false;
+                for (chunk_index, chunk) in plan.rows.chunks(IMPORT_BATCH_ROWS).enumerate() {
                     if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        failed = true;
+                        cancelled = true;
                         break;
                     }
                     let inserts: Vec<RowInsert> =
@@ -995,49 +1005,108 @@ impl AppView {
                         continue;
                     }
                     let count = inserts.len();
-                    let connection = connection.clone();
-                    let database = database.clone();
+                    let batch_connection = connection.clone();
+                    let batch_database = database.clone();
                     let target = plan.target.clone();
-                    let result =
-                        runtime
-                            .spawn(async move {
-                                connection.insert_rows(&database, &target, &inserts).await
-                            })
-                            .await;
+                    let result = runtime
+                        .spawn(async move {
+                            batch_connection
+                                .insert_rows(&batch_database, &target, &inserts)
+                                .await
+                        })
+                        .await;
                     let error = match result {
                         Ok(Ok(())) => None,
                         Ok(Err(error)) => Some(error.to_string()),
                         Err(error) => Some(error.to_string()),
                     };
-                    match error {
-                        None => {
-                            sheet_rows += count;
-                            added += count;
-                            let _ = this.update(cx, move |app, cx| {
-                                if let Some(wizard) = app.import_wizard.as_mut() {
-                                    wizard.rows_done += count;
-                                    wizard.added = added;
-                                    wizard.log_scroll.scroll_to_bottom();
-                                }
-                                cx.notify();
-                            });
-                        }
-                        Some(error) => {
-                            errors += 1;
-                            failed = true;
-                            let message = t!(
-                                "import.log.sheet_failed",
-                                name = plan.sheet.clone(),
-                                error = error
-                            )
-                            .to_string();
-                            let _ = this.update(cx, move |app, cx| app.import_log(message, cx));
+                    if error.is_none() {
+                        sheet_rows += count;
+                        added += count;
+                        let _ = this.update(cx, move |app, cx| {
+                            if let Some(wizard) = app.import_wizard.as_mut() {
+                                wizard.rows_done += count;
+                                wizard.added = added;
+                                wizard.errors = errors;
+                                wizard.log_scroll.scroll_to_bottom();
+                            }
+                            cx.notify();
+                        });
+                        continue;
+                    }
+
+                    // `insert_rows` is one transaction per call, so a single bad row (a duplicate
+                    // key, a value the column rejects, ...) rolled the whole batch back. Retry the
+                    // batch one row at a time to isolate the failures: every good row still lands
+                    // and the run carries on to the next row/table, instead of stopping here.
+                    let mut processed = 0usize;
+                    let mut chunk_added = 0usize;
+                    let mut messages: Vec<String> = Vec::new();
+                    for (offset, row) in chunk.iter().enumerate() {
+                        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            cancelled = true;
                             break;
                         }
+                        let insert = plan.insert_for(row);
+                        let connection = connection.clone();
+                        let database = database.clone();
+                        let target = plan.target.clone();
+                        let result = runtime
+                            .spawn(async move {
+                                connection
+                                    .insert_rows(&database, &target, std::slice::from_ref(&insert))
+                                    .await
+                            })
+                            .await;
+                        let error = match result {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(error.to_string()),
+                            Err(error) => Some(error.to_string()),
+                        };
+                        processed += 1;
+                        match error {
+                            None => {
+                                sheet_rows += 1;
+                                chunk_added += 1;
+                            }
+                            Some(error) => {
+                                sheet_errors += 1;
+                                errors += 1;
+                                if logged_errors < IMPORT_ERROR_LOG_LIMIT {
+                                    logged_errors += 1;
+                                    // The header is row 1 of the sheet, so the first data row is
+                                    // row 2 — the number the user sees in their spreadsheet.
+                                    messages.push(
+                                        t!(
+                                            "import.log.row_failed",
+                                            row = chunk_index * IMPORT_BATCH_ROWS + offset + 2,
+                                            error = error
+                                        )
+                                        .to_string(),
+                                    );
+                                }
+                            }
+                        }
                     }
+                    added += chunk_added;
+                    let _ = this.update(cx, move |app, cx| {
+                        if let Some(wizard) = app.import_wizard.as_mut() {
+                            wizard.rows_done += processed;
+                            wizard.added = added;
+                            wizard.errors = errors;
+                            wizard.log.extend(messages);
+                            wizard.log_scroll.scroll_to_bottom();
+                        }
+                        cx.notify();
+                    });
                 }
-                if !failed {
+                // A table counts as imported when it was created/processed and at least one row
+                // landed (or it had no rows to import at all).
+                if !cancelled && (sheet_rows > 0 || sheet_errors == 0) {
                     imported_tables += 1;
+                    if sheet_rows > 0 {
+                        imported_targets.push(plan.target.clone());
+                    }
                 }
                 let message = t!(
                     "import.log.sheet",
@@ -1048,8 +1117,15 @@ impl AppView {
                 let _ = this.update(cx, move |app, cx| app.import_log(message, cx));
             }
 
+            let suppressed_errors = errors.saturating_sub(logged_errors);
             let _ = this.update(cx, move |app, cx| {
-                app.import_finish(imported_tables, errors, cx)
+                app.import_finish(
+                    imported_tables,
+                    errors,
+                    suppressed_errors,
+                    imported_targets,
+                    cx,
+                )
             });
         })
         .detach();
@@ -1063,7 +1139,14 @@ impl AppView {
         cx.notify();
     }
 
-    fn import_finish(&mut self, imported_tables: usize, errors: usize, cx: &mut Context<'_, Self>) {
+    fn import_finish(
+        &mut self,
+        imported_tables: usize,
+        errors: usize,
+        suppressed_errors: usize,
+        imported_targets: Vec<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
         if let Some(wizard) = self.import_wizard.as_mut() {
             wizard.running = false;
             wizard.imported_tables = imported_tables;
@@ -1079,9 +1162,16 @@ impl AppView {
             wizard
                 .log
                 .push(t!("import.log.done", count = imported_tables, errors = errors).to_string());
+            if suppressed_errors > 0 {
+                wizard.log.push(
+                    t!("import.log.errors_suppressed", count = suppressed_errors).to_string(),
+                );
+            }
             wizard.log_scroll.scroll_to_bottom();
         }
-        // Re-fetch the database's tables so a newly created table shows up in the object tree.
+        // Re-fetch the database's tables so a newly created table shows up in the object tree, and
+        // reload the grids of every table that received rows, so the data page the wizard was
+        // launched from shows what was just imported.
         let target = self
             .import_wizard
             .as_ref()
@@ -1090,6 +1180,9 @@ impl AppView {
             && let Some(connection) = self.connection_arc(connection_index)
         {
             self.reload_database_tables(&connection, &database, cx);
+            for table in imported_targets {
+                self.refresh_table_grids(&connection, &database, &table, cx);
+            }
         }
         cx.notify();
     }

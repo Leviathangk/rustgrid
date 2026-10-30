@@ -464,6 +464,36 @@ impl TreePane {
         }
     }
 
+    /// Put the tree's cursor on a database row and scroll it into view. Used when a table/view tab
+    /// is brought to the front: the tree must show the database the active tab belongs to, even
+    /// when the user opened tables from several databases.
+    pub(super) fn select_database(
+        &mut self,
+        connection_index: usize,
+        database_index: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let id = format!("db-{connection_index}-{database_index}");
+        let changed = self.selected.as_deref() != Some(id.as_str());
+        if changed {
+            self.selected = Some(id.clone());
+            self.selected_table = None;
+            // The row may first be drawn (the connection was just expanded) by this frame, so
+            // reveal again once the frame has been painted.
+            let reveal_id = id.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(NAV_SETTLE).await;
+                let _ = this.update(cx, |tree, cx| {
+                    tree.reveal(&reveal_id);
+                    cx.notify();
+                });
+            })
+            .detach();
+            cx.notify();
+        }
+        self.reveal(&id);
+    }
+
     /// Right: expand a collapsed row, or step into an expanded row's first child.
     fn nav_expand(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let Some(index) = self.nav_index() else {
