@@ -39,6 +39,8 @@ struct TreeConnection {
     databases: Loadable<Vec<TreeDatabase>>,
     /// Saved queries belonging to this connection, across all its databases.
     saved_queries: Vec<TreeSavedQuery>,
+    /// Backup files and saved backup configurations belonging to this connection.
+    backups: Vec<TreeBackup>,
 }
 
 struct TreeDatabase {
@@ -112,6 +114,42 @@ struct TreeSavedQuery {
     name: String,
     /// The index into `AppView::query_files`, used to open it.
     index: usize,
+    /// The query list's selection key (`q:<path>`).
+    key: String,
+}
+
+/// Which kind of backup entry a tree leaf stands for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreeBackupKind {
+    File,
+    Config,
+}
+
+/// One backup file or saved configuration leaf under a database's Backups category.
+struct TreeBackup {
+    /// The database folder the backup belongs to, matching a `TreeDatabase`'s name.
+    database: String,
+    /// The entry's display name.
+    name: String,
+    /// Whether it is a `.rgbak` file or a saved configuration.
+    kind: TreeBackupKind,
+    /// The index into `AppView::backup_files` / `AppView::backup_configs`.
+    index: usize,
+    /// The backup list's selection key (`file:<name>` / `config:<name>`).
+    key: String,
+}
+
+/// The tree row id of a backup entry. The kind letter keeps file and configuration indices apart
+/// (both start at zero), and the database coordinates scope it like a query leaf.
+fn backup_tree_id(connection_index: usize, database_index: usize, backup: &TreeBackup) -> String {
+    let kind = match backup.kind {
+        TreeBackupKind::File => 'f',
+        TreeBackupKind::Config => 'c',
+    };
+    format!(
+        "bak-{connection_index}-{database_index}-{kind}-{}",
+        backup.index
+    )
 }
 
 fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
@@ -254,7 +292,34 @@ fn snapshot_connections(app: &AppView) -> Vec<TreeConnection> {
                         schema: file.schema.clone(),
                         name: file.name.clone(),
                         index,
+                        key: query::query_file_key(file),
                     })
+                    .collect(),
+                backups: app
+                    .backup_files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, file)| file.connection_id == node.profile.id)
+                    .map(|(index, file)| TreeBackup {
+                        database: file.database.clone(),
+                        name: file.name.clone(),
+                        kind: TreeBackupKind::File,
+                        index,
+                        key: backup::backup_file_key(&file.name),
+                    })
+                    .chain(
+                        app.backup_configs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, config)| config.connection_id == node.profile.id)
+                            .map(|(index, config)| TreeBackup {
+                                database: config.database.clone(),
+                                name: config.name.clone(),
+                                kind: TreeBackupKind::Config,
+                                index,
+                                key: backup::backup_config_key(&config.name),
+                            }),
+                    )
                     .collect(),
             }
         })
@@ -630,6 +695,38 @@ impl TreePane {
             cx.notify();
             return;
         }
+        if let Some(id) = self.selected.clone() {
+            if let Some(rest) = id.strip_prefix("qry-") {
+                let mut parts = rest.splitn(3, '-');
+                let _connection = parts.next();
+                let _database = parts.next();
+                let index = parts.next().and_then(|value| value.parse::<usize>().ok());
+                if let Some(index) = index {
+                    app.update(cx, |app, cx| app.begin_rename_query(index, window, cx));
+                    cx.notify();
+                    return;
+                }
+            }
+            if let Some(rest) = id.strip_prefix("bak-") {
+                let mut parts = rest.splitn(4, '-');
+                let _connection = parts.next();
+                let _database = parts.next();
+                let kind = parts.next();
+                let index = parts.next().and_then(|value| value.parse::<usize>().ok());
+                if let (Some(kind), Some(index)) = (kind, index) {
+                    let target = match kind {
+                        "f" => Some(BackupSelection::File(index)),
+                        "c" => Some(BackupSelection::Config(index)),
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        app.update(cx, |app, cx| app.begin_backup_rename(target, window, cx));
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        }
         let Some((connection_index, database_index, name, is_view)) = self.selected_table.clone()
         else {
             return;
@@ -692,7 +789,15 @@ impl TreePane {
         let Some(app) = self.app.upgrade() else {
             return;
         };
-        app.update(cx, |app, cx| app.submit_rename(cx));
+        app.update(cx, |app, cx| {
+            app.submit_rename(cx);
+            if app.query_rename.is_some() {
+                app.submit_query_rename(cx);
+            }
+            if app.backup_rename.is_some() {
+                app.submit_backup_rename(cx);
+            }
+        });
     }
 
     fn render_connection(
@@ -929,6 +1034,7 @@ impl TreePane {
                                 index,
                                 database,
                                 &connection.saved_queries,
+                                &connection.backups,
                                 connection.supports_routines,
                                 connection.supports_schemas,
                                 connection.supports_backups,
@@ -951,6 +1057,7 @@ impl TreePane {
         connection_index: usize,
         database: &TreeDatabase,
         saved_queries: &[TreeSavedQuery],
+        backups: &[TreeBackup],
         supports_routines: bool,
         supports_schemas: bool,
         supports_backups: bool,
@@ -1148,6 +1255,7 @@ impl TreePane {
                                     category,
                                     database,
                                     saved_queries,
+                                    backups,
                                     cx,
                                 ));
                             }
@@ -1159,6 +1267,7 @@ impl TreePane {
                                     database,
                                     schema,
                                     saved_queries,
+                                    backups,
                                     supports_routines,
                                     supports_backups,
                                     cx,
@@ -1290,6 +1399,7 @@ impl TreePane {
         database: &TreeDatabase,
         schema: &str,
         saved_queries: &[TreeSavedQuery],
+        backups: &[TreeBackup],
         supports_routines: bool,
         supports_backups: bool,
         cx: &mut Context<'_, Self>,
@@ -1421,6 +1531,7 @@ impl TreePane {
                         category,
                         database,
                         saved_queries,
+                        backups,
                         cx,
                     ));
                 }
@@ -1440,6 +1551,7 @@ impl TreePane {
         category: Category,
         database: &TreeDatabase,
         saved_queries: &[TreeSavedQuery],
+        backups: &[TreeBackup],
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -1703,7 +1815,31 @@ impl TreePane {
                         sub = sub.child(self.nav_row(element, nav));
                     }
                 }
-                _ => {}
+                Category::Backups => {
+                    for backup in backups
+                        .iter()
+                        .filter(|backup| backup.database == database.name)
+                    {
+                        let element =
+                            self.render_tree_backup(connection_index, database_index, backup, cx);
+                        // Enter opens it exactly as a double-click in the Backup list does: a
+                        // `.rgbak` file opens Restore, a saved configuration opens its dialog.
+                        let open_app = self.app.clone();
+                        let index = backup.index;
+                        let kind = backup.kind;
+                        let nav = NavRow::new(
+                            backup_tree_id(connection_index, database_index, backup),
+                            backup.name.clone(),
+                        )
+                        .opens(Rc::new(move |_this, _window, cx| {
+                            let _ = open_app.update(cx, |app, cx| match kind {
+                                TreeBackupKind::File => app.open_restore_backup(index, cx),
+                                TreeBackupKind::Config => app.open_backup_config(index, cx),
+                            });
+                        }));
+                        sub = sub.child(self.nav_row(element, nav));
+                    }
+                }
             }
         }
         self.nav_depth.set(depth);
@@ -1967,7 +2103,9 @@ impl TreePane {
     }
 
     /// One saved-query leaf under the connection tree's Queries category. A single click selects
-    /// it (and scopes the Queries main tab to its database); a double-click opens it.
+    /// it (and scopes the Queries main tab to its database); a double-click opens it. Ctrl/Shift
+    /// clicks extend the same selection the Queries list uses, and the row's context menu is the
+    /// list's.
     fn render_saved_query(
         &self,
         connection_index: usize,
@@ -1977,10 +2115,43 @@ impl TreePane {
     ) -> impl IntoElement {
         let theme = self.theme;
         let query_id = format!("qry-{connection_index}-{database_index}-{}", query.index);
-        let selected = self.selected.as_deref() == Some(query_id.as_str());
-        let name = query.name.clone();
+        let selected = self.selected.as_deref() == Some(query_id.as_str())
+            || self
+                .app
+                .upgrade()
+                .is_some_and(|app| app.read(cx).query_selection.contains(&query.key));
+        let rename = self.app.upgrade().and_then(|app| {
+            let app = app.read(cx);
+            (app.main_tab != MainTab::Queries)
+                .then(|| {
+                    app.query_rename
+                        .as_ref()
+                        .filter(|edit| edit.index == query.index)
+                        .map(|edit| edit.input.clone())
+                })
+                .flatten()
+        });
+        let name: AnyElement = match rename {
+            Some(input) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(20.0))
+                .child(ui::rename_field(theme, input))
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(query.name.clone())
+                .into_any_element(),
+        };
         let click_id = query_id.clone();
+        let click_key = query.key.clone();
         let app = self.app.clone();
+        let menu_app = self.app.clone();
+        let menu_id = query_id.clone();
+        let menu_key = query.key.clone();
         let file_index = query.index;
 
         div()
@@ -2009,24 +2180,182 @@ impl TreePane {
                 window.focus(&this.focus, cx);
                 this.selected = Some(click_id.clone());
                 let click_count = event.click_count();
+                let modifiers = event.modifiers();
+                let key = click_key.clone();
                 let _ = app.update(cx, |app, cx| {
-                    if app.click_opens(click_count, event.modifiers()) {
+                    app.hit_query(&key, click_count, modifiers, cx);
+                    if app.click_opens(click_count, modifiers) {
                         app.open_saved_query(file_index, cx);
                     }
                     cx.notify();
                 });
                 cx.notify();
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.commit_pending_rename(cx);
+                    window.focus(&this.focus, cx);
+                    this.selected_table = None;
+                    this.selected = Some(menu_id.clone());
+                    let key = menu_key.clone();
+                    let already = menu_app
+                        .upgrade()
+                        .is_some_and(|app| app.read(cx).query_selection.contains(&key));
+                    let _ = menu_app.update(cx, |app, cx| {
+                        if !already {
+                            app.hit_query(&key, 1, Modifiers::default(), cx);
+                        }
+                        app.context_menu = Some(ContextMenu {
+                            target: ContextTarget::QueryFile { index: file_index },
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                    cx.notify();
+                }),
+            )
             .child(chevron_spacer())
             .child(tree_icon("icons/queries.svg", theme.icon_queries))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(name),
+            .child(name)
+    }
+
+    /// One backup file or saved configuration leaf under the connection tree's Backups category.
+    /// It shares its selection and context menu with the Backup main tab's list, so Ctrl/Shift
+    /// clicks and the right-click actions operate on the same rows.
+    fn render_tree_backup(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        backup: &TreeBackup,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let id = backup_tree_id(connection_index, database_index, backup);
+        let selected = self.selected.as_deref() == Some(id.as_str())
+            || self
+                .app
+                .upgrade()
+                .is_some_and(|app| app.read(cx).backups_selection.contains(&backup.key));
+        let rename = self.app.upgrade().and_then(|app| {
+            let app = app.read(cx);
+            (app.main_tab != MainTab::Backups)
+                .then(|| {
+                    app.backup_rename
+                        .as_ref()
+                        .filter(|edit| match (edit.target, backup.kind) {
+                            (BackupSelection::File(index), TreeBackupKind::File)
+                            | (BackupSelection::Config(index), TreeBackupKind::Config) => {
+                                index == backup.index
+                            }
+                            _ => false,
+                        })
+                        .map(|edit| edit.input.clone())
+                })
+                .flatten()
+        });
+        let name: AnyElement = match rename {
+            Some(input) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(20.0))
+                .child(ui::rename_field(theme, input))
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(backup.name.clone())
+                .into_any_element(),
+        };
+        let click_id = id.clone();
+        let click_key = backup.key.clone();
+        let menu_id = id.clone();
+        let menu_key = backup.key.clone();
+        let index = backup.index;
+        let kind = backup.kind;
+        let app = self.app.clone();
+        let menu_app = self.app.clone();
+
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .h(px(22.0))
+            .pl(px(54.0))
+            .pr_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .when(selected, move |style| {
+                style
+                    .bg(rgb(theme.tree_active_bg))
+                    .text_color(rgb(theme.tree_active_text))
+            })
+            .when(!selected, move |style| {
+                style.hover(move |style| style.bg(rgb(theme.tree_hover_bg)))
+            })
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.commit_pending_rename(cx);
+                this.selected_table = None;
+                window.focus(&this.focus, cx);
+                this.selected = Some(click_id.clone());
+                let click_count = event.click_count();
+                let modifiers = event.modifiers();
+                let key = click_key.clone();
+                let _ = app.update(cx, |app, cx| {
+                    app.hit_backup(&key, click_count, modifiers, cx);
+                    if app.click_opens(click_count, modifiers) {
+                        match kind {
+                            TreeBackupKind::File => app.open_restore_backup(index, cx),
+                            TreeBackupKind::Config => app.open_backup_config(index, cx),
+                        }
+                    }
+                    cx.notify();
+                });
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.commit_pending_rename(cx);
+                    window.focus(&this.focus, cx);
+                    this.selected_table = None;
+                    this.selected = Some(menu_id.clone());
+                    let key = menu_key.clone();
+                    let already = menu_app
+                        .upgrade()
+                        .is_some_and(|app| app.read(cx).backups_selection.contains(&key));
+                    let _ = menu_app.update(cx, |app, cx| {
+                        if !already {
+                            app.hit_backup(&key, 1, Modifiers::default(), cx);
+                        }
+                        app.context_menu = Some(ContextMenu {
+                            target: match kind {
+                                TreeBackupKind::File => ContextTarget::BackupFile { index },
+                                TreeBackupKind::Config => ContextTarget::BackupConfig { index },
+                            },
+                            position: event.position,
+                        });
+                        cx.notify();
+                    });
+                    cx.notify();
+                }),
             )
+            .child(chevron_spacer())
+            .child(tree_icon(
+                match kind {
+                    TreeBackupKind::File => "icons/backups.svg",
+                    TreeBackupKind::Config => "icons/save.svg",
+                },
+                theme.icon_backups,
+            ))
+            .child(name)
     }
 
     /// Render one top-level or nested layout entry (a group or a connection).

@@ -519,6 +519,44 @@ impl AppView {
         })
     }
 
+    /// The schema the tree's current selection belongs to, if it names one. Table/query/backup
+    /// leaves inherit the pane's schema when that pane is already on the same database, so
+    /// switching main tabs does not widen a schema-qualified engine back to every schema.
+    fn tree_selection_schema(
+        &self,
+        connection_index: usize,
+        database_index: usize,
+        cx: &App,
+    ) -> Option<String> {
+        let selected = self.tree_pane.read(cx).selected.clone()?;
+        if let Some(rest) = selected.strip_prefix("schema-") {
+            let mut parts = rest.splitn(3, '-');
+            let connection = parts.next()?.parse::<usize>().ok()?;
+            let database = parts.next()?.parse::<usize>().ok()?;
+            let schema = parts.next()?;
+            if connection == connection_index && database == database_index {
+                return (!schema.is_empty()).then(|| schema.to_string());
+            }
+        }
+        if let Some(rest) = selected.strip_prefix("cat-") {
+            let mut parts = rest.splitn(3, '-');
+            let connection = parts.next()?.parse::<usize>().ok()?;
+            let database = parts.next()?.parse::<usize>().ok()?;
+            let tail = parts.next()?;
+            if connection == connection_index && database == database_index {
+                let schema = tail.rsplit_once('-').map(|(scope, _)| scope).unwrap_or("");
+                return (!schema.is_empty()).then(|| schema.to_string());
+            }
+        }
+        // Object leaves carry no schema in their id; keep the pane's scope when it matches.
+        self.object_pane.as_ref().and_then(|pane| {
+            let pane = pane.read(cx);
+            (pane.connection_index == connection_index && pane.database_index == database_index)
+                .then(|| pane.schema.clone())
+                .flatten()
+        })
+    }
+
     /// Move the connection tree's cursor onto `category`'s node under the currently selected
     /// database, so switching main tabs also moves the tree highlight.
     ///
@@ -614,7 +652,14 @@ impl AppView {
             MainTab::Queries => Category::Queries,
             _ => return,
         };
-        if let Some(pane) = self.object_pane.as_ref() {
+        // A main tab shows the objects of the database/schema selected in the tree, not whatever
+        // database the content pane happened to show last. Without this, opening a table in one
+        // database and then clicking 表 left the other database's list on screen while the tree
+        // highlighted the selected one.
+        if let Some((connection_index, database_index)) = self.tree_selection_scope(cx) {
+            let schema = self.tree_selection_schema(connection_index, database_index, cx);
+            self.show_object_category(connection_index, database_index, schema, category, cx);
+        } else if let Some(pane) = self.object_pane.as_ref() {
             pane.update(cx, |pane, cx| {
                 pane.category = category;
                 // Keep the pane's schema: a schema engine must keep showing only the schema the
@@ -655,7 +700,7 @@ impl AppView {
 /// Parse a connection-tree selection id (`db-` / `tbl-` / `cat-` / `qry-`) into its
 /// `(connection_index, database_index)` pair.
 fn parse_scope_id(id: &str) -> Option<(usize, usize)> {
-    let rest = ["db-", "tbl-", "cat-", "qry-"]
+    let rest = ["db-", "tbl-", "cat-", "qry-", "bak-"]
         .into_iter()
         .find_map(|prefix| id.strip_prefix(prefix))?;
     let mut parts = rest.splitn(3, '-');

@@ -15,6 +15,16 @@ impl AppView {
         database_index: usize,
         cx: &mut Context<'_, Self>,
     ) {
+        // Closing a database also closes the tabs it opened: its table/key pages and its
+        // table/routine/view designers. Query tabs (and their result grids) are the user's
+        // documents and stay open.
+        let connection = self.connection_arc(connection_index);
+        let database_name = self.database_name(connection_index, database_index);
+        if let (Some(connection), Some(database)) = (connection, database_name) {
+            self.close_database_grids(&connection, &database, cx);
+            self.close_database_designs(&connection, &database, cx);
+            self.settle_after_tab_closed(cx);
+        }
         if let Some(node) = self.connections.get_mut(connection_index)
             && let Loadable::Loaded(databases) = &mut node.databases
             && let Some(database) = databases.get_mut(database_index)

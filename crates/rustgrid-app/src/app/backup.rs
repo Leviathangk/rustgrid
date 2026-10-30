@@ -1826,7 +1826,7 @@ impl AppView {
     }
 
     /// Open the New Backup dialog for a saved configuration, pre-filling its selection.
-    fn open_backup_config(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+    pub(super) fn open_backup_config(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let Some(config) = self.backup_configs.get(index).cloned() else {
             return;
         };
@@ -4399,12 +4399,12 @@ impl BackupEntry {
 }
 
 /// The selection key of a backup file row.
-fn backup_file_key(name: &str) -> String {
+pub(super) fn backup_file_key(name: &str) -> String {
     format!("file:{name}")
 }
 
 /// The selection key of a saved backup configuration row.
-fn backup_config_key(name: &str) -> String {
+pub(super) fn backup_config_key(name: &str) -> String {
     format!("config:{name}")
 }
 

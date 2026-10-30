@@ -866,10 +866,13 @@ impl GridView {
                 row = row.child(rail_cell);
             }
         }
-        row = row
-            .child(field)
-            .child(operator)
-            .child(self.render_filter_value(&path, 0, cx));
+        row = row.child(field).child(operator);
+        // An operator that consumes no value (`是 null`, `不是空的`, ...) gets no value field at
+        // all: a disabled-looking box still read as an editable input, so hide the slot instead of
+        // leaving a placeholder behind. `Between` keeps its two fields.
+        if condition.operator.needs_value() {
+            row = row.child(self.render_filter_value(&path, 0, cx));
+        }
         if condition.operator.needs_second_value() {
             row = row
                 .child(

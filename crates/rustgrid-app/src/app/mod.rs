@@ -2017,7 +2017,7 @@ enum GridNav {
     PageSize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum MainTab {
     Tables,
     Views,
@@ -4007,6 +4007,37 @@ impl AppView {
         }
         // The multi-selection changes the row highlight, so it must invalidate the cached tree.
         self.tree_selection.items().hash(&mut hasher);
+        // Saved queries and backups are tree leaves: a save, rename or delete must redraw them,
+        // and the leaves paint the same selection their list does.
+        for file in &self.query_files {
+            file.name.hash(&mut hasher);
+            file.database.hash(&mut hasher);
+            file.schema.hash(&mut hasher);
+        }
+        self.query_selection.items().hash(&mut hasher);
+        for file in &self.backup_files {
+            file.name.hash(&mut hasher);
+            file.database.hash(&mut hasher);
+            file.connection_id.hash(&mut hasher);
+        }
+        for config in &self.backup_configs {
+            config.name.hash(&mut hasher);
+            config.database.hash(&mut hasher);
+            config.connection_id.hash(&mut hasher);
+        }
+        self.backups_selection.items().hash(&mut hasher);
+        self.main_tab.hash(&mut hasher);
+        self.query_rename
+            .as_ref()
+            .map(|edit| edit.index)
+            .hash(&mut hasher);
+        self.backup_rename
+            .as_ref()
+            .map(|edit| match edit.target {
+                BackupSelection::File(index) => (0u8, index),
+                BackupSelection::Config(index) => (1u8, index),
+            })
+            .hash(&mut hasher);
         hasher.finish()
     }
 
@@ -4326,6 +4357,20 @@ pub(super) fn parse_tree_scope(selected: &str) -> Option<(usize, usize, Option<S
             (!schema.is_empty()).then(|| schema.to_string()),
         ));
     }
+    // Query and backup leaves scope like their database row; their own schema (a query may be
+    // filed under one) is not encoded in the id, so the list's database scope is used.
+    if let Some(rest) = selected
+        .strip_prefix("qry-")
+        .or_else(|| selected.strip_prefix("bak-"))
+    {
+        let mut parts = rest.splitn(3, '-');
+        return Some((
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            None,
+        ));
+    }
+
     let rest = selected.strip_prefix("cat-")?;
     let mut parts = rest.splitn(3, '-');
     let connection_index = parts.next()?.parse().ok()?;
@@ -4938,7 +4983,10 @@ mod tests {
         assert_eq!(parse_tree_scope("cat-0-2--q"), Some((0, 2, None)));
         assert_eq!(parse_tree_scope("cat-0-2-q"), Some((0, 2, None)));
         assert_eq!(parse_tree_scope("cat-0-2-t"), Some((0, 2, None)));
-        // A leaf row does not scope a database.
+        // Query and backup leaves scope their database, like the list row they stand for.
+        assert_eq!(parse_tree_scope("qry-0-2-7"), Some((0, 2, None)));
+        assert_eq!(parse_tree_scope("bak-0-2-f-7"), Some((0, 2, None)));
+        // A table row does not scope a database.
         assert_eq!(parse_tree_scope("tbl-0-2-dbo.users"), None);
         assert_eq!(parse_tree_scope("conn-1"), None);
     }

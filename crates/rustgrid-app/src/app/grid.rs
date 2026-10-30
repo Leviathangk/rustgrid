@@ -98,6 +98,28 @@ impl AppView {
         });
     }
 
+    /// Close every table/key page opened from one database. Query result grids (`sql` is set)
+    /// belong to their query tab, not to the database browser, so they stay open.
+    pub(super) fn close_database_grids(
+        &mut self,
+        connection: &Arc<dyn Connection>,
+        database: &str,
+        cx: &App,
+    ) {
+        let active_id = self.active_grid_id(cx);
+        self.grids.retain(|grid| {
+            let grid = grid.read(cx);
+            !(grid.state.sql.is_none()
+                && grid.state.database == database
+                && Arc::ptr_eq(&grid.state.connection, connection))
+        });
+        self.active_grid = active_id.and_then(|id| {
+            self.grids
+                .iter()
+                .position(|grid| grid.read(cx).state.id == id)
+        });
+    }
+
     pub(super) fn cancel_delete(&mut self, cx: &mut Context<'_, Self>) {
         self.delete_confirm = None;
         cx.notify();

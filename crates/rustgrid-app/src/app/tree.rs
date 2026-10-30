@@ -957,7 +957,7 @@ impl AppView {
     /// category changes; any other scope builds a new pane. Rebuilding on every category click
     /// wiped that state (and made the 平铺网格 lay itself out again from an unmeasured viewport),
     /// which is what made the list visibly jump.
-    fn show_object_category(
+    pub(super) fn show_object_category(
         &mut self,
         connection_index: usize,
         database_index: usize,
@@ -1080,19 +1080,6 @@ impl AppView {
         }
         self.clear_tree_selection(cx);
         self.clear_info_selection();
-        if category == Category::Backups {
-            // Selecting the Backups category scopes the Backup main tab to this database. The
-            // backup files themselves live in the middle pane, not as tree leaves.
-            self.active_grid = None;
-            self.active_query = None;
-            self.active_design = None;
-            self.saved_query_selected = None;
-            self.query_selection.clear();
-            self.main_tab = MainTab::Backups;
-            self.refresh_backups(cx);
-            cx.notify();
-            return;
-        }
         let mut should_load = false;
         let mut should_load_routines = false;
         if let Some(node) = self.connections.get_mut(connection_index)
@@ -1124,6 +1111,21 @@ impl AppView {
             && let Some(name) = self.database_name(connection_index, database_index)
         {
             self.load_routines(connection_index, database_index, connection, name, cx);
+        }
+
+        if category == Category::Backups {
+            // Selecting the Backups category scopes the Backup main tab to this database and
+            // expands its leaves in the tree. There is no object-pane tab for backups: the main
+            // tab's own list is the content pane.
+            self.active_grid = None;
+            self.active_query = None;
+            self.active_design = None;
+            self.saved_query_selected = None;
+            self.query_selection.clear();
+            self.main_tab = MainTab::Backups;
+            self.refresh_backups(cx);
+            cx.notify();
+            return;
         }
 
         self.show_object_category(connection_index, database_index, schema, category, cx);

@@ -4585,6 +4585,28 @@ impl AppView {
         });
     }
 
+    /// Close the table/routine/view designers opened from one database.
+    pub(super) fn close_database_designs(
+        &mut self,
+        connection: &Arc<dyn Connection>,
+        database: &str,
+        cx: &App,
+    ) {
+        let active_id = self
+            .active_design
+            .and_then(|index| self.designs.get(index))
+            .map(|design| design.read(cx).id);
+        self.designs.retain(|design| {
+            let design = design.read(cx);
+            !(design.database == database && Arc::ptr_eq(&design.connection, connection))
+        });
+        self.active_design = active_id.and_then(|id| {
+            self.designs
+                .iter()
+                .position(|design| design.read(cx).id == id)
+        });
+    }
+
     /// Re-fetch the open data grids for a table after its structure changed in the designer.
     pub(super) fn refresh_table_grids(
         &mut self,
