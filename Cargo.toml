@@ -144,3 +144,22 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+# The default `debug = 2` writes the full DWARF of this dependency tree (GPUI, sqlx, tiberius,
+# oracledb, ...) into every executable. On windows-gnu `split-debuginfo` is off, so it all lands
+# inside `target/debug/deps/*.exe` — ~1.5 GB per binary, and every dependency-graph change leaves
+# another one behind. Line tables are what a panic/backtrace actually needs, so keep those and drop
+# the rest; third-party crates keep no debug info at all (their frames still resolve by symbol, and
+# the app's own frames — the ones we debug — keep file:line).
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
+
+# `cargo test --workspace` builds the same story for every integration-test binary.
+[profile.test]
+debug = 1
+
+[profile.test.package."*"]
+debug = false
