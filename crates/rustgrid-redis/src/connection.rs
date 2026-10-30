@@ -48,9 +48,6 @@ const STATUS_CONCURRENCY: usize = 16;
 /// The commands per `SCAN` round.
 const SCAN_COUNT: usize = 1000;
 
-/// How many keys one object-list page holds.
-const OBJECT_PAGE: usize = 200;
-
 /// How the client reaches the server.
 enum Mode {
     Standalone,
@@ -1364,49 +1361,17 @@ impl Connection for RedisConnection {
     async fn list_objects_page(
         &self,
         database: &str,
-        cursor: Option<&str>,
+        _cursor: Option<&str>,
         pattern: Option<&str>,
     ) -> Result<(Vec<TableInfo>, Option<String>)> {
         let db = self.db_for(Some(database))?;
         let pattern = pattern.map(str::trim).filter(|pattern| !pattern.is_empty());
-        // A cluster SCAN cursor belongs to one node, so the merged snapshot cannot be paged with
-        // it; cluster mode returns the (bounded) snapshot in one page instead.
-        if self.is_cluster() {
-            let keys = self.scan_keys(db, self.key_limit, pattern).await?;
-            return Ok((keys.into_iter().map(table_info).collect(), None));
-        }
-        let mut cursor = cursor
-            .map(str::to_string)
-            .filter(|cursor| !cursor.is_empty())
-            .unwrap_or_else(|| "0".to_string());
-        let mut keys = Vec::new();
-        loop {
-            let mut cmd = cmd_value("SCAN", &[cursor.as_str()]);
-            cmd.arg("MATCH")
-                .arg(pattern.unwrap_or("*"))
-                .arg("COUNT")
-                .arg(OBJECT_PAGE);
-            let value = self.run(db, &cmd).await?;
-            let Value::Array(parts) = value else {
-                break;
-            };
-            if let Some(next) = parts.first().and_then(reply::reply_text) {
-                cursor = next;
-            }
-            if let Some(Value::Array(batch)) = parts.get(1) {
-                for key in batch {
-                    if let Some(key) = reply::reply_text(key) {
-                        keys.push(key);
-                    }
-                }
-            }
-            if cursor == "0" || keys.len() >= OBJECT_PAGE {
-                break;
-            }
-        }
-        keys.sort();
-        let next = (cursor != "0").then_some(cursor);
-        Ok((keys.into_iter().map(table_info).collect(), next))
+        // Load the connection's configured key limit in one go (the 加载更多 pager was removed):
+        // `scan_keys` follows the SCAN cursor internally until the limit is reached or the whole
+        // keyspace was walked. A cluster has no cross-node cursor, and this path is the same
+        // bounded snapshot for it.
+        let keys = self.scan_keys(db, self.key_limit, pattern).await?;
+        Ok((keys.into_iter().map(table_info).collect(), None))
     }
 
     async fn list_namespaces(&self, database: &str) -> Result<Vec<ObjectNamespace>> {

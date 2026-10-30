@@ -306,7 +306,7 @@ impl GridView {
         let editable = self.key_page_editable() && self.state.editable;
         self.sync_key_string_editor(editable, cx);
         let raw = self.key_string_text.clone();
-        let pretty = serde_json::from_str::<serde_json::Value>(&raw)
+        let pretty = serde_json::from_str::<serde_json::Value>(&relax_json(&raw))
             .ok()
             .and_then(|value| serde_json::to_string_pretty(&value).ok());
         let json_mode = self.key_string_format == KeyStringFormat::Json && pretty.is_some();
@@ -557,5 +557,61 @@ impl GridView {
             });
         })
         .detach();
+    }
+}
+
+/// Make a Redis string parseable as JSON when it contains Java long literals.
+///
+/// Java serializers often emit `"dictCode": 103L` / `"dictSort": 2L`; strict JSON rejects the
+/// trailing `L`, which made the JSON view fall back to RAW even though every JSON formatter the
+/// user compared against accepted it. Strip an `L`/`l` that directly follows a digit **outside a
+/// string literal**; quoted text such as `"code": "103L"` is left untouched.
+fn relax_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escape = false;
+    let mut previous: Option<char> = None;
+    for ch in text.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            out.push(ch);
+            previous = Some(ch);
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            previous = Some(ch);
+            continue;
+        }
+        if (ch == 'L' || ch == 'l') && previous.is_some_and(|last| last.is_ascii_digit()) {
+            continue;
+        }
+        out.push(ch);
+        previous = Some(ch);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relax_json;
+
+    #[test]
+    fn relaxes_java_long_suffixes_outside_string_literals() {
+        assert_eq!(
+            relax_json(r#"{"dictCode":103L,"dictSort":2l}"#),
+            r#"{"dictCode":103,"dictSort":2}"#
+        );
+        assert_eq!(
+            relax_json(r#"{"code":"103L","literal":"a\\\"bL"}"#),
+            r#"{"code":"103L","literal":"a\\\"bL"}"#
+        );
     }
 }

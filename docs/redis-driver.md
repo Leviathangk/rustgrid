@@ -91,13 +91,13 @@ writes such as `JSON.SET`, and every grid edit.
 ## Key management and namespaces
 
 The object list is the key list. For key-value engines (`DriverCapability::KeyValue`) its detailed
-layout is # / 键名 / 类型 / TTL / 内存 and it is the **only** layout for a key list (the 详细列表 /
+layout is 键名 / 类型 / TTL / 内存 and it is the **only** layout for a key list (the 详细列表 /
 平铺网格 switch is not shown), the tree under a database shows the **namespace folders** (with key
-counts) instead of SQL categories, and the toolbar adds **新建键 / 设置 TTL / Redis 工具**. The
+counts) instead of SQL categories, and the toolbar adds **新建键 / 设置 TTL**. The
 database row itself is the all-keys view and carries the key count (the prototype's `(11)`); there
-is no separate 全部 row and no 查询 category under a Redis database. The key list shows **加载更多**
-while the last `SCAN` page left a cursor. The Redis tools window's 键 pane carries the same
-operations plus a namespace picker:
+is no separate 全部 row and no 查询 category under a Redis database. The key list is loaded in one
+go up to the connection's `redis.key_limit` (so there is no 加载更多 button). The Redis tools
+window's 键 pane carries the same operations plus a namespace picker:
 
 - **new key**: name, type (`string`/`hash`/`list`/`set`/`zset`/`stream`), field/member, value/score
   and an optional TTL;
@@ -118,13 +118,12 @@ carries the type badge, key name, type, TTL, memory and the available actions:
   are read-only. The table pages have a compact pager instead of the SQL WHERE/sort/field-layout
   toolbar and record toolbar.
 
-The object list holds at most `redis.key_limit` keys (default 1000) per *page load*; each 加载更多
-reads the next `SCAN` page (200 keys). Cluster mode has no cross-node cursor, so a cluster lists its
-bounded snapshot in one go.
+The object list holds at most `redis.key_limit` keys (default 1000), loaded in one SCAN pass; there
+is no 加载更多 button. Cluster mode lists its bounded snapshot in one go.
 
 ## Redis tools window
 
-An engine-agnostic OS window opened from the object toolbar (`redis_tools.rs`), showing:
+An engine-agnostic OS window opened by the object toolbar's **新建键 / 设置 TTL** actions, showing:
 
 | Section | What it does |
 | --- | --- |

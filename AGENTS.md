@@ -848,7 +848,7 @@ shadcn chrome described above. Implemented today:
     **namespace folders** (key prefixes with counts, from `list_namespaces`) instead of SQL
     categories; the database row itself is the all-keys view (the prototype's key count sits on
     it), so there is no 全部 row and no 查询 category under it. The Tables list is a key table
-    (# / 键名 / 类型 / TTL / 内存) that **always** uses the detailed layout (its 详细列表 / 平铺网格
+    (键名 / 类型 / TTL / 内存) that **always** uses the detailed layout (its 详细列表 / 平铺网格
     switch is not shown). **Every key opens on its own key page** (`app/grid_key.rs`), never the
     SQL grid: string/ReJSON keys get the prototype's RAW / JSON switch and a large editor (JSON is
     a read-only pretty print; invalid JSON falls back to RAW, with a warning), while hash, set,
@@ -856,8 +856,9 @@ shadcn chrome described above. Implemented today:
     ID/Field/Value table with 添加字段/添加成员/添加元素, 删除选中, 保存修改 and 刷新. Streams and
     ReJSON keys are read-only. The key header bar shows the type badge, key name, TTL, memory and
     collection actions; the table pages carry a compact pager instead of the SQL record toolbar,
-    WHERE/sort panels or field layout. The toolbar items are 打开键 / 新建键 / 设置 TTL / Redis 工具
-    / 加载更多 (`list_objects_page` returns a `SCAN` cursor); SQL-only designer/import/export items
+    WHERE/sort panels or field layout. The toolbar items are 打开键 / 新建键 / 设置 TTL / 刷新
+    (`list_objects_page` loads the configured `redis.key_limit` in one go, so there is no 加载更多
+    button); SQL-only designer/import/export items
     are hidden. The main ribbon keeps only 表 / 查询 for a Redis connection (the tools window still
     carries 慢日志 and 命令监控). The tools window
     (`app/redis_tools.rs`) is one OS window with five panes: 键 (create key, TTL, namespaces),
